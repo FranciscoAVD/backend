@@ -1,0 +1,21 @@
+import { validator } from "hono/validator";
+
+export const idParamValidator = validator("param", (value, c) => {
+  const id = value["id"];
+
+  if (!id || !Number.isInteger(parseInt(id ?? "")))
+    return c.json(
+      {
+        error: {
+          id: {
+            errors: ["Expected number but received a string."],
+          },
+        },
+        message: "Invalid param",
+      },
+      400,
+    );
+  return {
+    id: parseInt(id),
+  };
+});
