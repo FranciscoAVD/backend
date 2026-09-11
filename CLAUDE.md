@@ -20,6 +20,15 @@ When adding a new DB-backed resource (routes/use-cases/schemas, following the `f
 
 Don't reach for this namespace pattern for things that aren't DB-backed resources with insert/update/select variants (middleware options, adapter contracts like better-auth's `secondaryStorage`) — a plain type is correct there.
 
+# Logging
+
+When a route or use-case needs to log something (a caught error, a noteworthy state), use the shared pino instance from `@/lib/logger` — don't reach for `console.log`/`console.error`.
+
+- Call pino's native API directly: `logger.error(mergingObject, msg)`, `logger.warn(...)`, `logger.info(...)`, etc. There is no custom wrapper — `@/lib/logger` just exports the configured `pino()` instance.
+- The message (second argument) is a dot-scoped name identifying the call site, e.g. `"todo.add"`, `"auth.permission.todo.create"` (see `features/todo/routes/todo.ts` for the established scope-naming convention).
+- Put the error under the `err` key in the merging object (`{ err: error, ...meta }`) — pino's default serializer expands `.message`/`.stack` from that key in both dev (pretty) and prod (JSON) output.
+- Log level and dev/prod formatting (pretty vs. raw JSON) are controlled centrally in `src/lib/logger.ts` via `LOG_LEVEL`/`NODE_ENV` — don't configure logging per call site.
+
 # Bun
 
 Default to using Bun instead of Node.js.

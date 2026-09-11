@@ -20,7 +20,7 @@ A Hono + better-auth + Drizzle API, built on Bun. This isn't just a stack choice
 
 **Rate limiting matches the actual risk, not a blanket rule.** Pre-auth endpoints (sign-in, sign-up) are limited per-IP by better-auth itself, since there's no session yet to key on. Authenticated mutations are limited per-user, since IP-based limiting would punish shared networks for one abusive account. Reads stay unlimited unless there's a reason otherwise.
 
-**Prefer the platform over a dependency.** Bun's built-ins (`Bun.redis`, `Bun.sql`, `bun:test`) are used directly instead of `ioredis`, `pg`, or a test framework. Dependencies are added when they solve something the platform genuinely doesn't (Hono for routing, better-auth for auth, Drizzle for the query layer, Zod for validation) — not by default.
+**Prefer the platform over a dependency.** Bun's built-ins (`Bun.redis`, `Bun.sql`, `bun:test`) are used directly instead of `ioredis`, `pg`, or a test framework. Dependencies are added when they solve something the platform genuinely doesn't (Hono for routing, better-auth for auth, Drizzle for the query layer, Zod for validation, pino for structured/leveled logging) — not by default.
 
 ## Stack
 
@@ -29,6 +29,7 @@ A Hono + better-auth + Drizzle API, built on Bun. This isn't just a stack choice
 - **Auth:** better-auth (email/password, admin plugin, access-control roles)
 - **Database:** Postgres via Drizzle ORM (`drizzle-orm/bun-sql`)
 - **Cache / rate limiting:** Redis via `Bun.redis`
+- **Logging:** pino, shared by request logging (`hono-pino`) and app/error logging — structured JSON in production, pretty-printed in development, level set via `LOG_LEVEL`
 
 ## Local development
 
