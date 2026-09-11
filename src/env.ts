@@ -20,6 +20,10 @@ export const env = createEnv({
     DB_URL: z.url().optional(),
     // Redis
     REDIS_URL: z.url(),
+    // Logging
+    LOG_LEVEL: z
+      .enum(["fatal", "error", "warn", "info", "debug", "trace"])
+      .default("info"),
   },
   emptyStringAsUndefined: true,
   runtimeEnv: process.env,

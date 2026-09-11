@@ -1,12 +1,13 @@
 import { Hono } from "hono";
-import { logger } from "hono/logger";
+import { pinoLogger } from "hono-pino";
 import { cors } from "hono/cors";
 import { env } from "@/env";
+import { logger } from "@/lib/logger";
 import authRoute from "@f/auth/routes/auth";
 import todoRoute from "@f/todo/routes/todo";
 
 const app = new Hono().basePath("/api");
-app.use(logger());
+app.use(pinoLogger({ pino: logger }));
 app.use(
   "*",
   cors({

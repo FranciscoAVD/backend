@@ -35,7 +35,7 @@ app
     const { user } = c.get("session");
     const [res, error] = await tryCatch(getAllTodos({ userID: user.id }));
     if (error) {
-      logger.error("todo.getAll", error, { user: user.id });
+      logger.error({ err: error, user: user.id }, "todo.getAll");
       return c.json({ message: "Something went wrong. Try again later." }, 500);
     }
     return c.json({ data: res, message: "Todos found" }, 200);
@@ -47,7 +47,7 @@ app
     const [res, error] = await tryCatch(getTodo({ id, userID: user.id }));
 
     if (error) {
-      logger.error("todo.get", error, { user: user.id, todo: id });
+      logger.error({ err: error, user: user.id, todo: id }, "todo.get");
       return c.json({ message: "Something went wrong. Try again later." }, 500);
     }
 
@@ -88,9 +88,10 @@ app
       );
 
       if (canError) {
-        logger.error("auth.permission.todo.create", canError, {
-          user: user.id,
-        });
+        logger.error(
+          { err: canError, user: user.id },
+          "auth.permission.todo.create",
+        );
         return c.json(
           { message: "Something went wrong. Try again later." },
           500,
@@ -104,7 +105,7 @@ app
       );
 
       if (error) {
-        logger.error("todo.add", error, { user: user.id });
+        logger.error({ err: error, user: user.id }, "todo.add");
         return c.json(
           { message: "Something went wrong. Try again later." },
           500,
@@ -112,9 +113,10 @@ app
       }
 
       if (!res) {
-        logger.error("todo.add", new Error("Could not create todo"), {
-          user: user.id,
-        });
+        logger.error(
+          { err: new Error("Could not create todo"), user: user.id },
+          "todo.add",
+        );
         return c.json(
           { message: "Something went wrong. Try again later." },
           500,
@@ -158,10 +160,10 @@ app
       );
 
       if (canError) {
-        logger.error("auth.permission.todo.update", canError, {
-          todo: id,
-          user: user.id,
-        });
+        logger.error(
+          { err: canError, todo: id, user: user.id },
+          "auth.permission.todo.update",
+        );
         return c.json(
           { message: "Something went wrong. Try again later." },
           500,
@@ -175,7 +177,7 @@ app
       );
 
       if (error) {
-        logger.error("todo.update", error, { user: user.id });
+        logger.error({ err: error, user: user.id }, "todo.update");
         return c.json(
           { message: "Something went wrong. Try again later." },
           500,
@@ -203,10 +205,10 @@ app
     );
 
     if (canError) {
-      logger.error("auth.permission.todo.delete", canError, {
-        todo: id,
-        user: user.id,
-      });
+      logger.error(
+        { err: canError, todo: id, user: user.id },
+        "auth.permission.todo.delete",
+      );
       return c.json({ message: "Something went wrong. Try again later." }, 500);
     }
 
@@ -215,7 +217,7 @@ app
     const [res, error] = await tryCatch(deleteTodo({ id, userID: user.id }));
 
     if (error) {
-      logger.error("todo.delete", error, { user: user.id });
+      logger.error({ err: error, user: user.id }, "todo.delete");
       return c.json({ message: "Something went wrong. Try again later." }, 500);
     }
 
