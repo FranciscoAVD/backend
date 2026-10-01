@@ -17,6 +17,9 @@ export const auth = betterAuth({
     schema,
   }),
   trustedOrigins: [env.CLIENT_URL],
+  // without a `verification.storeInDatabase: true` override, having secondaryStorage
+  // set means verification records (email verification, password reset, OAuth state)
+  // live only in Redis, never in the DB `verification` table
   secondaryStorage: authSecondaryStorage,
   session: {
     // without this, secondaryStorage becomes the only session store
