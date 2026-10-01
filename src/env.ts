@@ -9,6 +9,9 @@ export const env = createEnv({
     BETTER_AUTH_URL: z.url(),
     BETTER_AUTH_SECRET: z.string().min(32),
     CLIENT_URL: z.url(),
+    // Payments
+    STRIPE_SECRET_KEY: z.string(),
+    STRIPE_WEBHOOK_SECRET: z.string(),
     // Database
     DB_PROVIDER: z.string(),
     DB_USER: z.string(),

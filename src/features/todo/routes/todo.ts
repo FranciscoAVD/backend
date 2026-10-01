@@ -10,6 +10,7 @@ import { insertTodoSchema, updateTodoSchema } from "@f/todo/lib/schemas";
 
 import { logger } from "@/lib/logger";
 import { tryCatch } from "@/lib/utils";
+import { HTTP_STATUS } from "@/lib/http-status";
 
 import { idParamValidator } from "@/lib/validators";
 
@@ -36,9 +37,12 @@ app
     const [res, error] = await tryCatch(getAllTodos({ userID: user.id }));
     if (error) {
       logger.error({ err: error, user: user.id }, "todo.getAll");
-      return c.json({ message: "Something went wrong. Try again later." }, 500);
+      return c.json(
+        { message: "Something went wrong. Try again later." },
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+      );
     }
-    return c.json({ data: res, message: "Todos found" }, 200);
+    return c.json({ data: res, message: "Todos found" }, HTTP_STATUS.SUCCESS);
   })
   .get("/:id", idParamValidator, async (c) => {
     const { user } = c.get("session");
@@ -48,12 +52,15 @@ app
 
     if (error) {
       logger.error({ err: error, user: user.id, todo: id }, "todo.get");
-      return c.json({ message: "Something went wrong. Try again later." }, 500);
+      return c.json(
+        { message: "Something went wrong. Try again later." },
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+      );
     }
 
     return !res
-      ? c.json({ message: "Todo not found" }, 404)
-      : c.json({ data: res, message: "Todo found" }, 200);
+      ? c.json({ message: "Todo not found" }, HTTP_STATUS.NOT_FOUND)
+      : c.json({ data: res, message: "Todo found" }, HTTP_STATUS.SUCCESS);
   })
   .use(writeRateLimit)
   .post(
@@ -66,7 +73,7 @@ app
             error: z.treeifyError(error).properties,
             message: "Failed to parse",
           },
-          422,
+          HTTP_STATUS.UNPROCESSABLE_ENTITY,
         );
       return {
         data,
@@ -94,11 +101,12 @@ app
         );
         return c.json(
           { message: "Something went wrong. Try again later." },
-          500,
+          HTTP_STATUS.INTERNAL_SERVER_ERROR,
         );
       }
 
-      if (!can.success) return c.json({ message: "Unauthorized" }, 403);
+      if (!can.success)
+        return c.json({ message: "Unauthorized" }, HTTP_STATUS.FORBIDDEN);
 
       const [res, error] = await tryCatch(
         addTodo({ userID: user.id }, body.data),
@@ -108,7 +116,7 @@ app
         logger.error({ err: error, user: user.id }, "todo.add");
         return c.json(
           { message: "Something went wrong. Try again later." },
-          500,
+          HTTP_STATUS.INTERNAL_SERVER_ERROR,
         );
       }
 
@@ -119,11 +127,14 @@ app
         );
         return c.json(
           { message: "Something went wrong. Try again later." },
-          500,
+          HTTP_STATUS.INTERNAL_SERVER_ERROR,
         );
       }
 
-      return c.json({ data: res, message: "Todo created" }, 201);
+      return c.json(
+        { data: res, message: "Todo created" },
+        HTTP_STATUS.CREATED,
+      );
     },
   )
   .patch(
@@ -137,7 +148,7 @@ app
             error: z.treeifyError(error).properties,
             message: "Failed to parse",
           },
-          422,
+          HTTP_STATUS.UNPROCESSABLE_ENTITY,
         );
       return {
         data,
@@ -166,11 +177,12 @@ app
         );
         return c.json(
           { message: "Something went wrong. Try again later." },
-          500,
+          HTTP_STATUS.INTERNAL_SERVER_ERROR,
         );
       }
 
-      if (!can.success) return c.json({ message: "Unauthorized" }, 403);
+      if (!can.success)
+        return c.json({ message: "Unauthorized" }, HTTP_STATUS.FORBIDDEN);
 
       const [res, error] = await tryCatch(
         updateTodo({ id, userID: user.id }, data),
@@ -180,13 +192,13 @@ app
         logger.error({ err: error, user: user.id }, "todo.update");
         return c.json(
           { message: "Something went wrong. Try again later." },
-          500,
+          HTTP_STATUS.INTERNAL_SERVER_ERROR,
         );
       }
 
       return !res
-        ? c.json({ message: "Todo not found" }, 404)
-        : c.body(null, 204);
+        ? c.json({ message: "Todo not found" }, HTTP_STATUS.NOT_FOUND)
+        : c.body(null, HTTP_STATUS.NO_CONTENT);
     },
   )
   .delete("/:id", idParamValidator, async (c) => {
@@ -209,21 +221,28 @@ app
         { err: canError, todo: id, user: user.id },
         "auth.permission.todo.delete",
       );
-      return c.json({ message: "Something went wrong. Try again later." }, 500);
+      return c.json(
+        { message: "Something went wrong. Try again later." },
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+      );
     }
 
-    if (!can.success) return c.json({ message: "Unauthorized" }, 403);
+    if (!can.success)
+      return c.json({ message: "Unauthorized" }, HTTP_STATUS.FORBIDDEN);
 
     const [res, error] = await tryCatch(deleteTodo({ id, userID: user.id }));
 
     if (error) {
       logger.error({ err: error, user: user.id }, "todo.delete");
-      return c.json({ message: "Something went wrong. Try again later." }, 500);
+      return c.json(
+        { message: "Something went wrong. Try again later." },
+        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+      );
     }
 
     return !res
-      ? c.json({ message: "Todo not found" }, 404)
-      : c.json({ message: "Todo deleted" }, 200);
+      ? c.json({ message: "Todo not found" }, HTTP_STATUS.NOT_FOUND)
+      : c.json({ message: "Todo deleted" }, HTTP_STATUS.SUCCESS);
   });
 
 export default app;

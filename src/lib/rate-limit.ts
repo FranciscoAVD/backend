@@ -1,6 +1,7 @@
 import { createMiddleware } from "hono/factory";
 import { redis } from "@/lib/redis";
 import type { RequireSessionEnv } from "@f/auth/middleware/require";
+import { HTTP_STATUS } from "@/lib/http-status";
 
 type RateLimitOptions = {
   /** Window size in seconds. */
@@ -25,7 +26,7 @@ export function rateLimiter({ windowSec, max, keyPrefix }: RateLimitOptions) {
       const retryAfter = await redis.ttl(key);
       return c.json(
         { message: "Too many requests. Please try again later." },
-        429,
+        HTTP_STATUS.TOO_MANY_REQUESTS,
         { "Retry-After": String(Math.max(retryAfter, 1)) },
       );
     }

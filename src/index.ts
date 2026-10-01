@@ -5,6 +5,7 @@ import { env } from "@/env";
 import { logger } from "@/lib/logger";
 import authRoute from "@f/auth/routes/auth";
 import todoRoute from "@f/todo/routes/todo";
+import paymentsRoute from "@f/payments/routes/payments";
 
 const app = new Hono().basePath("/api");
 app.use(pinoLogger({ pino: logger }));
@@ -17,6 +18,7 @@ app.use(
 );
 app.route("/auth", authRoute);
 app.route("/todo", todoRoute);
+app.route("/payments", paymentsRoute);
 
 export default {
   port: env.SERVER_PORT,

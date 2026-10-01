@@ -1,4 +1,5 @@
 import { validator } from "hono/validator";
+import { HTTP_STATUS } from "@/lib/http-status";
 
 export const idParamValidator = validator("param", (value, c) => {
   const id = value["id"];
@@ -13,7 +14,7 @@ export const idParamValidator = validator("param", (value, c) => {
         },
         message: "Invalid param",
       },
-      400,
+      HTTP_STATUS.BAD_REQUEST,
     );
   return {
     id: parseInt(id),
