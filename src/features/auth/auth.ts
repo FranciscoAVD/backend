@@ -4,8 +4,8 @@ import { admin as adminPlugin } from "better-auth/plugins/admin";
 import { db } from "@d/connection";
 import * as schema from "@d/schemas/auth-schema";
 import { env } from "@/env";
-import { authSecondaryStorage } from "@/lib/redis";
-import { ac, user, admin } from "./lib/permissions";
+import { authSecondaryStorage } from "@f/auth/lib/secondary-storage";
+import { ac, user, admin } from "@f/auth/lib/permissions";
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, {

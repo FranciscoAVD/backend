@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "bun run --hot src/index.ts",
     "db:push": "bun run drizzle-kit push",
-    "db:studio": "bun run drizzle-kit studio"
+    "db:studio": "bun run drizzle-kit studio",
+    "db:seed-admin": "bash ./src/features/auth/lib/seed-admin.sh"
   },
   "devDependencies": {
     "@types/bun": "latest",
