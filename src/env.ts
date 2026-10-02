@@ -16,12 +16,13 @@ export const env = createEnv({
     DB_PROVIDER: z.string(),
     DB_USER: z.string(),
     DB_PASSWORD: z.string().min(12),
-    DB_HOST: z.string(),
+    DB_HOST: z.string().optional().default("localhost"),
     DB_PORT: z.coerce.number(),
     DB_NAME: z.string(),
     // Prod
     DB_URL: z.url().optional(),
     // Redis
+    REDIS_PORT: z.coerce.number(),
     REDIS_URL: z.url(),
     // Logging
     LOG_LEVEL: z
