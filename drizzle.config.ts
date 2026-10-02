@@ -1,4 +1,4 @@
-import { DB_URL } from "@/db/connection";
+import { DB_URL } from "@/db/url";
 import { defineConfig } from "drizzle-kit";
 
 export default defineConfig({

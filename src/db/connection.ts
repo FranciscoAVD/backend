@@ -1,8 +1,5 @@
 import { drizzle } from "drizzle-orm/bun-sql";
-import { env } from "@/env";
+import { DB_URL } from "@/db/url";
 
-export const DB_URL =
-  env.DB_URL ??
-  (`${env.DB_PROVIDER}://${env.DB_USER}:${env.DB_PASSWORD}@${env.DB_HOST}:${env.DB_PORT}/${env.DB_NAME}` as const);
-
+export { DB_URL };
 export const db = drizzle(DB_URL);
