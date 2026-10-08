@@ -15,7 +15,7 @@ export const todo = pgTable(
   {
     id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
     userID: text("user_id")
-      .references(() => user.id)
+      .references(() => user.id, { onDelete: "cascade" })
       .notNull(),
     name: varchar("name", { length: 50 }).notNull(),
     isComplete: boolean("is_complete").notNull().default(false),
