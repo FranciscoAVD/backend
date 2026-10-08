@@ -1,18 +1,16 @@
 import { Hono } from "hono";
-import { validator } from "hono/validator";
 
 import { auth } from "@/features/auth/auth";
 import { sessionMiddleware } from "@f/auth/middleware/session";
 import { requireSessionMiddleware } from "@f/auth/middleware/require";
 
-import { z } from "zod";
 import { insertTodoSchema, updateTodoSchema } from "@f/todo/lib/schemas";
 
 import { logger } from "@/lib/logger";
 import { tryCatch } from "@/lib/utils";
 import { HTTP_STATUS } from "@/lib/http-status";
 
-import { idParamValidator } from "@/lib/validators";
+import { idParamValidator, jsonValidator } from "@/lib/validators";
 
 import { rateLimiter } from "@/lib/rate-limit";
 
@@ -65,20 +63,7 @@ app
   .use(writeRateLimit)
   .post(
     "/",
-    validator("json", (value, c) => {
-      const { success, data, error } = insertTodoSchema.safeParse(value);
-      if (!success)
-        return c.json(
-          {
-            error: z.treeifyError(error).properties,
-            message: "Failed to parse",
-          },
-          HTTP_STATUS.UNPROCESSABLE_ENTITY,
-        );
-      return {
-        data,
-      };
-    }),
+    jsonValidator(insertTodoSchema),
     async (c) => {
       const { user } = c.get("session");
       const body = c.req.valid("json");
@@ -140,20 +125,7 @@ app
   .patch(
     "/:id",
     idParamValidator,
-    validator("json", (value, c) => {
-      const { success, data, error } = updateTodoSchema.safeParse(value);
-      if (!success)
-        return c.json(
-          {
-            error: z.treeifyError(error).properties,
-            message: "Failed to parse",
-          },
-          HTTP_STATUS.UNPROCESSABLE_ENTITY,
-        );
-      return {
-        data,
-      };
-    }),
+    jsonValidator(updateTodoSchema),
     async (c) => {
       const { user } = c.get("session");
       const { id } = c.req.valid("param");

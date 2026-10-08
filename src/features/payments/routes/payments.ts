@@ -5,13 +5,14 @@ import { auth } from "@/features/auth/auth";
 import { sessionMiddleware } from "@f/auth/middleware/session";
 import { requireSessionMiddleware } from "@f/auth/middleware/require";
 
-import { z } from "zod";
 import { checkoutSchema, insertPlanSchema } from "@f/payments/lib/schemas";
 import { isCheckoutSessionId } from "@f/payments/lib/utils";
 
 import { logger } from "@/lib/logger";
 import { tryCatch } from "@/lib/utils";
 import { HTTP_STATUS } from "@/lib/http-status";
+
+import { jsonValidator } from "@/lib/validators";
 
 import { rateLimiter } from "@/lib/rate-limit";
 
@@ -112,20 +113,7 @@ app
   .use(writeRateLimit)
   .post(
     "/plans",
-    validator("json", (value, c) => {
-      const { success, data, error } = insertPlanSchema.safeParse(value);
-      if (!success)
-        return c.json(
-          {
-            error: z.treeifyError(error).properties,
-            message: "Failed to parse",
-          },
-          HTTP_STATUS.UNPROCESSABLE_ENTITY,
-        );
-      return {
-        data,
-      };
-    }),
+    jsonValidator(insertPlanSchema),
     async (c) => {
       const { user } = c.get("session");
       const body = c.req.valid("json");
@@ -206,20 +194,7 @@ app
   )
   .post(
     "/checkout",
-    validator("json", (value, c) => {
-      const { success, data, error } = checkoutSchema.safeParse(value);
-      if (!success)
-        return c.json(
-          {
-            error: z.treeifyError(error).properties,
-            message: "Failed to parse",
-          },
-          HTTP_STATUS.UNPROCESSABLE_ENTITY,
-        );
-      return {
-        data,
-      };
-    }),
+    jsonValidator(checkoutSchema),
     async (c) => {
       const { user } = c.get("session");
       const { data } = c.req.valid("json");
