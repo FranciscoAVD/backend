@@ -1,6 +1,6 @@
 import { env } from "@/env";
 import type { Payment } from "@f/payments/lib/types";
-import { payment } from "@f/payments/payment";
+import { getPaymentProcessor } from "@f/payments/payment";
 import {
   PENDING_CHECKOUT_TTL_SEC,
   getPendingCheckout,
@@ -27,7 +27,7 @@ export async function createCheckout(
   // also kept on the session so a confirmed payment can still be recorded if the Redis entry is gone
   const metadata = { userID: user.userID, planID: String(plan.id) };
 
-  const session = await payment.checkout.sessions.create({
+  const session = await getPaymentProcessor().checkout.sessions.create({
     mode: "payment",
     // users created before the stripe plugin was added have no customer yet
     ...(user.stripeCustomerId

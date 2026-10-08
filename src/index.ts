@@ -18,7 +18,9 @@ app.use(
 );
 app.route("/auth", authRoute);
 app.route("/todo", todoRoute);
-app.route("/payments", paymentsRoute);
+if (env.PAYMENTS_ENABLED) {
+  app.route("/payments", paymentsRoute);
+}
 
 export default {
   port: env.SERVER_PORT,

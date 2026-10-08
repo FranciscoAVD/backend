@@ -10,8 +10,9 @@ export const env = createEnv({
     BETTER_AUTH_SECRET: z.string().min(32),
     CLIENT_URL: z.url(),
     // Payments
-    STRIPE_SECRET_KEY: z.string(),
-    STRIPE_WEBHOOK_SECRET: z.string(),
+    PAYMENTS_ENABLED: z.stringbool().default(false),
+    STRIPE_SECRET_KEY: z.string().optional(),
+    STRIPE_WEBHOOK_SECRET: z.string().optional(),
     // Database
     DB_PROVIDER: z.string(),
     DB_USER: z.string(),
@@ -32,3 +33,12 @@ export const env = createEnv({
   emptyStringAsUndefined: true,
   runtimeEnv: process.env,
 });
+
+if (
+  env.PAYMENTS_ENABLED &&
+  (!env.STRIPE_SECRET_KEY || !env.STRIPE_WEBHOOK_SECRET)
+) {
+  throw new Error(
+    "PAYMENTS_ENABLED=true requires STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET",
+  );
+}

@@ -1,7 +1,7 @@
 import { db } from "@d/connection";
 import { plan as planTable } from "@d/schemas/payment-schema";
 import type { Payment } from "@f/payments/lib/types";
-import { payment } from "@f/payments/payment";
+import { getPaymentProcessor } from "@f/payments/payment";
 import { logger } from "@/lib/logger";
 import { tryCatch } from "@/lib/utils";
 
@@ -15,10 +15,11 @@ import { tryCatch } from "@/lib/utils";
 export async function addPlan(
   plan: Payment.Plan.Insert,
 ): Promise<Payment.Plan | null> {
-  const product = await payment.products.create({ name: plan.name });
+  const stripe = getPaymentProcessor();
+  const product = await stripe.products.create({ name: plan.name });
 
   try {
-    const price = await payment.prices.create({
+    const price = await stripe.prices.create({
       product: product.id,
       currency: plan.currency,
       unit_amount: plan.amount,
@@ -28,7 +29,7 @@ export async function addPlan(
     });
 
     const annualPrice = plan.annualAmount
-      ? await payment.prices.create({
+      ? await stripe.prices.create({
           product: product.id,
           currency: plan.currency,
           unit_amount: plan.annualAmount,
@@ -48,7 +49,7 @@ export async function addPlan(
     return res[0] ?? null;
   } catch (e) {
     const [, archiveError] = await tryCatch(
-      payment.products.update(product.id, { active: false }),
+      stripe.products.update(product.id, { active: false }),
     );
     if (archiveError)
       logger.warn(

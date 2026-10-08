@@ -252,7 +252,9 @@ app
           {
             userID: user.id,
             email: user.email,
-            stripeCustomerId: user.stripeCustomerId,
+            // only present when the stripe plugin is active, which it is whenever this route is reachable
+            stripeCustomerId: (user as { stripeCustomerId?: string | null })
+              .stripeCustomerId,
           },
           plan,
         ),

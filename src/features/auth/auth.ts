@@ -7,7 +7,7 @@ import { env } from "@/env";
 import { authSecondaryStorage } from "@f/auth/lib/secondary-storage";
 import { ac, user, admin } from "@f/auth/lib/permissions";
 import { stripe } from "@better-auth/stripe";
-import { payment } from "@f/payments/payment";
+import { getPaymentProcessor } from "@f/payments/payment";
 import { getSubscriptionPlans } from "@f/payments/use-cases/get-plans";
 import { handleStripeEvent } from "@f/payments/lib/webhook";
 
@@ -33,16 +33,20 @@ export const auth = betterAuth({
     enabled: true,
   },
   plugins: [
-    stripe({
-      stripeClient: payment,
-      stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET,
-      createCustomerOnSignUp: true,
-      subscription: {
-        enabled: true,
-        plans: getSubscriptionPlans,
-      },
-      onEvent: handleStripeEvent,
-    }),
+    ...(env.PAYMENTS_ENABLED
+      ? [
+          stripe({
+            stripeClient: getPaymentProcessor(),
+            stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET as string,
+            createCustomerOnSignUp: true,
+            subscription: {
+              enabled: true,
+              plans: getSubscriptionPlans,
+            },
+            onEvent: handleStripeEvent,
+          }),
+        ]
+      : []),
     adminPlugin({
       ac,
       roles: {
