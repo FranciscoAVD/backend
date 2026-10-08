@@ -38,7 +38,7 @@ async function resolveOwner(
   return userID && Number.isInteger(planID) ? { userID, planID } : null;
 }
 
-async function confirmCheckout(session: Stripe.Checkout.Session) {
+export async function confirmCheckout(session: Stripe.Checkout.Session) {
   const owner = await resolveOwner(session);
   if (!owner) {
     logger.error(
