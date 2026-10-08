@@ -9,7 +9,12 @@ import {
 } from "@f/payments/lib/pending-checkout";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import { updatePurchaseByPaymentIntent } from "@f/payments/use-cases/update-purchase";
-import { isAllowedEvent } from "@f/payments/lib/utils";
+import {
+  isAllowedEvent,
+  purchaseStatusFromDispute,
+  purchaseUpdateFromCharge,
+} from "@f/payments/lib/utils";
+import { getPaymentProcessor } from "@f/payments/payment";
 
 const idOf = (ref: string | { id: string } | null) =>
   typeof ref === "string" ? ref : (ref?.id ?? null);
@@ -68,9 +73,22 @@ async function updateByCharge(
   update: Parameters<typeof updatePurchaseByPaymentIntent>[1],
 ) {
   const stripePaymentIntentId = idOf(paymentIntent);
-  // charges without a matching purchase (e.g. subscription invoices) are ignored
-  if (stripePaymentIntentId)
-    await updatePurchaseByPaymentIntent({ stripePaymentIntentId }, update);
+  if (!stripePaymentIntentId) return;
+
+  const updated = await updatePurchaseByPaymentIntent(
+    { stripePaymentIntentId },
+    update,
+  );
+  if (updated) return;
+
+  // one of our checkouts whose purchase isn't recorded yet (its completed event is still
+  // being retried): fail so Stripe retries this one too instead of dropping it. Other
+  // charges without a purchase (e.g. subscription invoices) are ignored.
+  const intent = await getPaymentProcessor().paymentIntents.retrieve(
+    stripePaymentIntentId,
+  );
+  if (intent.metadata.planID)
+    throw new Error("Purchase not recorded yet for this payment intent");
 }
 
 /**
@@ -112,22 +130,23 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
       }
       case "charge.refunded": {
         const charge = event.data.object;
-        await updateByCharge(charge.payment_intent, {
-          amountRefunded: charge.amount_refunded,
-          // partial refunds keep the purchase paid
-          status: charge.refunded ? "refunded" : "paid",
-        });
+        await updateByCharge(
+          charge.payment_intent,
+          purchaseUpdateFromCharge(charge),
+        );
         return;
       }
       case "charge.dispute.created": {
         const dispute = event.data.object;
-        await updateByCharge(dispute.payment_intent, { status: "disputed" });
+        await updateByCharge(dispute.payment_intent, {
+          status: purchaseStatusFromDispute(dispute),
+        });
         return;
       }
       case "charge.dispute.closed": {
         const dispute = event.data.object;
         await updateByCharge(dispute.payment_intent, {
-          status: dispute.status === "lost" ? "refunded" : "paid",
+          status: purchaseStatusFromDispute(dispute),
         });
         return;
       }
