@@ -1,4 +1,4 @@
-import { redis } from "@/lib/redis";
+import { incrementWithTTL, redis } from "@/lib/redis";
 import { logger } from "@/lib/logger";
 import { tryCatch } from "@/lib/utils";
 /**
@@ -37,11 +37,9 @@ export const authSecondaryStorage = {
   },
   // fails open: 0 is under every limit, so rate limiting is off while Redis is down
   increment: async (key: string, ttl?: number) => {
-    const [count, error] = await tryCatch(async () => {
-      const count = await redis.incr(key);
-      if (count === 1 && ttl) await redis.expire(key, ttl);
-      return count;
-    });
+    const [count, error] = await tryCatch(
+      ttl ? incrementWithTTL(key, ttl) : redis.incr(key),
+    );
     if (error) logger.error({ err: error }, "auth.storage.increment");
     return count ?? 0;
   },

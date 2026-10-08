@@ -1,7 +1,9 @@
 import { createMiddleware } from "hono/factory";
-import { redis } from "@/lib/redis";
+import { incrementWithTTL, redis } from "@/lib/redis";
 import type { RequireSessionEnv } from "@f/auth/middleware/require";
 import { HTTP_STATUS } from "@/lib/http-status";
+import { logger } from "@/lib/logger";
+import { tryCatch } from "@/lib/utils";
 
 type RateLimitOptions = {
   /** Window size in seconds. */
@@ -17,13 +19,16 @@ export function rateLimiter({ windowSec, max, keyPrefix }: RateLimitOptions) {
     const { user } = c.get("session");
     const key = `ratelimit:${keyPrefix}:${user.id}`;
 
-    const count = await redis.incr(key);
-    if (count === 1) {
-      await redis.expire(key, windowSec);
+    // fails open: a Redis outage shouldn't take the write routes down with it
+    const [count, error] = await tryCatch(incrementWithTTL(key, windowSec));
+    if (error) {
+      logger.error({ err: error, user: user.id }, `ratelimit.${keyPrefix}`);
+      return next();
     }
 
     if (count > max) {
-      const retryAfter = await redis.ttl(key);
+      const [ttl] = await tryCatch(redis.ttl(key));
+      const retryAfter = ttl ?? windowSec;
       return c.json(
         { message: "Too many requests. Please try again later." },
         HTTP_STATUS.TOO_MANY_REQUESTS,
