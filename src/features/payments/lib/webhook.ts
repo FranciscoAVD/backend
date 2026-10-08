@@ -9,6 +9,7 @@ import {
 } from "@f/payments/lib/pending-checkout";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import { updatePurchaseByPaymentIntent } from "@f/payments/use-cases/update-purchase";
+import { isAllowedEvent } from "@f/payments/lib/utils";
 
 const idOf = (ref: string | { id: string } | null) =>
   typeof ref === "string" ? ref : (ref?.id ?? null);
@@ -78,6 +79,8 @@ async function updateByCharge(
  * confirms the payment. Errors are rethrown so the plugin answers 400 and Stripe retries.
  */
 export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
+  if (!isAllowedEvent(event)) return;
+
   try {
     switch (event.type) {
       case "checkout.session.completed": {
@@ -128,6 +131,9 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
         });
         return;
       }
+      default:
+        // compile error if an ALLOWED_EVENTS entry has no case above
+        event satisfies never;
     }
   } catch (error) {
     logger.error(
