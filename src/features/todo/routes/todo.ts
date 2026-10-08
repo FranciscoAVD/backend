@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 
-import { auth } from "@/features/auth/auth";
 import { sessionMiddleware } from "@f/auth/middleware/session";
 import { requireSessionMiddleware } from "@f/auth/middleware/require";
+import { requirePermission } from "@f/auth/middleware/permission";
 
 import { insertTodoSchema, updateTodoSchema } from "@f/todo/lib/schemas";
 
@@ -63,35 +63,11 @@ app
   .use(writeRateLimit)
   .post(
     "/",
+    requirePermission({ todo: ["create"] }),
     jsonValidator(insertTodoSchema),
     async (c) => {
       const { user } = c.get("session");
       const body = c.req.valid("json");
-
-      const [can, canError] = await tryCatch(
-        auth.api.userHasPermission({
-          body: {
-            userId: user.id,
-            permissions: {
-              todo: ["create"],
-            },
-          },
-        }),
-      );
-
-      if (canError) {
-        logger.error(
-          { err: canError, user: user.id },
-          "auth.permission.todo.create",
-        );
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP_STATUS.INTERNAL_SERVER_ERROR,
-        );
-      }
-
-      if (!can.success)
-        return c.json({ message: "Unauthorized" }, HTTP_STATUS.FORBIDDEN);
 
       const [res, error] = await tryCatch(
         addTodo({ userID: user.id }, body.data),
@@ -125,36 +101,12 @@ app
   .patch(
     "/:id",
     idParamValidator,
+    requirePermission({ todo: ["update"] }),
     jsonValidator(updateTodoSchema),
     async (c) => {
       const { user } = c.get("session");
       const { id } = c.req.valid("param");
       const { data } = c.req.valid("json");
-
-      const [can, canError] = await tryCatch(
-        auth.api.userHasPermission({
-          body: {
-            userId: user.id,
-            permissions: {
-              todo: ["update"],
-            },
-          },
-        }),
-      );
-
-      if (canError) {
-        logger.error(
-          { err: canError, todo: id, user: user.id },
-          "auth.permission.todo.update",
-        );
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP_STATUS.INTERNAL_SERVER_ERROR,
-        );
-      }
-
-      if (!can.success)
-        return c.json({ message: "Unauthorized" }, HTTP_STATUS.FORBIDDEN);
 
       const [res, error] = await tryCatch(
         updateTodo({ id, userID: user.id }, data),
@@ -173,48 +125,28 @@ app
         : c.body(null, HTTP_STATUS.NO_CONTENT);
     },
   )
-  .delete("/:id", idParamValidator, async (c) => {
-    const { id } = c.req.valid("param");
-    const { user } = c.get("session");
+  .delete(
+    "/:id",
+    idParamValidator,
+    requirePermission({ todo: ["delete"] }),
+    async (c) => {
+      const { id } = c.req.valid("param");
+      const { user } = c.get("session");
 
-    const [can, canError] = await tryCatch(
-      auth.api.userHasPermission({
-        body: {
-          userId: user.id,
-          permissions: {
-            todo: ["delete"],
-          },
-        },
-      }),
-    );
+      const [res, error] = await tryCatch(deleteTodo({ id, userID: user.id }));
 
-    if (canError) {
-      logger.error(
-        { err: canError, todo: id, user: user.id },
-        "auth.permission.todo.delete",
-      );
-      return c.json(
-        { message: "Something went wrong. Try again later." },
-        HTTP_STATUS.INTERNAL_SERVER_ERROR,
-      );
-    }
+      if (error) {
+        logger.error({ err: error, user: user.id }, "todo.delete");
+        return c.json(
+          { message: "Something went wrong. Try again later." },
+          HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        );
+      }
 
-    if (!can.success)
-      return c.json({ message: "Unauthorized" }, HTTP_STATUS.FORBIDDEN);
-
-    const [res, error] = await tryCatch(deleteTodo({ id, userID: user.id }));
-
-    if (error) {
-      logger.error({ err: error, user: user.id }, "todo.delete");
-      return c.json(
-        { message: "Something went wrong. Try again later." },
-        HTTP_STATUS.INTERNAL_SERVER_ERROR,
-      );
-    }
-
-    return !res
-      ? c.json({ message: "Todo not found" }, HTTP_STATUS.NOT_FOUND)
-      : c.json({ message: "Todo deleted" }, HTTP_STATUS.SUCCESS);
-  });
+      return !res
+        ? c.json({ message: "Todo not found" }, HTTP_STATUS.NOT_FOUND)
+        : c.json({ message: "Todo deleted" }, HTTP_STATUS.SUCCESS);
+    },
+  );
 
 export default app;

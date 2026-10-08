@@ -5,7 +5,7 @@ import {
   adminAc,
 } from "better-auth/plugins/admin/access";
 
-const statement = {
+export const statement = {
   ...defaultStatements,
   todo: ["create", "update", "delete"],
   plan: ["create"],

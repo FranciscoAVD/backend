@@ -1,9 +1,9 @@
 import { Hono } from "hono";
 import { validator } from "hono/validator";
 
-import { auth } from "@/features/auth/auth";
 import { sessionMiddleware } from "@f/auth/middleware/session";
 import { requireSessionMiddleware } from "@f/auth/middleware/require";
+import { requirePermission } from "@f/auth/middleware/permission";
 
 import { checkoutSchema, insertPlanSchema } from "@f/payments/lib/schemas";
 import { isCheckoutSessionId } from "@f/payments/lib/utils";
@@ -113,35 +113,11 @@ app
   .use(writeRateLimit)
   .post(
     "/plans",
+    requirePermission({ plan: ["create"] }),
     jsonValidator(insertPlanSchema),
     async (c) => {
       const { user } = c.get("session");
       const body = c.req.valid("json");
-
-      const [can, canError] = await tryCatch(
-        auth.api.userHasPermission({
-          body: {
-            userId: user.id,
-            permissions: {
-              plan: ["create"],
-            },
-          },
-        }),
-      );
-
-      if (canError) {
-        logger.error(
-          { err: canError, user: user.id },
-          "auth.permission.plan.create",
-        );
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP_STATUS.INTERNAL_SERVER_ERROR,
-        );
-      }
-
-      if (!can.success)
-        return c.json({ message: "Unauthorized" }, HTTP_STATUS.FORBIDDEN);
 
       // checked before touching Stripe so a duplicate doesn't create an orphan product
       const [existing, existingError] = await tryCatch(
