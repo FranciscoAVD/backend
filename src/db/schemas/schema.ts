@@ -20,7 +20,10 @@ export const todo = pgTable(
     name: varchar("name", { length: 50 }).notNull(),
     isComplete: boolean("is_complete").notNull().default(false),
     createdAt: timestamp("created_at").notNull().defaultNow(),
-    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at")
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
   },
   (t) => [index("todo_user_idx").on(t.userID)],
 );
