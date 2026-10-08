@@ -42,3 +42,11 @@ bun run dev                # bun run --hot src/index.ts
 Seed an admin user with `./src/features/auth/lib/seed-admin.sh` (creates `admin@verified.com` with the `admin` role via better-auth's CLI).
 
 See `CLAUDE.md` for Bun-specific conventions (APIs to prefer, testing).
+
+## Logs in production
+
+In production, pino writes structured JSON to stdout and keeps nothing itself. To make logs durable, ship stdout from the platform rather than from the app: a Docker logging driver, a Kubernetes collector (Fluent Bit, Vector), or a host's log drain, into a store such as Loki, Elasticsearch/OpenSearch, CloudWatch, Datadog or Axiom. Set retention in that store. The app stays unaware of where its logs go.
+
+If a project needs the app to ship logs itself, add a pino transport (`pino-roll` for rotating files, `pino-loki`, `pino-elasticsearch`, `@axiomhq/pino`, …) in `src/lib/logger.ts`, next to the dev-only `pino-pretty` one. The right target varies per deployment, so the template doesn't pick one.
+
+Shipped logs make a convenience-grade audit trail: good for "who did what last Tuesday", but not for compliance. See `AUDITING.md`.
