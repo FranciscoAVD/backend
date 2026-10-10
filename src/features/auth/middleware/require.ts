@@ -11,7 +11,7 @@ export const requireSessionMiddleware = createMiddleware<RequireSessionEnv>(
   async (c, next) => {
     const session = c.get("session") as SessionEnv["Variables"]["session"];
     if (!session) {
-      return c.json({ message: "Unauthorized" }, HTTP_STATUS.UNAUTHORIZED);
+      return c.json({ message: "Unauthenticated" }, HTTP_STATUS.UNAUTHORIZED);
     }
     await next();
   },
