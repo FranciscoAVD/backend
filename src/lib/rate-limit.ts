@@ -1,9 +1,9 @@
 import { createMiddleware } from "hono/factory";
 import { incrementWithTTL, redis } from "@/lib/redis";
-import type { RequireSessionEnv } from "@f/auth/middleware/require";
-import { HTTP_STATUS } from "@/lib/http-status";
+import type { RequireSessionEnv } from "@f/auth/middleware";
+import HTTP from "@vicstack/http";
 import { logger } from "@/lib/logger";
-import { tryCatch } from "@/lib/utils";
+import tryCatch from "@vicstack/try-catch";
 
 type RateLimitOptions = {
   /** Window size in seconds. */
@@ -31,7 +31,7 @@ export function rateLimiter({ windowSec, max, keyPrefix }: RateLimitOptions) {
       const retryAfter = ttl ?? windowSec;
       return c.json(
         { message: "Too many requests. Please try again later." },
-        HTTP_STATUS.TOO_MANY_REQUESTS,
+        HTTP.TooManyRequests,
         { "Retry-After": String(Math.max(retryAfter, 1)) },
       );
     }

@@ -1,6 +1,6 @@
 import type Stripe from "stripe";
 import { logger } from "@/lib/logger";
-import { tryCatch } from "@/lib/utils";
+import tryCatch from "@vicstack/try-catch";
 import type { PendingCheckout } from "@f/payments/lib/pending-checkout";
 import {
   getPendingCheckout,

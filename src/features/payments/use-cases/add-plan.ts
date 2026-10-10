@@ -3,7 +3,7 @@ import { plan as planTable } from "@d/schemas/payment-schema";
 import type { Payment } from "@f/payments/lib/types";
 import { getPaymentProcessor } from "@f/payments/payment";
 import { logger } from "@/lib/logger";
-import { tryCatch } from "@/lib/utils";
+import tryCatch from "@vicstack/try-catch";
 
 /**
  * @description Creates the Stripe product and price(s) for a plan, then inserts the plan.

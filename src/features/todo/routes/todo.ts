@@ -1,14 +1,16 @@
 import { Hono } from "hono";
 
-import { sessionMiddleware } from "@f/auth/middleware/session";
-import { requireSessionMiddleware } from "@f/auth/middleware/require";
-import { requirePermission } from "@f/auth/middleware/permission";
+import {
+  sessionMiddleware,
+  requireSessionMiddleware,
+  requirePermissionMiddleware,
+} from "@f/auth/middleware";
 
 import { insertTodoSchema, updateTodoSchema } from "@f/todo/lib/schemas";
 
 import { logger } from "@/lib/logger";
-import { tryCatch } from "@/lib/utils";
-import { HTTP_STATUS } from "@/lib/http-status";
+import tryCatch from "@vicstack/try-catch";
+import HTTP from "@vicstack/http";
 
 import { idParamValidator, jsonValidator } from "@/lib/validators";
 
@@ -37,10 +39,10 @@ app
       logger.error({ err: error, user: user.id }, "todo.getAll");
       return c.json(
         { message: "Something went wrong. Try again later." },
-        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        HTTP.InternalServerError,
       );
     }
-    return c.json({ data: res, message: "Todos found" }, HTTP_STATUS.SUCCESS);
+    return c.json({ data: res, message: "Todos found" }, HTTP.Success);
   })
   .get("/:id", idParamValidator, async (c) => {
     const { user } = c.get("session");
@@ -52,18 +54,18 @@ app
       logger.error({ err: error, user: user.id, todo: id }, "todo.get");
       return c.json(
         { message: "Something went wrong. Try again later." },
-        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        HTTP.InternalServerError,
       );
     }
 
     return !res
-      ? c.json({ message: "Todo not found" }, HTTP_STATUS.NOT_FOUND)
-      : c.json({ data: res, message: "Todo found" }, HTTP_STATUS.SUCCESS);
+      ? c.json({ message: "Todo not found" }, HTTP.NotFound)
+      : c.json({ data: res, message: "Todo found" }, HTTP.Success);
   })
   .use(writeRateLimit)
   .post(
     "/",
-    requirePermission({ todo: ["create"] }),
+    requirePermissionMiddleware({ todo: ["create"] }),
     jsonValidator(insertTodoSchema),
     async (c) => {
       const { user } = c.get("session");
@@ -77,7 +79,7 @@ app
         logger.error({ err: error, user: user.id }, "todo.add");
         return c.json(
           { message: "Something went wrong. Try again later." },
-          HTTP_STATUS.INTERNAL_SERVER_ERROR,
+          HTTP.InternalServerError,
         );
       }
 
@@ -88,20 +90,20 @@ app
         );
         return c.json(
           { message: "Something went wrong. Try again later." },
-          HTTP_STATUS.INTERNAL_SERVER_ERROR,
+          HTTP.InternalServerError,
         );
       }
 
       return c.json(
         { data: res, message: "Todo created" },
-        HTTP_STATUS.CREATED,
+        HTTP.Created,
       );
     },
   )
   .patch(
     "/:id",
     idParamValidator,
-    requirePermission({ todo: ["update"] }),
+    requirePermissionMiddleware({ todo: ["update"] }),
     jsonValidator(updateTodoSchema),
     async (c) => {
       const { user } = c.get("session");
@@ -116,19 +118,19 @@ app
         logger.error({ err: error, user: user.id }, "todo.update");
         return c.json(
           { message: "Something went wrong. Try again later." },
-          HTTP_STATUS.INTERNAL_SERVER_ERROR,
+          HTTP.InternalServerError,
         );
       }
 
       return !res
-        ? c.json({ message: "Todo not found" }, HTTP_STATUS.NOT_FOUND)
-        : c.body(null, HTTP_STATUS.NO_CONTENT);
+        ? c.json({ message: "Todo not found" }, HTTP.NotFound)
+        : c.body(null, HTTP.NoContent);
     },
   )
   .delete(
     "/:id",
     idParamValidator,
-    requirePermission({ todo: ["delete"] }),
+    requirePermissionMiddleware({ todo: ["delete"] }),
     async (c) => {
       const { id } = c.req.valid("param");
       const { user } = c.get("session");
@@ -139,13 +141,13 @@ app
         logger.error({ err: error, user: user.id }, "todo.delete");
         return c.json(
           { message: "Something went wrong. Try again later." },
-          HTTP_STATUS.INTERNAL_SERVER_ERROR,
+          HTTP.InternalServerError,
         );
       }
 
       return !res
-        ? c.json({ message: "Todo not found" }, HTTP_STATUS.NOT_FOUND)
-        : c.json({ message: "Todo deleted" }, HTTP_STATUS.SUCCESS);
+        ? c.json({ message: "Todo not found" }, HTTP.NotFound)
+        : c.json({ message: "Todo deleted" }, HTTP.Success);
     },
   );
 

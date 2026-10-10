@@ -1,16 +1,18 @@
 import { Hono } from "hono";
 import { validator } from "hono/validator";
 
-import { sessionMiddleware } from "@f/auth/middleware/session";
-import { requireSessionMiddleware } from "@f/auth/middleware/require";
-import { requirePermission } from "@f/auth/middleware/permission";
+import {
+  sessionMiddleware,
+  requireSessionMiddleware,
+  requirePermissionMiddleware,
+} from "@f/auth/middleware";
 
 import { checkoutSchema, insertPlanSchema } from "@f/payments/lib/schemas";
 import { isCheckoutSessionId } from "@f/payments/lib/utils";
 
 import { logger } from "@/lib/logger";
-import { tryCatch } from "@/lib/utils";
-import { HTTP_STATUS } from "@/lib/http-status";
+import tryCatch from "@vicstack/try-catch";
+import HTTP from "@vicstack/http";
 
 import { jsonValidator } from "@/lib/validators";
 
@@ -44,7 +46,7 @@ const sessionIdParamValidator = validator("param", (value, c) => {
         },
         message: "Invalid param",
       },
-      HTTP_STATUS.BAD_REQUEST,
+      HTTP.BadRequest,
     );
   return { sessionId };
 });
@@ -61,10 +63,10 @@ app
       logger.error({ err: error, user: user.id }, "payments.plan.getAll");
       return c.json(
         { message: "Something went wrong. Try again later." },
-        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        HTTP.InternalServerError,
       );
     }
-    return c.json({ data: res, message: "Plans found" }, HTTP_STATUS.SUCCESS);
+    return c.json({ data: res, message: "Plans found" }, HTTP.Success);
   })
   .get("/purchases", async (c) => {
     const { user } = c.get("session");
@@ -73,12 +75,12 @@ app
       logger.error({ err: error, user: user.id }, "payments.purchase.getAll");
       return c.json(
         { message: "Something went wrong. Try again later." },
-        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        HTTP.InternalServerError,
       );
     }
     return c.json(
       { data: res, message: "Purchases found" },
-      HTTP_STATUS.SUCCESS,
+      HTTP.Success,
     );
   })
   .get("/checkout/:sessionId", sessionIdParamValidator, async (c) => {
@@ -99,21 +101,21 @@ app
       );
       return c.json(
         { message: "Something went wrong. Try again later." },
-        HTTP_STATUS.INTERNAL_SERVER_ERROR,
+        HTTP.InternalServerError,
       );
     }
 
     return !res
-      ? c.json({ message: "Checkout not found" }, HTTP_STATUS.NOT_FOUND)
+      ? c.json({ message: "Checkout not found" }, HTTP.NotFound)
       : c.json(
           { data: { status: res }, message: "Checkout found" },
-          HTTP_STATUS.SUCCESS,
+          HTTP.Success,
         );
   })
   .use(writeRateLimit)
   .post(
     "/plans",
-    requirePermission({ plan: ["create"] }),
+    requirePermissionMiddleware({ plan: ["create"] }),
     jsonValidator(insertPlanSchema),
     async (c) => {
       const { user } = c.get("session");
@@ -131,14 +133,14 @@ app
         );
         return c.json(
           { message: "Something went wrong. Try again later." },
-          HTTP_STATUS.INTERNAL_SERVER_ERROR,
+          HTTP.InternalServerError,
         );
       }
 
       if (existing)
         return c.json(
           { message: "A plan with that name already exists" },
-          HTTP_STATUS.CONFLICT,
+          HTTP.Conflict,
         );
 
       const [res, error] = await tryCatch(addPlan(body.data));
@@ -147,7 +149,7 @@ app
         logger.error({ err: error, user: user.id }, "payments.plan.add");
         return c.json(
           { message: "Something went wrong. Try again later." },
-          HTTP_STATUS.INTERNAL_SERVER_ERROR,
+          HTTP.InternalServerError,
         );
       }
 
@@ -158,13 +160,13 @@ app
         );
         return c.json(
           { message: "Something went wrong. Try again later." },
-          HTTP_STATUS.INTERNAL_SERVER_ERROR,
+          HTTP.InternalServerError,
         );
       }
 
       return c.json(
         { data: res, message: "Plan created" },
-        HTTP_STATUS.CREATED,
+        HTTP.Created,
       );
     },
   )
@@ -184,18 +186,18 @@ app
         );
         return c.json(
           { message: "Something went wrong. Try again later." },
-          HTTP_STATUS.INTERNAL_SERVER_ERROR,
+          HTTP.InternalServerError,
         );
       }
 
       if (!plan || !plan.active)
-        return c.json({ message: "Plan not found" }, HTTP_STATUS.NOT_FOUND);
+        return c.json({ message: "Plan not found" }, HTTP.NotFound);
 
       // subscriptions go through better-auth's /api/auth/subscription/upgrade
       if (plan.type !== "one_time")
         return c.json(
           { message: "Plan is not a one-time plan" },
-          HTTP_STATUS.UNPROCESSABLE_ENTITY,
+          HTTP.UnprocessableEntity,
         );
 
       const [res, error] = await tryCatch(
@@ -218,13 +220,13 @@ app
         );
         return c.json(
           { message: "Something went wrong. Try again later." },
-          HTTP_STATUS.INTERNAL_SERVER_ERROR,
+          HTTP.InternalServerError,
         );
       }
 
       return c.json(
         { data: res, message: "Checkout created" },
-        HTTP_STATUS.SUCCESS,
+        HTTP.Success,
       );
     },
   );

@@ -4,7 +4,7 @@ import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import { env } from "@/env";
 import { logger } from "@/lib/logger";
-import { HTTP_STATUS } from "@/lib/http-status";
+import HTTP from "@vicstack/http";
 import authRoute from "@f/auth/routes/auth";
 import todoRoute from "@f/todo/routes/todo";
 import paymentsRoute from "@f/payments/routes/payments";
@@ -35,7 +35,7 @@ app.onError((err, c) => {
   );
   return c.json(
     { message: "Something went wrong. Try again later." },
-    HTTP_STATUS.INTERNAL_SERVER_ERROR,
+    HTTP.InternalServerError,
   );
 });
 

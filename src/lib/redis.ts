@@ -1,7 +1,7 @@
 import { RedisClient } from "bun";
 import { env } from "@/env";
 import { logger } from "@/lib/logger";
-import { tryCatch } from "@/lib/utils";
+import tryCatch from "@vicstack/try-catch";
 
 const RECONNECT_INTERVAL_MS = 5_000;
 

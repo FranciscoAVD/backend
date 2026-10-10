@@ -17,7 +17,7 @@ import { getPurchaseBySession } from "@f/payments/use-cases/get-purchases";
 import { updatePurchaseByPaymentIntent } from "@f/payments/use-cases/update-purchase";
 import type { Payment } from "@f/payments/lib/types";
 import { logger } from "@/lib/logger";
-import { tryCatch } from "@/lib/utils";
+import tryCatch from "@vicstack/try-catch";
 
 const { values } = parseArgs({
   options: {

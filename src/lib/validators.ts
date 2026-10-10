@@ -1,6 +1,6 @@
 import { validator } from "hono/validator";
 import { z } from "zod";
-import { HTTP_STATUS } from "@/lib/http-status";
+import HTTP from "@vicstack/http";
 
 export const idParamValidator = validator("param", (value, c) => {
   const id = value["id"];
@@ -15,7 +15,7 @@ export const idParamValidator = validator("param", (value, c) => {
         },
         message: "Invalid param",
       },
-      HTTP_STATUS.BAD_REQUEST,
+      HTTP.BadRequest,
     );
   return {
     id: parseInt(id),
@@ -31,7 +31,7 @@ export const jsonValidator = <T extends z.ZodObject>(schema: T) =>
           error: z.treeifyError(error).properties,
           message: "Failed to parse",
         },
-        HTTP_STATUS.UNPROCESSABLE_ENTITY,
+        HTTP.UnprocessableEntity,
       );
     return {
       data,

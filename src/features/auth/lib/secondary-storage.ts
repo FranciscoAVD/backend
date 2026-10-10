@@ -1,6 +1,6 @@
 import { incrementWithTTL, redis } from "@/lib/redis";
 import { logger } from "@/lib/logger";
-import { tryCatch } from "@/lib/utils";
+import tryCatch from "@vicstack/try-catch";
 /**
  * @description better-auth's `secondaryStorage` contract (get/set/delete/getAndDelete
  * for session + verification caching, increment for rate limiting). better-auth calls
