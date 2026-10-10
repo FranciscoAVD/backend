@@ -3,7 +3,7 @@ import { z } from "zod";
 
 export const env = createEnv({
   server: {
-    NODE_ENV: z.enum(["development", "production"]),
+    NODE_ENV: z.enum(["development", "production", "test"]),
     SERVER_PORT: z.coerce.number(),
     // Auth
     BETTER_AUTH_URL: z.url(),
