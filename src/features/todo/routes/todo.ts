@@ -44,7 +44,7 @@ app
         HTTP.InternalServerError,
       );
     }
-    return c.json({ data: res, message: "Todos found" }, HTTP.Success);
+    return c.json({ data: res, message: "Todos found" }, HTTP.OK);
   })
   .get("/:id", idParamValidator, async (c) => {
     const { user } = c.get("session");
@@ -62,7 +62,7 @@ app
 
     return !res
       ? c.json({ message: "Todo not found" }, HTTP.NotFound)
-      : c.json({ data: res, message: "Todo found" }, HTTP.Success);
+      : c.json({ data: res, message: "Todo found" }, HTTP.OK);
   })
   .use(writeRateLimit)
   .post(
@@ -149,7 +149,7 @@ app
 
       return !res
         ? c.json({ message: "Todo not found" }, HTTP.NotFound)
-        : c.json({ message: "Todo deleted" }, HTTP.Success);
+        : c.json({ message: "Todo deleted" }, HTTP.OK);
     },
   );
 

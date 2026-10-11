@@ -7,9 +7,9 @@
       "dependencies": {
         "@better-auth/stripe": "^1.7.7",
         "@t3-oss/env-core": "^0.13.11",
-        "@vicstack/auth-middleware": "^0.1.1",
-        "@vicstack/http": "^0.1.0",
-        "@vicstack/rate-limit": "^0.2.0",
+        "@vicstack/auth-middleware": "^0.1.2",
+        "@vicstack/http": "^0.2.0",
+        "@vicstack/rate-limit": "^0.2.2",
         "@vicstack/redis": "^0.1.0",
         "@vicstack/try-catch": "^0.1.1",
         "better-auth": "^1.7.4",
@@ -128,11 +128,11 @@
 
     "@types/pg": ["@types/pg@8.23.1", "", { "dependencies": { "@types/node": "*", "pg-protocol": "*", "pg-types": "^2.2.0" } }, "sha512-fKVHpikPdg4GKks3JuLEhvwSyvwzF23hnabPy6DD8ljVbC7+6J5dQzdv4arV6jqq57djnMgs1HKBxX4P8aBI3A=="],
 
-    "@vicstack/auth-middleware": ["@vicstack/auth-middleware@0.1.1", "", { "dependencies": { "@vicstack/http": "^0.1.0", "@vicstack/try-catch": "^0.1.0" }, "peerDependencies": { "hono": "^4.13.13", "typescript": "^5" } }, "sha512-xaYwoN+0FHubcQniXhjazYxQX4J9VSuKyJgc81GNxauAF+3UqSSwBckRX0/VWJZS5fG7M4K8BXahiHlhAHJMgA=="],
+    "@vicstack/auth-middleware": ["@vicstack/auth-middleware@0.1.2", "", { "dependencies": { "@vicstack/http": "^0.2.0", "@vicstack/try-catch": "^0.1.0" }, "peerDependencies": { "hono": "^4.13.13", "typescript": "^5" } }, "sha512-JSZFaHG/I+/vRzy5akTix5JlkJ8gsmjA33OVkzvFpM2VYdoPmt3L4rHuqzrOwtRiZiwqTpBYe7qzl6af61W2UA=="],
 
-    "@vicstack/http": ["@vicstack/http@0.1.0", "", { "peerDependencies": { "typescript": "^5" } }, "sha512-FjwCrY7t3pnbLr51Vx6JhK6dpRfc3JwZVDHQ3YVWg4FkT2vpN9vF/q2WhxSHmbXrZetbZx9SbNTK0Ic3JIdqqQ=="],
+    "@vicstack/http": ["@vicstack/http@0.2.0", "", { "peerDependencies": { "typescript": "^5" } }, "sha512-IrLwnHpKf84FxEZ0V98s8LHoYsJ8b/sQTp3j/ITzrC8nvg1em3LoyWZw0y0D09adgEOWya5T98dGDh1L73+4PQ=="],
 
-    "@vicstack/rate-limit": ["@vicstack/rate-limit@0.2.0", "", { "dependencies": { "@vicstack/http": "^0.1.0", "@vicstack/try-catch": "^0.1.1" }, "peerDependencies": { "@vicstack/redis": "^0.1.0", "hono": "^4.13.13", "typescript": "^5" } }, "sha512-P6wlVVlWkRZ8FmKNpmZyNjezT+GQLeMVcGblY4OXfxJdUSSlidHQMGJgHcqdL0ronSllbHog+kNJ6PAiAh7yGQ=="],
+    "@vicstack/rate-limit": ["@vicstack/rate-limit@0.2.2", "", { "dependencies": { "@vicstack/http": "^0.2.0", "@vicstack/try-catch": "^0.1.1" }, "peerDependencies": { "@vicstack/redis": "^0.1.0", "hono": "^4.13.13", "typescript": "^5" } }, "sha512-fpNhvBmwPLv3fo6bjiYqvRayrq1yn5vwQmfY7e2eImZdQEcNpJDjY3pnJFKsCH9qc9bNRon2u6zhd33Frbdc8w=="],
 
     "@vicstack/redis": ["@vicstack/redis@0.1.0", "", { "dependencies": { "@vicstack/try-catch": "^0.1.1" }, "peerDependencies": { "typescript": "^5" } }, "sha512-fdUDrHUaFEqZd8eyj7HCpYwzFPyzjrsmIjhlOjHRkFCE0GJSz2RE/jsgJVj1Cf2MbSR+FqyFByjJXaRx6WhRPA=="],
 

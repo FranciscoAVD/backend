@@ -21,9 +21,9 @@
   "dependencies": {
     "@better-auth/stripe": "^1.7.7",
     "@t3-oss/env-core": "^0.13.11",
-    "@vicstack/auth-middleware": "^0.1.1",
-    "@vicstack/http": "^0.1.0",
-    "@vicstack/rate-limit": "^0.2.0",
+    "@vicstack/auth-middleware": "^0.1.2",
+    "@vicstack/http": "^0.2.0",
+    "@vicstack/rate-limit": "^0.2.2",
     "@vicstack/redis": "^0.1.0",
     "@vicstack/try-catch": "^0.1.1",
     "better-auth": "^1.7.4",

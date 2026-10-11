@@ -68,7 +68,7 @@ app
         HTTP.InternalServerError,
       );
     }
-    return c.json({ data: res, message: "Plans found" }, HTTP.Success);
+    return c.json({ data: res, message: "Plans found" }, HTTP.OK);
   })
   .get("/purchases", async (c) => {
     const { user } = c.get("session");
@@ -82,7 +82,7 @@ app
     }
     return c.json(
       { data: res, message: "Purchases found" },
-      HTTP.Success,
+      HTTP.OK,
     );
   })
   .get("/checkout/:sessionId", sessionIdParamValidator, async (c) => {
@@ -111,7 +111,7 @@ app
       ? c.json({ message: "Checkout not found" }, HTTP.NotFound)
       : c.json(
           { data: { status: res }, message: "Checkout found" },
-          HTTP.Success,
+          HTTP.OK,
         );
   })
   .use(writeRateLimit)
@@ -228,7 +228,7 @@ app
 
       return c.json(
         { data: res, message: "Checkout created" },
-        HTTP.Success,
+        HTTP.OK,
       );
     },
   );
