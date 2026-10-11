@@ -13,8 +13,7 @@ import {
   purchaseStatusFromDispute,
   purchaseUpdateFromCharge,
 } from "@f/payments/lib/utils";
-import { getPurchaseBySession } from "@f/payments/use-cases/get-purchases";
-import { updatePurchaseByPaymentIntent } from "@f/payments/use-cases/update-purchase";
+import { paymentsRepo } from "@f/payments/payments.repo";
 import type { Payment } from "@f/payments/lib/types";
 import { logger } from "@/lib/logger";
 import tryCatch from "@vicstack/try-catch";
@@ -61,7 +60,7 @@ async function reconcile(session: Stripe.Checkout.Session) {
   const userID = session.metadata?.userID;
   if (!userID) throw new Error("Checkout session has no userID metadata");
 
-  const existing = await getPurchaseBySession({
+  const existing = await paymentsRepo.purchase.getBySession({
     userID,
     stripeCheckoutSessionId: session.id,
   });
@@ -91,7 +90,7 @@ async function reconcile(session: Stripe.Checkout.Session) {
   );
   summary.updated++;
   if (!dryRun)
-    await updatePurchaseByPaymentIntent(
+    await paymentsRepo.purchase.updateByPaymentIntent(
       { stripePaymentIntentId: intent.id },
       target,
     );

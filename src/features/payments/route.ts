@@ -19,17 +19,7 @@ import { jsonValidator } from "@/lib/validators";
 
 import { rateLimiter } from "@/lib/rate-limit";
 
-import {
-  getPlan,
-  getPlanByName,
-  getPlans,
-} from "@f/payments/use-cases/get-plans";
-import { addPlan } from "@f/payments/use-cases/add-plan";
-import { getAllPurchases } from "@f/payments/use-cases/get-purchases";
-import {
-  createCheckout,
-  getCheckoutStatus,
-} from "@f/payments/use-cases/checkout";
+import { paymentsRepo } from "@f/payments/payments.repo";
 
 const writeRateLimit = rateLimiter<RequireSessionEnv>({
   keyPrefix: "payments-write",
@@ -61,7 +51,7 @@ const app = new Hono<PinoLoggerEnv>()
   .use(requireSessionMiddleware)
   .get("/plans", async (c) => {
     const { user } = c.get("session");
-    const [res, error] = await tryCatch(getPlans());
+    const [res, error] = await tryCatch(paymentsRepo.plan.getAll());
     if (error) {
       c.var.logger.error({ err: error, user: user.id }, "payments.plan.getAll");
       return c.json(
@@ -73,7 +63,7 @@ const app = new Hono<PinoLoggerEnv>()
   })
   .get("/purchases", async (c) => {
     const { user } = c.get("session");
-    const [res, error] = await tryCatch(getAllPurchases({ userID: user.id }));
+    const [res, error] = await tryCatch(paymentsRepo.purchase.getAll({ userID: user.id }));
     if (error) {
       c.var.logger.error({ err: error, user: user.id }, "payments.purchase.getAll");
       return c.json(
@@ -91,7 +81,7 @@ const app = new Hono<PinoLoggerEnv>()
     const { sessionId } = c.req.valid("param");
 
     const [res, error] = await tryCatch(
-      getCheckoutStatus({
+      paymentsRepo.checkout.getStatus({
         userID: user.id,
         stripeCheckoutSessionId: sessionId,
       }),
@@ -126,7 +116,7 @@ const app = new Hono<PinoLoggerEnv>()
 
       // checked before touching Stripe so a duplicate doesn't create an orphan product
       const [existing, existingError] = await tryCatch(
-        getPlanByName({ name: body.data.name }),
+        paymentsRepo.plan.getByName({ name: body.data.name }),
       );
 
       if (existingError) {
@@ -146,7 +136,7 @@ const app = new Hono<PinoLoggerEnv>()
           HTTP.Conflict,
         );
 
-      const [res, error] = await tryCatch(addPlan(body.data));
+      const [res, error] = await tryCatch(paymentsRepo.plan.add(body.data));
 
       if (error) {
         c.var.logger.error({ err: error, user: user.id }, "payments.plan.add");
@@ -180,7 +170,7 @@ const app = new Hono<PinoLoggerEnv>()
       const { user } = c.get("session");
       const { data } = c.req.valid("json");
 
-      const [plan, planError] = await tryCatch(getPlan({ id: data.planID }));
+      const [plan, planError] = await tryCatch(paymentsRepo.plan.get({ id: data.planID }));
 
       if (planError) {
         c.var.logger.error(
@@ -204,7 +194,7 @@ const app = new Hono<PinoLoggerEnv>()
         );
 
       const [res, error] = await tryCatch(
-        createCheckout(
+        paymentsRepo.checkout.create(
           {
             userID: user.id,
             email: user.email,

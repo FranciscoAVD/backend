@@ -7,8 +7,7 @@ import {
   markProcessing,
   removePendingCheckout,
 } from "@f/payments/lib/pending-checkout";
-import { addPurchase } from "@f/payments/use-cases/add-purchase";
-import { updatePurchaseByPaymentIntent } from "@f/payments/use-cases/update-purchase";
+import { paymentsRepo } from "@f/payments/payments.repo";
 import {
   isAllowedEvent,
   purchaseStatusFromDispute,
@@ -51,7 +50,7 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
     return;
   }
 
-  await addPurchase(
+  await paymentsRepo.purchase.add(
     { userID: owner.userID },
     {
       planID: owner.planID,
@@ -70,12 +69,12 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
 
 async function updateByCharge(
   paymentIntent: string | { id: string } | null,
-  update: Parameters<typeof updatePurchaseByPaymentIntent>[1],
+  update: Parameters<typeof paymentsRepo.purchase.updateByPaymentIntent>[1],
 ) {
   const stripePaymentIntentId = idOf(paymentIntent);
   if (!stripePaymentIntentId) return;
 
-  const updated = await updatePurchaseByPaymentIntent(
+  const updated = await paymentsRepo.purchase.updateByPaymentIntent(
     { stripePaymentIntentId },
     update,
   );

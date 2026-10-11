@@ -10,7 +10,7 @@ import { logger } from "@/lib/logger";
 import { ac, user, admin } from "@f/auth/lib/permissions";
 import { stripe } from "@better-auth/stripe";
 import { getPaymentProcessor } from "@f/payments/payment";
-import { getSubscriptionPlans } from "@f/payments/use-cases/get-plans";
+import { paymentsRepo } from "@f/payments/payments.repo";
 import { handleStripeEvent } from "@f/payments/lib/webhook";
 
 export const auth = betterAuth({
@@ -44,7 +44,7 @@ export const auth = betterAuth({
       createCustomerOnSignUp: true,
       subscription: {
         enabled: true,
-        plans: getSubscriptionPlans,
+        plans: paymentsRepo.plan.getSubscriptions,
       },
       onEvent: handleStripeEvent,
     }),

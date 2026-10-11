@@ -7,9 +7,9 @@ import { HTTPException } from "hono/http-exception";
 import { env } from "@/env";
 import { logger } from "@/lib/logger";
 import HTTP from "@vicstack/http";
-import authRoute from "@f/auth/routes/auth";
-import todoRoute from "@f/todo/routes/todo";
-import paymentsRoute from "@f/payments/routes/payments";
+import authRoute from "@f/auth/route";
+import todoRoute from "@f/todo/route";
+import paymentsRoute from "@f/payments/route";
 
 const app = new Hono<PinoLoggerEnv>()
   .basePath("/api")
