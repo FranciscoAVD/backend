@@ -1,5 +1,5 @@
 import { describe, expect, test, beforeEach } from "bun:test";
-import { deleteTodo } from "@f/todo/use-cases/remove";
+import { deleteTodo } from "@f/todo/use-cases/delete";
 import { addTodo } from "@f/todo/use-cases/add";
 import { getTodo } from "@f/todo/use-cases/get";
 import { resetDb, seedUser } from "@/test-helpers/db";

@@ -6,7 +6,7 @@ import {
 import { z } from "zod";
 
 export namespace Todo {
-  export type Create = z.infer<typeof insertTodoSchema>;
+  export type Insert = z.infer<typeof insertTodoSchema>;
   export type Update = z.infer<typeof updateTodoSchema>;
 }
 export type Todo = z.infer<typeof selectTodoSchema>;

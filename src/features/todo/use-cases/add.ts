@@ -10,7 +10,7 @@ import type { Todo } from "@f/todo/lib/types";
  */
 export async function addTodo(
   user: Pick<Todo, "userID">,
-  todo: Todo.Create,
+  todo: Todo.Insert,
 ): Promise<Todo | null> {
   const res = await db
     .insert(todoTable)
