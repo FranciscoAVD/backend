@@ -11,23 +11,22 @@ import authRoute from "@f/auth/routes/auth";
 import todoRoute from "@f/todo/routes/todo";
 import paymentsRoute from "@f/payments/routes/payments";
 
-const app = new Hono<PinoLoggerEnv>().basePath("/api");
-// before pinoLogger, so every request/response log line carries this request's id
-app.use(requestId());
-app.use(pinoLogger({ pino: logger }));
-app.use(secureHeaders());
-app.use(
-  "*",
-  cors({
-    origin: env.CLIENT_URL,
-    credentials: true,
-  }),
-);
-app.route("/auth", authRoute);
-app.route("/todo", todoRoute);
-if (env.PAYMENTS_ENABLED) {
-  app.route("/payments", paymentsRoute);
-}
+const app = new Hono<PinoLoggerEnv>()
+  .basePath("/api")
+  // before pinoLogger, so every request/response log line carries this request's id
+  .use(requestId())
+  .use(pinoLogger({ pino: logger }))
+  .use(secureHeaders())
+  .use(
+    "*",
+    cors({
+      origin: env.CLIENT_URL,
+      credentials: true,
+    }),
+  )
+  .route("/auth", authRoute)
+  .route("/todo", todoRoute)
+  .route("/payments", paymentsRoute);
 
 // errors thrown anywhere, including middleware, that a handler didn't catch
 app.onError((err, c) => {
@@ -48,3 +47,8 @@ export default {
   port: env.SERVER_PORT,
   fetch: app.fetch,
 };
+
+// consumed by TS clients via hono/client's hc<AppType>() for full request/
+// response type inference. /auth is untyped — better-auth's own handler
+// returns a raw Response; use better-auth's client instead.
+export type AppType = typeof app;

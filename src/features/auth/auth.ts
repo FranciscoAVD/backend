@@ -38,20 +38,16 @@ export const auth = betterAuth({
     enabled: true,
   },
   plugins: [
-    ...(env.PAYMENTS_ENABLED
-      ? [
-          stripe({
-            stripeClient: getPaymentProcessor(),
-            stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET as string,
-            createCustomerOnSignUp: true,
-            subscription: {
-              enabled: true,
-              plans: getSubscriptionPlans,
-            },
-            onEvent: handleStripeEvent,
-          }),
-        ]
-      : []),
+    stripe({
+      stripeClient: getPaymentProcessor(),
+      stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET,
+      createCustomerOnSignUp: true,
+      subscription: {
+        enabled: true,
+        plans: getSubscriptionPlans,
+      },
+      onEvent: handleStripeEvent,
+    }),
     adminPlugin({
       ac,
       roles: {

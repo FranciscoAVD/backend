@@ -24,12 +24,18 @@ Don't reach for this namespace pattern for things that aren't DB-backed resource
 
 When something needs logging (a caught error, a noteworthy state), don't reach for `console.log`/`console.error`.
 
-- **Inside a route handler** (has `c` in scope): use `c.var.logger`, the per-request pino child `hono-pino` attaches to the context. It's pre-bound with that request's `reqId` (set by `hono/request-id` in `src/index.ts`), so every log line for a request can be grepped together. Type the router's `Hono<...>` generic to include hono-pino's `Env` (see `features/todo/routes/todo.ts`: `Hono<RequireSessionEnv & PinoLoggerEnv>`) so `c.var.logger` type-checks.
+- **Inside a route handler** (has `c` in scope): use `c.var.logger`, the per-request pino child `hono-pino` attaches to the context. It's pre-bound with that request's `reqId` (set by `hono/request-id` in `src/index.ts`), so every log line for a request can be grepped together. Type the router's `Hono<...>` generic with hono-pino's `Env` (see `features/todo/routes/todo.ts`: `Hono<PinoLoggerEnv>`) so `c.var.logger` type-checks. Don't also merge in `RequireSessionEnv` there — `session`'s non-null typing should only come from chaining `.use(sessionMiddleware).use(requireSessionMiddleware)` before a handler, never from the app's own generic, or a handler placed before that middleware in the chain stops being a compile error.
 - **Outside a request** (use-cases, module-level middleware wiring like `src/lib/redis.ts`/`src/lib/rate-limit.ts`'s `onError`, scripts like `payments/scripts/reconcile.ts`): use the shared global pino instance from `@/lib/logger` — there's no request/`c` to attach a `reqId` to.
 - Either way, call pino's native API directly: `logger.error(mergingObject, msg)`, `.warn(...)`, `.info(...)`, etc. There is no custom wrapper.
 - The message (second argument) is a dot-scoped name identifying the call site, e.g. `"todo.add"`, `"auth.permission.todo.create"` (see `features/todo/routes/todo.ts` for the established scope-naming convention).
 - Put the error under the `err` key in the merging object (`{ err: error, ...meta }`) — pino's default serializer expands `.message`/`.stack` from that key in both dev (pretty) and prod (JSON) output.
 - Log level and dev/prod formatting (pretty vs. raw JSON) are controlled centrally in `src/lib/logger.ts` via `LOG_LEVEL`/`NODE_ENV` — don't configure logging per call site.
+
+# RPC / AppType
+
+`src/index.ts` exports `AppType` (`typeof app`) for TS clients to get full request/response type inference via `hono/client`'s `hc<AppType>()`. This only works if a feature's router is built as **one continuous chained expression assigned directly to `const app`** — e.g. `const app = new Hono<PinoLoggerEnv>().use(...).get(...).post(...)` — all the way through to `export default app`. Calling `.use()`/`.get()`/etc. as a *separate* statement after `const app = new Hono()` still works at runtime (same mutated instance) but the exported `app`'s static type won't pick up those routes, so RPC inference on it silently sees nothing. Same rule applies in `src/index.ts` itself for `.route(...)` mounting a feature's router.
+
+A conditionally-mounted router (behind an env flag, if one exists again later) can't be part of this chain without either always mounting it or lying about `AppType` — keep it as a separate statement and accept it's excluded from `AppType`, or expose its own standalone `export type <Feature>AppType = typeof app` from that feature's route file for a client that knows it's enabled.
 
 # Branches
 

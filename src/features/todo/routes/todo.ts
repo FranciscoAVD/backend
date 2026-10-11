@@ -29,9 +29,10 @@ const writeRateLimit = rateLimiter<RequireSessionEnv>({
   by: (c) => c.get("session").user.id,
 });
 
-const app = new Hono<PinoLoggerEnv>();
-
-app
+// chained in one expression, all the way to the export: RPC's inferred
+// AppType only picks up routes/validators registered on the exact value
+// assigned to `app`, not ones added via a later, separate statement
+const app = new Hono<PinoLoggerEnv>()
   .use(sessionMiddleware)
   .use(requireSessionMiddleware)
   .get("/", async (c) => {

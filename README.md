@@ -27,9 +27,10 @@ A Hono + better-auth + Drizzle API, built on Bun. This isn't just a stack choice
 - **Runtime:** Bun
 - **Framework:** Hono
 - **Auth:** better-auth (email/password, admin plugin, access-control roles)
+- **Payments:** Stripe — admin-created plans, subscriptions and one-time Checkout via better-auth's stripe plugin
 - **Database:** Postgres via Drizzle ORM (`drizzle-orm/bun-sql`)
 - **Cache / rate limiting:** Redis via `Bun.redis`
-- **Logging:** pino, shared by request logging (`hono-pino`) and app/error logging — structured JSON in production, pretty-printed in development, level set via `LOG_LEVEL`
+- **Logging:** pino, shared by request logging (`hono-pino`) and app/error logging — structured JSON in production, pretty-printed in development, level set via `LOG_LEVEL`. Every request gets an id (`hono/request-id`, returned as `X-Request-Id`) that's attached to its log lines as `reqId`, so one request's lines can be grepped together.
 
 ## Local development
 
@@ -43,6 +44,20 @@ bun run dev                # bun run --hot src/index.ts
 Seed an admin user with `./src/features/auth/lib/seed-admin.sh` (creates `admin@verified.com` with the `admin` role via better-auth's CLI).
 
 See `CLAUDE.md` for Bun-specific conventions (APIs to prefer, testing).
+
+## Client usage
+
+`src/index.ts` exports `AppType`, so a TS client gets full request/response type inference for free via `hono/client`, no codegen or OpenAPI spec needed:
+
+```ts
+import { hc } from "hono/client";
+import type { AppType } from "../backend/src"; // wherever this repo lives relative to the client
+
+const client = hc<AppType>("http://localhost:8000");
+const res = await client.api.todo.$get();
+```
+
+Covers `/todo` and `/payments`. `/auth` is in there too but untyped — better-auth's own handler returns a raw `Response`, so use better-auth's own client (`createAuthClient`) for that surface instead.
 
 ## Logs in production
 
