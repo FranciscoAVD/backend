@@ -12,6 +12,35 @@ A Hono + better-auth + Drizzle API template, built on Bun.
 - **Cache / rate limiting:** Redis via `Bun.redis`
 - **Logging:** pino, shared by request logging (`hono-pino`) and app/error logging — structured JSON in production, pretty-printed in development, level set via `LOG_LEVEL`. Every request gets an id (`hono/request-id`, returned as `X-Request-Id`) that's attached to its log lines as `reqId`, so one request's lines can be grepped together.
 
+## Payments
+
+Always on — `STRIPE_SECRET_KEY`/`STRIPE_WEBHOOK_SECRET` are required env vars, not feature-flagged. A `plan` is either `recurring` (a subscription) or `one_time`; which kind decides who handles it:
+
+- **Subscriptions** are entirely better-auth's stripe plugin — `subscription.plans` resolves active recurring plans from the `plan` table, and the plugin owns its own checkout/upgrade endpoints (`/api/auth/subscription/*`) and `subscription` table. This app doesn't touch that flow directly.
+- **One-time purchases** are this app's own: `POST /payments/checkout` creates a Stripe Checkout Session for a `one_time` plan and tracks it as "pending" in Redis (`pending-checkout.ts`) until Stripe confirms payment — no `purchase` row exists yet at that point. `GET /payments/checkout/:sessionId` reports `open`/`processing` from that pending entry, or the confirmed `purchase` row's status once it exists.
+
+**Endpoints** (`/api/payments`, session-gated; see `route.ts`):
+
+| | Route | Who | Notes |
+| --- | --- | --- | --- |
+| GET | `/plans` | any signed-in user | active plans only |
+| POST | `/plans` | admin (`plan:create`) | creates the Stripe product + price(s) first, then the DB row; archives the Stripe product if anything after fails (see `add-plan.ts`) |
+| GET | `/purchases` | caller | their own one-time purchases only |
+| POST | `/checkout` | caller | one-time plans only — a `recurring` plan 422s, pointing at better-auth's subscription endpoint instead |
+| GET | `/checkout/:sessionId` | caller | `open` / `processing` / the `purchase` row's `paid` / `refunded` / `disputed` |
+
+**The webhook** (`/api/auth/stripe/webhook`, better-auth's own path → `handleStripeEvent` in `lib/webhook.ts`) is what actually writes `purchase` rows and keeps them in sync: records a completed one-time checkout (resolving the owner from the Redis pending entry, falling back to the Checkout Session's own metadata if that's gone), and applies refund/dispute events to the matching purchase by payment intent. A refund/dispute for a purchase that isn't recorded yet (still in flight) makes the handler throw deliberately, so better-auth answers Stripe with an error and it retries the event later instead of silently dropping it.
+
+**`bun run payments:reconcile [--days 7] [--dry-run]`** is the backstop for webhooks that never arrive (an outage, Stripe gave up retrying): it scans recent Stripe Checkout Sessions directly and inserts/updates `purchase` rows to match, using the same logic the webhook uses.
+
+### Want just subscriptions, just one-time purchases, or neither?
+
+**Drop subscriptions, keep one-time purchases:** remove the `subscription` option from `auth.ts`'s `stripe(...)` call entirely, or set `subscription: { enabled: false }` — identical effect either way. That one option is the only thing gating `/api/auth/subscription/*` and the plugin's own `subscription` table; nothing else in this app references subscription state. Just don't create `type: "recurring"` plans afterward.
+
+**Drop one-time purchases, keep subscriptions:** `lib/constants.ts`'s `ALLOWED_EVENTS` is *not* the lever for this — emptying it only stops the webhook from ever confirming a payment, while `POST /payments/checkout` stays live and would still create real Stripe Checkout Sessions and charge real cards. The safe way is to delete the flow outright: `lib/pending-checkout.ts`, `use-cases/checkout.ts`, `lib/webhook.ts` (and `auth.ts`'s `onEvent: handleStripeEvent`), `lib/constants.ts`, the one-time-only functions in `lib/utils.ts` (`isAllowedEvent`, `isCheckoutSessionId`, `purchaseUpdateFromCharge`, `purchaseStatusFromDispute`), `scripts/reconcile.ts`, the `purchase`-table use-cases (`add-purchase.ts`/`get-purchases.ts`/`update-purchase.ts`) and `GET /purchases`, and the `/checkout` + `/checkout/:sessionId` handlers in `route.ts`. Don't create `type: "one_time"` plans afterward (or drop that variant from the `type` enum).
+
+**Want both:** nothing to change — this is the default.
+
 ## Folder structure
 
 ```
