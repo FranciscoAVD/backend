@@ -4,7 +4,9 @@ import { admin as adminPlugin } from "better-auth/plugins/admin";
 import { db } from "@d/connection";
 import * as schema from "@d/schemas/auth-schema";
 import { env } from "@/env";
-import { authSecondaryStorage } from "@f/auth/lib/secondary-storage";
+import { createSecondaryStorage } from "@vicstack/secondary-storage";
+import { redis, incrementWithTTL } from "@/lib/redis";
+import { logger } from "@/lib/logger";
 import { ac, user, admin } from "@f/auth/lib/permissions";
 import { stripe } from "@better-auth/stripe";
 import { getPaymentProcessor } from "@f/payments/payment";
@@ -20,7 +22,10 @@ export const auth = betterAuth({
   // without a `verification.storeInDatabase: true` override, having secondaryStorage
   // set means verification records (email verification, password reset, OAuth state)
   // live only in Redis, never in the DB `verification` table
-  secondaryStorage: authSecondaryStorage,
+  secondaryStorage: createSecondaryStorage({
+    redis: { client: redis, increment: incrementWithTTL },
+    onError: (error, context) => logger.error({ err: error }, context),
+  }),
   session: {
     // without this, secondaryStorage becomes the only session store
     storeSessionInDatabase: true,

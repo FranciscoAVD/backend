@@ -9,8 +9,9 @@
         "@t3-oss/env-core": "^0.13.11",
         "@vicstack/auth-middleware": "^0.1.2",
         "@vicstack/http": "^0.2.0",
-        "@vicstack/rate-limit": "^0.2.2",
+        "@vicstack/rate-limit": "^0.2.3",
         "@vicstack/redis": "^0.1.1",
+        "@vicstack/secondary-storage": "^0.1.0",
         "@vicstack/try-catch": "^0.1.1",
         "better-auth": "^1.7.4",
         "drizzle-orm": "^0.45.2",
@@ -132,9 +133,11 @@
 
     "@vicstack/http": ["@vicstack/http@0.2.0", "", { "peerDependencies": { "typescript": "^5" } }, "sha512-IrLwnHpKf84FxEZ0V98s8LHoYsJ8b/sQTp3j/ITzrC8nvg1em3LoyWZw0y0D09adgEOWya5T98dGDh1L73+4PQ=="],
 
-    "@vicstack/rate-limit": ["@vicstack/rate-limit@0.2.2", "", { "dependencies": { "@vicstack/http": "^0.2.0", "@vicstack/try-catch": "^0.1.1" }, "peerDependencies": { "@vicstack/redis": "^0.1.0", "hono": "^4.13.13", "typescript": "^5" } }, "sha512-fpNhvBmwPLv3fo6bjiYqvRayrq1yn5vwQmfY7e2eImZdQEcNpJDjY3pnJFKsCH9qc9bNRon2u6zhd33Frbdc8w=="],
+    "@vicstack/rate-limit": ["@vicstack/rate-limit@0.2.3", "", { "dependencies": { "@vicstack/http": "^0.2.0", "@vicstack/try-catch": "^0.1.1" }, "peerDependencies": { "hono": "^4.13.13" } }, "sha512-UoUUHk2LXQjDYKRLuwq8WJ9BnPKIg65fLHVKpDq3taa67ilMqc/luiEwC173BpaNQhDcL1LVVyJoo/S93e+7Xg=="],
 
     "@vicstack/redis": ["@vicstack/redis@0.1.1", "", { "dependencies": { "@vicstack/try-catch": "^0.1.1" }, "peerDependencies": { "typescript": "^5" } }, "sha512-+hBfapZY1EsiO7NZ6BnIXEp/5VHe3f/Akk8BuDdDRDXS0tYCZG5xWSRY4CLwmOEL9sHfutIhvwJ2V/qpzf2lQA=="],
+
+    "@vicstack/secondary-storage": ["@vicstack/secondary-storage@0.1.0", "", { "dependencies": { "@vicstack/try-catch": "^0.1.1" } }, "sha512-CIs+L89/SYlIAu8T6ILJKMNJYeUyw9hf0w0gmXCzbU2YNTWj14p2BHEh6GiP6SbhLLFTDo9WxL0DI1quV7twFQ=="],
 
     "@vicstack/try-catch": ["@vicstack/try-catch@0.1.1", "", { "peerDependencies": { "typescript": "^5" } }, "sha512-SaTYhiVYzGuqLwL8nd3zN3fIsjeNVBUwePBLA0Zit/htviclUIw0BozPKqHnHSRKLEhAq30Zq9bAHnJ0/MJQ3Q=="],
 
