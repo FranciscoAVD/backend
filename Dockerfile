@@ -17,6 +17,10 @@ ENV NODE_ENV=production
 # must match SERVER_PORT
 EXPOSE 8000
 
+# no curl/wget on alpine — Bun's own fetch avoids adding a package just for this
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD bun -e "fetch('http://localhost:8000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+
 # the `bun` user is built into the official image
 USER bun
 ENTRYPOINT ["bun", "run", "start"]

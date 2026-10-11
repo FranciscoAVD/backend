@@ -57,7 +57,11 @@ Always use `bun run test`, not bare `bun test` — the script points DB-integrat
 
 ## Running with Docker
 
-`docker build -t backend .` produces a production image (multi-stage: `bun install --production` in its own layer, so it's only re-run when `bun.lock` changes). It expects every env var in `.env.example` to be set — e.g. `--env-file .env` — and listens on `SERVER_PORT` (`EXPOSE 8000` matches the example default). `compose.yaml` only provisions Postgres and Redis for local dev; it doesn't define a service for this image.
+`docker build -t backend .` produces a production image (multi-stage: `bun install --production` in its own layer, so it's only re-run when `bun.lock` changes). It expects every env var in `.env.example` to be set — e.g. `--env-file .env` — and listens on `SERVER_PORT` (`EXPOSE 8000` matches the example default). The image's `HEALTHCHECK` hits `GET /health` (see below) with Bun's own `fetch`, so no curl/wget needs adding to the alpine base. `compose.yaml` only provisions Postgres and Redis for local dev; it doesn't define a service for this image.
+
+## Health check
+
+`GET /health` (unauthenticated, outside `/api`) confirms Postgres and Redis are actually reachable, not just that the process is up — `200 {"status":"ok"}`, or `503` naming which dependency failed. It skips the whole `/api` middleware stack, including request logging, since a liveness/readiness probe firing every few seconds shouldn't spam the access log.
 
 ## Client usage
 

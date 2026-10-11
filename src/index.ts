@@ -10,8 +10,9 @@ import HTTP from "@vicstack/http";
 import authRoute from "@f/auth/route";
 import todoRoute from "@f/todo/route";
 import paymentsRoute from "@f/payments/route";
+import { healthRoute } from "@/lib/health";
 
-const app = new Hono<PinoLoggerEnv>()
+const apiApp = new Hono<PinoLoggerEnv>()
   .basePath("/api")
   // before pinoLogger, so every request/response log line carries this request's id
   .use(requestId())
@@ -29,7 +30,7 @@ const app = new Hono<PinoLoggerEnv>()
   .route("/payments", paymentsRoute);
 
 // errors thrown anywhere, including middleware, that a handler didn't catch
-app.onError((err, c) => {
+apiApp.onError((err, c) => {
   // e.g. hono's validator throws a 400 on a malformed JSON body
   if (err instanceof HTTPException) return err.getResponse();
 
@@ -43,12 +44,11 @@ app.onError((err, c) => {
   );
 });
 
+export type AppType = typeof apiApp;
+
+const app = new Hono().route("/", healthRoute).route("/", apiApp);
+
 export default {
   port: env.SERVER_PORT,
   fetch: app.fetch,
 };
-
-// consumed by TS clients via hono/client's hc<AppType>() for full request/
-// response type inference. /auth is untyped — better-auth's own handler
-// returns a raw Response; use better-auth's client instead.
-export type AppType = typeof app;
