@@ -34,6 +34,7 @@ A Hono + better-auth + Drizzle API, built on Bun. This isn't just a stack choice
 ## Local development
 
 ```sh
+cp .env.example .env      # fill in BETTER_AUTH_SECRET, DB_*, etc.
 docker compose up -d      # Postgres + Redis
 bun install
 bun run dev                # bun run --hot src/index.ts

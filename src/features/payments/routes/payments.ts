@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Env as PinoLoggerEnv } from "hono-pino";
 import { validator } from "hono/validator";
 
 import {
@@ -11,7 +12,6 @@ import {
 import { checkoutSchema, insertPlanSchema } from "@f/payments/lib/schemas";
 import { isCheckoutSessionId } from "@f/payments/lib/utils";
 
-import { logger } from "@/lib/logger";
 import tryCatch from "@vicstack/try-catch";
 import HTTP from "@vicstack/http";
 
@@ -53,7 +53,7 @@ const sessionIdParamValidator = validator("param", (value, c) => {
   return { sessionId };
 });
 
-const app = new Hono();
+const app = new Hono<PinoLoggerEnv>();
 
 app
   .use(sessionMiddleware)
@@ -62,7 +62,7 @@ app
     const { user } = c.get("session");
     const [res, error] = await tryCatch(getPlans());
     if (error) {
-      logger.error({ err: error, user: user.id }, "payments.plan.getAll");
+      c.var.logger.error({ err: error, user: user.id }, "payments.plan.getAll");
       return c.json(
         { message: "Something went wrong. Try again later." },
         HTTP.InternalServerError,
@@ -74,7 +74,7 @@ app
     const { user } = c.get("session");
     const [res, error] = await tryCatch(getAllPurchases({ userID: user.id }));
     if (error) {
-      logger.error({ err: error, user: user.id }, "payments.purchase.getAll");
+      c.var.logger.error({ err: error, user: user.id }, "payments.purchase.getAll");
       return c.json(
         { message: "Something went wrong. Try again later." },
         HTTP.InternalServerError,
@@ -97,7 +97,7 @@ app
     );
 
     if (error) {
-      logger.error(
+      c.var.logger.error(
         { err: error, user: user.id, session: sessionId },
         "payments.checkout.status",
       );
@@ -129,7 +129,7 @@ app
       );
 
       if (existingError) {
-        logger.error(
+        c.var.logger.error(
           { err: existingError, user: user.id },
           "payments.plan.add",
         );
@@ -148,7 +148,7 @@ app
       const [res, error] = await tryCatch(addPlan(body.data));
 
       if (error) {
-        logger.error({ err: error, user: user.id }, "payments.plan.add");
+        c.var.logger.error({ err: error, user: user.id }, "payments.plan.add");
         return c.json(
           { message: "Something went wrong. Try again later." },
           HTTP.InternalServerError,
@@ -156,7 +156,7 @@ app
       }
 
       if (!res) {
-        logger.error(
+        c.var.logger.error(
           { err: new Error("Could not create plan"), user: user.id },
           "payments.plan.add",
         );
@@ -182,7 +182,7 @@ app
       const [plan, planError] = await tryCatch(getPlan({ id: data.planID }));
 
       if (planError) {
-        logger.error(
+        c.var.logger.error(
           { err: planError, user: user.id, plan: data.planID },
           "payments.checkout.create",
         );
@@ -216,7 +216,7 @@ app
       );
 
       if (error) {
-        logger.error(
+        c.var.logger.error(
           { err: error, user: user.id, plan: plan.id },
           "payments.checkout.create",
         );

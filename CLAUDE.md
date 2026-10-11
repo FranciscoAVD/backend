@@ -22,9 +22,11 @@ Don't reach for this namespace pattern for things that aren't DB-backed resource
 
 # Logging
 
-When a route or use-case needs to log something (a caught error, a noteworthy state), use the shared pino instance from `@/lib/logger` — don't reach for `console.log`/`console.error`.
+When something needs logging (a caught error, a noteworthy state), don't reach for `console.log`/`console.error`.
 
-- Call pino's native API directly: `logger.error(mergingObject, msg)`, `logger.warn(...)`, `logger.info(...)`, etc. There is no custom wrapper — `@/lib/logger` just exports the configured `pino()` instance.
+- **Inside a route handler** (has `c` in scope): use `c.var.logger`, the per-request pino child `hono-pino` attaches to the context. It's pre-bound with that request's `reqId` (set by `hono/request-id` in `src/index.ts`), so every log line for a request can be grepped together. Type the router's `Hono<...>` generic to include hono-pino's `Env` (see `features/todo/routes/todo.ts`: `Hono<RequireSessionEnv & PinoLoggerEnv>`) so `c.var.logger` type-checks.
+- **Outside a request** (use-cases, module-level middleware wiring like `src/lib/redis.ts`/`src/lib/rate-limit.ts`'s `onError`, scripts like `payments/scripts/reconcile.ts`): use the shared global pino instance from `@/lib/logger` — there's no request/`c` to attach a `reqId` to.
+- Either way, call pino's native API directly: `logger.error(mergingObject, msg)`, `.warn(...)`, `.info(...)`, etc. There is no custom wrapper.
 - The message (second argument) is a dot-scoped name identifying the call site, e.g. `"todo.add"`, `"auth.permission.todo.create"` (see `features/todo/routes/todo.ts` for the established scope-naming convention).
 - Put the error under the `err` key in the merging object (`{ err: error, ...meta }`) — pino's default serializer expands `.message`/`.stack` from that key in both dev (pretty) and prod (JSON) output.
 - Log level and dev/prod formatting (pretty vs. raw JSON) are controlled centrally in `src/lib/logger.ts` via `LOG_LEVEL`/`NODE_ENV` — don't configure logging per call site.

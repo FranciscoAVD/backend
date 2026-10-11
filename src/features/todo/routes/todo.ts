@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Env as PinoLoggerEnv } from "hono-pino";
 
 import {
   sessionMiddleware,
@@ -9,7 +10,6 @@ import {
 
 import { insertTodoSchema, updateTodoSchema } from "@f/todo/lib/schemas";
 
-import { logger } from "@/lib/logger";
 import tryCatch from "@vicstack/try-catch";
 import HTTP from "@vicstack/http";
 
@@ -29,7 +29,7 @@ const writeRateLimit = rateLimiter<RequireSessionEnv>({
   by: (c) => c.get("session").user.id,
 });
 
-const app = new Hono();
+const app = new Hono<PinoLoggerEnv>();
 
 app
   .use(sessionMiddleware)
@@ -38,7 +38,7 @@ app
     const { user } = c.get("session");
     const [res, error] = await tryCatch(getAllTodos({ userID: user.id }));
     if (error) {
-      logger.error({ err: error, user: user.id }, "todo.getAll");
+      c.var.logger.error({ err: error, user: user.id }, "todo.getAll");
       return c.json(
         { message: "Something went wrong. Try again later." },
         HTTP.InternalServerError,
@@ -53,7 +53,7 @@ app
     const [res, error] = await tryCatch(getTodo({ id, userID: user.id }));
 
     if (error) {
-      logger.error({ err: error, user: user.id, todo: id }, "todo.get");
+      c.var.logger.error({ err: error, user: user.id, todo: id }, "todo.get");
       return c.json(
         { message: "Something went wrong. Try again later." },
         HTTP.InternalServerError,
@@ -78,7 +78,7 @@ app
       );
 
       if (error) {
-        logger.error({ err: error, user: user.id }, "todo.add");
+        c.var.logger.error({ err: error, user: user.id }, "todo.add");
         return c.json(
           { message: "Something went wrong. Try again later." },
           HTTP.InternalServerError,
@@ -86,7 +86,7 @@ app
       }
 
       if (!res) {
-        logger.error(
+        c.var.logger.error(
           { err: new Error("Could not create todo"), user: user.id },
           "todo.add",
         );
@@ -117,7 +117,7 @@ app
       );
 
       if (error) {
-        logger.error({ err: error, user: user.id }, "todo.update");
+        c.var.logger.error({ err: error, user: user.id }, "todo.update");
         return c.json(
           { message: "Something went wrong. Try again later." },
           HTTP.InternalServerError,
@@ -140,7 +140,7 @@ app
       const [res, error] = await tryCatch(deleteTodo({ id, userID: user.id }));
 
       if (error) {
-        logger.error({ err: error, user: user.id }, "todo.delete");
+        c.var.logger.error({ err: error, user: user.id }, "todo.delete");
         return c.json(
           { message: "Something went wrong. Try again later." },
           HTTP.InternalServerError,

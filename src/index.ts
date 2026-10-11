@@ -1,6 +1,8 @@
 import { Hono } from "hono";
-import { pinoLogger } from "hono-pino";
+import { pinoLogger, type Env as PinoLoggerEnv } from "hono-pino";
 import { cors } from "hono/cors";
+import { requestId } from "hono/request-id";
+import { secureHeaders } from "hono/secure-headers";
 import { HTTPException } from "hono/http-exception";
 import { env } from "@/env";
 import { logger } from "@/lib/logger";
@@ -9,8 +11,11 @@ import authRoute from "@f/auth/routes/auth";
 import todoRoute from "@f/todo/routes/todo";
 import paymentsRoute from "@f/payments/routes/payments";
 
-const app = new Hono().basePath("/api");
+const app = new Hono<PinoLoggerEnv>().basePath("/api");
+// before pinoLogger, so every request/response log line carries this request's id
+app.use(requestId());
 app.use(pinoLogger({ pino: logger }));
+app.use(secureHeaders());
 app.use(
   "*",
   cors({
@@ -29,7 +34,7 @@ app.onError((err, c) => {
   // e.g. hono's validator throws a 400 on a malformed JSON body
   if (err instanceof HTTPException) return err.getResponse();
 
-  logger.error(
+  c.var.logger.error(
     { err, method: c.req.method, path: c.req.path },
     "app.unhandled",
   );
