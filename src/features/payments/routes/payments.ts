@@ -5,6 +5,7 @@ import {
   sessionMiddleware,
   requireSessionMiddleware,
   requirePermissionMiddleware,
+  type RequireSessionEnv,
 } from "@f/auth/middleware";
 
 import { checkoutSchema, insertPlanSchema } from "@f/payments/lib/schemas";
@@ -30,10 +31,11 @@ import {
   getCheckoutStatus,
 } from "@f/payments/use-cases/checkout";
 
-const writeRateLimit = rateLimiter({
+const writeRateLimit = rateLimiter<RequireSessionEnv>({
   keyPrefix: "payments-write",
   windowSec: 60,
   max: 20,
+  by: (c) => c.get("session").user.id,
 });
 
 const sessionIdParamValidator = validator("param", (value, c) => {

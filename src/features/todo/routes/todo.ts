@@ -4,6 +4,7 @@ import {
   sessionMiddleware,
   requireSessionMiddleware,
   requirePermissionMiddleware,
+  type RequireSessionEnv,
 } from "@f/auth/middleware";
 
 import { insertTodoSchema, updateTodoSchema } from "@f/todo/lib/schemas";
@@ -21,10 +22,11 @@ import { addTodo } from "@f/todo/use-cases/add";
 import { updateTodo } from "@f/todo/use-cases/update";
 import { deleteTodo } from "@f/todo/use-cases/remove";
 
-const writeRateLimit = rateLimiter({
+const writeRateLimit = rateLimiter<RequireSessionEnv>({
   keyPrefix: "todo-write",
   windowSec: 60,
   max: 60,
+  by: (c) => c.get("session").user.id,
 });
 
 const app = new Hono();

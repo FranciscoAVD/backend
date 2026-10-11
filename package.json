@@ -23,6 +23,8 @@
     "@t3-oss/env-core": "^0.13.11",
     "@vicstack/auth-middleware": "^0.1.1",
     "@vicstack/http": "^0.1.0",
+    "@vicstack/rate-limit": "^0.1.0",
+    "@vicstack/redis": "^0.1.0",
     "@vicstack/try-catch": "^0.1.1",
     "better-auth": "^1.7.4",
     "drizzle-orm": "^0.45.2",
