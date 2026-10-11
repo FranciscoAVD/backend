@@ -47,9 +47,10 @@ export const purchase = pgTable(
   "purchase",
   {
     id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-    userID: text("user_id")
-      .references(() => user.id)
-      .notNull(),
+    // nullable + set null on delete, unlike todo's cascade: a purchase is a
+    // financial record that should outlive the user it's attached to, not
+    // disappear (or block deletion) when they're removed
+    userID: text("user_id").references(() => user.id, { onDelete: "set null" }),
     planID: integer("plan_id")
       .references(() => plan.id)
       .notNull(),

@@ -8,7 +8,10 @@ import {
 } from "@f/payments/lib/pending-checkout";
 import { getPurchaseBySession } from "@f/payments/use-cases/get-purchases";
 
-type CheckoutUser = Pick<Payment.Purchase, "userID"> & {
+// userID here is always the live, authenticated caller's id, unlike a purchase
+// row's own (nullable) userID once that user is deleted
+type CheckoutUser = {
+  userID: string;
   email: string;
   stripeCustomerId?: string | null;
 };
@@ -54,11 +57,11 @@ export async function createCheckout(
 /**
  * @description Resolves a checkout's status: the DB purchase once confirmed, otherwise the
  * pending Redis entry. Both are scoped to the user. Operation must be wrapped in try-catch
- * @param checkout object of user ID and checkout session ID
+ * @param checkout object of the caller's own (always real, live) user ID and checkout session ID
  * @returns The checkout status, or null if the user has no checkout with that ID.
  */
 export async function getCheckoutStatus(
-  checkout: Pick<Payment.Purchase, "userID" | "stripeCheckoutSessionId">,
+  checkout: { userID: string } & Pick<Payment.Purchase, "stripeCheckoutSessionId">,
 ): Promise<Payment.Purchase["status"] | "open" | "processing" | null> {
   const purchase = await getPurchaseBySession(checkout);
   if (purchase) return purchase.status;

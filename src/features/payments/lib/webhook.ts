@@ -7,7 +7,7 @@ import {
   markProcessing,
   removePendingCheckout,
 } from "@f/payments/lib/pending-checkout";
-import { paymentsRepo } from "@f/payments/payments.repo";
+import { paymentsRepo } from "@f/payments/repo";
 import {
   isAllowedEvent,
   purchaseStatusFromDispute,

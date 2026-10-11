@@ -6,7 +6,9 @@ import type { Payment } from "@f/payments/lib/types";
  * the payment; only then is a `purchase` row written to the DB.
  */
 export type PendingCheckout = {
-  userID: Payment.Purchase["userID"];
+  // always the real, live user who started the checkout - never null, unlike
+  // a purchase row's own userID once that user is later deleted
+  userID: string;
   planID: Payment.Plan["id"];
   status: "open" | "processing";
 };

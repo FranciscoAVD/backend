@@ -5,11 +5,12 @@ import { eq, and } from "drizzle-orm";
 
 /**
  * @description Select query for all purchases with a matching user ID. Assumes validation. Operation must be wrapped in try-catch
- * @param purchase object of user ID enforced by Pick<Payment.Purchase, "userID">
+ * @param purchase object of the caller's own user ID - always a real, live user, unlike a purchase
+ * row's own (nullable) userID once that user is deleted
  * @returns Array of Purchases.
  */
 export async function getAllPurchases(
-  purchase: Pick<Payment.Purchase, "userID">,
+  purchase: { userID: string },
 ): Promise<Payment.Purchase[]> {
   const res = await db
     .select()
@@ -20,11 +21,13 @@ export async function getAllPurchases(
 
 /**
  * @description Select query for purchase with a matching checkout session ID and user ID. Assumes validation. Operation must be wrapped in try-catch
- * @param purchase object of session ID and user ID enforced by Pick<Payment.Purchase, "userID" | "stripeCheckoutSessionId">
+ * @param purchase object of session ID (enforced by Pick<Payment.Purchase, "stripeCheckoutSessionId">)
+ * and the caller's own user ID - always a real, live user, unlike a purchase row's own (nullable)
+ * userID once that user is deleted
  * @returns Purchase object or null. If null, the checkout hasn't been confirmed (or isn't this user's).
  */
 export async function getPurchaseBySession(
-  purchase: Pick<Payment.Purchase, "userID" | "stripeCheckoutSessionId">,
+  purchase: { userID: string } & Pick<Payment.Purchase, "stripeCheckoutSessionId">,
 ): Promise<Payment.Purchase | null> {
   const res = await db
     .select()

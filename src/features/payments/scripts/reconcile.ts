@@ -13,7 +13,7 @@ import {
   purchaseStatusFromDispute,
   purchaseUpdateFromCharge,
 } from "@f/payments/lib/utils";
-import { paymentsRepo } from "@f/payments/payments.repo";
+import { paymentsRepo } from "@f/payments/repo";
 import type { Payment } from "@f/payments/lib/types";
 import { logger } from "@/lib/logger";
 import tryCatch from "@vicstack/try-catch";

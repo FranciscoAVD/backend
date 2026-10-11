@@ -5,7 +5,9 @@ import HTTP from "@vicstack/http";
 export const idParamValidator = validator("param", (value, c) => {
   const id = value["id"];
 
-  if (!id || !Number.isInteger(parseInt(id ?? "")))
+  // Number(), not parseInt(): parseInt("12abc") is 12, silently accepting
+  // trailing garbage instead of rejecting it
+  if (!id || !Number.isInteger(Number(id)))
     return c.json(
       {
         error: {
@@ -18,7 +20,7 @@ export const idParamValidator = validator("param", (value, c) => {
       HTTP.BadRequest,
     );
   return {
-    id: parseInt(id),
+    id: Number(id),
   };
 });
 

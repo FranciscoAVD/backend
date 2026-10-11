@@ -19,7 +19,7 @@ import { jsonValidator } from "@/lib/validators";
 
 import { rateLimiter } from "@/lib/rate-limit";
 
-import { paymentsRepo } from "@f/payments/payments.repo";
+import { paymentsRepo } from "@f/payments/repo";
 
 const writeRateLimit = rateLimiter<RequireSessionEnv>({
   keyPrefix: "payments-write",

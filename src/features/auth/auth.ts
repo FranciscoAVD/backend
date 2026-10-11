@@ -10,7 +10,7 @@ import { logger } from "@/lib/logger";
 import { ac, user, admin } from "@f/auth/lib/permissions";
 import { stripe } from "@better-auth/stripe";
 import { getPaymentProcessor } from "@f/payments/payment";
-import { paymentsRepo } from "@f/payments/payments.repo";
+import { paymentsRepo } from "@f/payments/repo";
 import { handleStripeEvent } from "@f/payments/lib/webhook";
 
 export const auth = betterAuth({

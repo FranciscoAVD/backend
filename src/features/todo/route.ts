@@ -17,7 +17,7 @@ import { idParamValidator, jsonValidator } from "@/lib/validators";
 
 import { rateLimiter } from "@/lib/rate-limit";
 
-import { todoRepo } from "@f/todo/todo.repo";
+import { todoRepo } from "@f/todo/repo";
 
 const writeRateLimit = rateLimiter<RequireSessionEnv>({
   keyPrefix: "todo-write",
