@@ -9,13 +9,13 @@ import { addPurchase } from "@f/payments/use-cases/add-purchase";
 describe("deleting a user", () => {
   beforeEach(resetDb);
 
-  test("doesn't fail, and the purchase survives with userID set to null", async () => {
-    const userID = await seedUser();
+  test("doesn't fail, and the purchase survives with userId set to null", async () => {
+    const userId = await seedUser();
     const plan = await seedPlan();
     await addPurchase(
-      { userID },
+      { userId },
       {
-        planID: plan.id,
+        planId: plan.id,
         stripeCheckoutSessionId: "cs_1",
         stripePaymentIntentId: "pi_1",
         amountTotal: plan.amount,
@@ -23,13 +23,13 @@ describe("deleting a user", () => {
       },
     );
 
-    await db.delete(user).where(eq(user.id, userID));
+    await db.delete(user).where(eq(user.id, userId));
 
     const [row] = await db
       .select()
       .from(purchase)
       .where(eq(purchase.stripeCheckoutSessionId, "cs_1"));
     expect(row).not.toBeUndefined();
-    expect(row?.userID).toBeNull();
+    expect(row?.userId).toBeNull();
   });
 });

@@ -50,8 +50,8 @@ export const purchase = pgTable(
     // nullable + set null on delete, unlike todo's cascade: a purchase is a
     // financial record that should outlive the user it's attached to, not
     // disappear (or block deletion) when they're removed
-    userID: text("user_id").references(() => user.id, { onDelete: "set null" }),
-    planID: integer("plan_id")
+    userId: text("user_id").references(() => user.id, { onDelete: "set null" }),
+    planId: integer("plan_id")
       .references(() => plan.id)
       .notNull(),
     status: purchaseStatus("status").notNull().default("paid"),
@@ -70,7 +70,7 @@ export const purchase = pgTable(
       .defaultNow()
       .$onUpdate(() => new Date()),
   },
-  (t) => [index("purchase_user_idx").on(t.userID)],
+  (t) => [index("purchase_user_idx").on(t.userId)],
 );
 
 export const planRelations = relations(plan, ({ many }) => ({
@@ -79,11 +79,11 @@ export const planRelations = relations(plan, ({ many }) => ({
 
 export const purchaseRelations = relations(purchase, ({ one }) => ({
   user: one(user, {
-    fields: [purchase.userID],
+    fields: [purchase.userId],
     references: [user.id],
   }),
   plan: one(plan, {
-    fields: [purchase.planID],
+    fields: [purchase.planId],
     references: [plan.id],
   }),
 }));

@@ -34,7 +34,7 @@ const app = new Hono<PinoLoggerEnv>()
   .use(requireSessionMiddleware)
   .get("/", async (c) => {
     const { user } = c.get("session");
-    const [res, error] = await tryCatch(todoRepo.get.all({ userID: user.id }));
+    const [res, error] = await tryCatch(todoRepo.get.all({ userId: user.id }));
     if (error) {
       c.var.logger.error({ err: error, user: user.id }, "todo.getAll");
       return c.json(
@@ -48,7 +48,7 @@ const app = new Hono<PinoLoggerEnv>()
     const { user } = c.get("session");
     const { id } = c.req.valid("param");
 
-    const [res, error] = await tryCatch(todoRepo.get.one({ id, userID: user.id }));
+    const [res, error] = await tryCatch(todoRepo.get.one({ id, userId: user.id }));
 
     if (error) {
       c.var.logger.error({ err: error, user: user.id, todo: id }, "todo.get");
@@ -72,7 +72,7 @@ const app = new Hono<PinoLoggerEnv>()
       const body = c.req.valid("json");
 
       const [res, error] = await tryCatch(
-        todoRepo.add({ userID: user.id }, body.data),
+        todoRepo.add({ userId: user.id }, body.data),
       );
 
       if (error) {
@@ -111,7 +111,7 @@ const app = new Hono<PinoLoggerEnv>()
       const { data } = c.req.valid("json");
 
       const [res, error] = await tryCatch(
-        todoRepo.update({ id, userID: user.id }, data),
+        todoRepo.update({ id, userId: user.id }, data),
       );
 
       if (error) {
@@ -135,7 +135,7 @@ const app = new Hono<PinoLoggerEnv>()
       const { id } = c.req.valid("param");
       const { user } = c.get("session");
 
-      const [res, error] = await tryCatch(todoRepo.delete({ id, userID: user.id }));
+      const [res, error] = await tryCatch(todoRepo.delete({ id, userId: user.id }));
 
       if (error) {
         c.var.logger.error({ err: error, user: user.id }, "todo.delete");

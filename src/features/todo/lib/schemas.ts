@@ -6,13 +6,13 @@ import {
 } from "drizzle-zod";
 
 export const insertTodoSchema = createInsertSchema(todo).omit({
-  userID: true,
+  userId: true,
   createdAt: true,
   updatedAt: true,
 });
 export const updateTodoSchema = createUpdateSchema(todo)
   .omit({
-    userID: true,
+    userId: true,
     createdAt: true,
     updatedAt: true,
   })

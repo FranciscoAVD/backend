@@ -15,7 +15,7 @@ export async function resetDb(): Promise<void> {
 
 /**
  * @description Inserts a minimal valid `user` row directly, bypassing better-auth entirely —
- * these tests only need a real userID to satisfy FK constraints, not an actual session.
+ * these tests only need a real userId to satisfy FK constraints, not an actual session.
  * @returns The inserted user's id.
  */
 export async function seedUser(

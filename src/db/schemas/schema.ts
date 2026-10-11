@@ -14,7 +14,7 @@ export const todo = pgTable(
   "todo",
   {
     id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
-    userID: text("user_id")
+    userId: text("user_id")
       .references(() => user.id, { onDelete: "cascade" })
       .notNull(),
     name: varchar("name", { length: 50 }).notNull(),
@@ -25,12 +25,12 @@ export const todo = pgTable(
       .defaultNow()
       .$onUpdate(() => new Date()),
   },
-  (t) => [index("todo_user_idx").on(t.userID)],
+  (t) => [index("todo_user_idx").on(t.userId)],
 );
 
 export const todoRelations = relations(todo, ({ one }) => ({
   users: one(user, {
-    fields: [todo.userID],
+    fields: [todo.userId],
     references: [user.id],
   }),
 }));

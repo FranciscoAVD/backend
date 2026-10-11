@@ -6,17 +6,17 @@ import type { Payment } from "@f/payments/lib/types";
  * @description Idempotent insert query for a confirmed purchase. A purchase already recorded for the
  * same checkout session is left untouched, so webhook retries are safe. Assumes validation. Operation must be wrapped in try-catch
  * @param user object of the purchasing user's own (always real, live) user ID - never null,
- * unlike a purchase row's own userID once that user is later deleted
+ * unlike a purchase row's own userId once that user is later deleted
  * @param purchase object of insert fields enforced by Payment.Purchase.Insert
  * @returns Purchase object or null. If null, the purchase was already recorded.
  */
 export async function addPurchase(
-  user: { userID: string },
+  user: { userId: string },
   purchase: Payment.Purchase.Insert,
 ): Promise<Payment.Purchase | null> {
   const res = await db
     .insert(purchaseTable)
-    .values({ ...purchase, userID: user.userID })
+    .values({ ...purchase, userId: user.userId })
     .onConflictDoNothing({ target: purchaseTable.stripeCheckoutSessionId })
     .returning();
   return res[0] ?? null;

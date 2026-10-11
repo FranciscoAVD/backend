@@ -8,12 +8,12 @@ describe("updatePurchaseByPaymentIntent", () => {
   beforeEach(resetDb);
 
   test("updates status and amountRefunded for the matching payment intent", async () => {
-    const userID = await seedUser();
+    const userId = await seedUser();
     const plan = await seedPlan();
     await addPurchase(
-      { userID },
+      { userId },
       {
-        planID: plan.id,
+        planId: plan.id,
         stripeCheckoutSessionId: "cs_1",
         stripePaymentIntentId: "pi_1",
         amountTotal: plan.amount,
@@ -27,7 +27,7 @@ describe("updatePurchaseByPaymentIntent", () => {
     );
     expect(res).not.toBeNull();
 
-    const [purchase] = await getAllPurchases({ userID });
+    const [purchase] = await getAllPurchases({ userId });
     expect(purchase?.status).toBe("refunded");
     expect(purchase?.amountRefunded).toBe(plan.amount);
   });

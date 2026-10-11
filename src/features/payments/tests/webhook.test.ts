@@ -57,61 +57,61 @@ beforeEach(async () => {
 
 describe("confirmCheckout", () => {
   test("resolves the owner from the pending Redis entry and records the purchase", async () => {
-    const userID = await seedUser();
+    const userId = await seedUser();
     const plan = await seedPlan();
     await savePendingCheckout(
       "cs_1",
-      { userID, planID: plan.id, status: "open" },
+      { userId, planId: plan.id, status: "open" },
       PENDING_CHECKOUT_TTL_SEC,
     );
 
     await confirmCheckout(session({ id: "cs_1" }));
 
-    const [purchase] = await getAllPurchases({ userID });
+    const [purchase] = await getAllPurchases({ userId });
     expect(purchase?.stripeCheckoutSessionId).toBe("cs_1");
-    expect(purchase?.planID).toBe(plan.id);
+    expect(purchase?.planId).toBe(plan.id);
 
     // the pending entry is cleaned up once the purchase is recorded
     expect(await getPendingCheckout("cs_1")).toBeNull();
   });
 
   test("falls back to session metadata when there's no pending Redis entry", async () => {
-    const userID = await seedUser();
+    const userId = await seedUser();
     const plan = await seedPlan();
 
     await confirmCheckout(
       session({
         id: "cs_2",
-        metadata: { userID, planID: String(plan.id) },
+        metadata: { userId, planId: String(plan.id) },
       }),
     );
 
-    const [purchase] = await getAllPurchases({ userID });
+    const [purchase] = await getAllPurchases({ userId });
     expect(purchase?.stripeCheckoutSessionId).toBe("cs_2");
   });
 
   test("records nothing when the owner can't be resolved at all", async () => {
-    const userID = await seedUser();
+    const userId = await seedUser();
 
     await confirmCheckout(session({ id: "cs_3", metadata: null }));
 
-    expect(await getAllPurchases({ userID })).toEqual([]);
+    expect(await getAllPurchases({ userId })).toEqual([]);
   });
 });
 
 describe("handleStripeEvent", () => {
   test("ignores an event type outside ALLOWED_EVENTS", async () => {
-    const userID = await seedUser();
+    const userId = await seedUser();
     await handleStripeEvent(event("customer.created", {}));
-    expect(await getAllPurchases({ userID })).toEqual([]);
+    expect(await getAllPurchases({ userId })).toEqual([]);
   });
 
   test("checkout.session.completed with mode payment and paid status confirms the checkout", async () => {
-    const userID = await seedUser();
+    const userId = await seedUser();
     const plan = await seedPlan();
     await savePendingCheckout(
       "cs_1",
-      { userID, planID: plan.id, status: "open" },
+      { userId, planId: plan.id, status: "open" },
       PENDING_CHECKOUT_TTL_SEC,
     );
 
@@ -119,16 +119,16 @@ describe("handleStripeEvent", () => {
       event("checkout.session.completed", session({ payment_status: "paid" })),
     );
 
-    const [purchase] = await getAllPurchases({ userID });
+    const [purchase] = await getAllPurchases({ userId });
     expect(purchase).not.toBeUndefined();
   });
 
   test("checkout.session.completed with an unpaid status marks it processing instead", async () => {
-    const userID = await seedUser();
+    const userId = await seedUser();
     const plan = await seedPlan();
     await savePendingCheckout(
       "cs_1",
-      { userID, planID: plan.id, status: "open" },
+      { userId, planId: plan.id, status: "open" },
       PENDING_CHECKOUT_TTL_SEC,
     );
 
@@ -139,24 +139,24 @@ describe("handleStripeEvent", () => {
       ),
     );
 
-    expect(await getAllPurchases({ userID })).toEqual([]);
+    expect(await getAllPurchases({ userId })).toEqual([]);
     expect((await getPendingCheckout("cs_1"))?.status).toBe("processing");
   });
 
   test("checkout.session.completed in subscription mode is ignored entirely", async () => {
-    const userID = await seedUser();
+    const userId = await seedUser();
     await handleStripeEvent(
       event("checkout.session.completed", session({ mode: "subscription" })),
     );
-    expect(await getAllPurchases({ userID })).toEqual([]);
+    expect(await getAllPurchases({ userId })).toEqual([]);
   });
 
   test("checkout.session.async_payment_failed removes the pending entry", async () => {
-    const userID = await seedUser();
+    const userId = await seedUser();
     const plan = await seedPlan();
     await savePendingCheckout(
       "cs_1",
-      { userID, planID: plan.id, status: "open" },
+      { userId, planId: plan.id, status: "open" },
       PENDING_CHECKOUT_TTL_SEC,
     );
 
@@ -168,11 +168,11 @@ describe("handleStripeEvent", () => {
   });
 
   test("checkout.session.expired removes the pending entry", async () => {
-    const userID = await seedUser();
+    const userId = await seedUser();
     const plan = await seedPlan();
     await savePendingCheckout(
       "cs_1",
-      { userID, planID: plan.id, status: "open" },
+      { userId, planId: plan.id, status: "open" },
       PENDING_CHECKOUT_TTL_SEC,
     );
 
@@ -182,12 +182,12 @@ describe("handleStripeEvent", () => {
   });
 
   test("charge.refunded updates an existing purchase's refund state", async () => {
-    const userID = await seedUser();
+    const userId = await seedUser();
     const plan = await seedPlan();
     await addPurchase(
-      { userID },
+      { userId },
       {
-        planID: plan.id,
+        planId: plan.id,
         stripeCheckoutSessionId: "cs_1",
         stripePaymentIntentId: "pi_1",
         amountTotal: plan.amount,
@@ -203,13 +203,13 @@ describe("handleStripeEvent", () => {
       }),
     );
 
-    const [purchase] = await getAllPurchases({ userID });
+    const [purchase] = await getAllPurchases({ userId });
     expect(purchase?.status).toBe("refunded");
     expect(purchase?.amountRefunded).toBe(plan.amount);
   });
 
-  test("charge.refunded with no matching purchase, but ours (has metadata.planID), throws so Stripe retries", async () => {
-    retrievedIntentMetadata = { planID: "1" };
+  test("charge.refunded with no matching purchase, but ours (has metadata.planId), throws so Stripe retries", async () => {
+    retrievedIntentMetadata = { planId: "1" };
 
     await expect(
       handleStripeEvent(
@@ -222,7 +222,7 @@ describe("handleStripeEvent", () => {
     ).rejects.toThrow();
   });
 
-  test("charge.refunded with no matching purchase and no planID metadata is ignored (e.g. a subscription invoice)", async () => {
+  test("charge.refunded with no matching purchase and no planId metadata is ignored (e.g. a subscription invoice)", async () => {
     retrievedIntentMetadata = {};
 
     await expect(
@@ -237,12 +237,12 @@ describe("handleStripeEvent", () => {
   });
 
   test("charge.dispute.created updates the purchase status via purchaseStatusFromDispute", async () => {
-    const userID = await seedUser();
+    const userId = await seedUser();
     const plan = await seedPlan();
     await addPurchase(
-      { userID },
+      { userId },
       {
-        planID: plan.id,
+        planId: plan.id,
         stripeCheckoutSessionId: "cs_1",
         stripePaymentIntentId: "pi_1",
         amountTotal: plan.amount,
@@ -257,7 +257,7 @@ describe("handleStripeEvent", () => {
       }),
     );
 
-    const [purchase] = await getAllPurchases({ userID });
+    const [purchase] = await getAllPurchases({ userId });
     expect(purchase?.status).toBe("disputed");
   });
 });

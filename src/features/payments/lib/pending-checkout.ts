@@ -7,9 +7,9 @@ import type { Payment } from "@f/payments/lib/types";
  */
 export type PendingCheckout = {
   // always the real, live user who started the checkout - never null, unlike
-  // a purchase row's own userID once that user is later deleted
-  userID: string;
-  planID: Payment.Plan["id"];
+  // a purchase row's own userId once that user is later deleted
+  userId: string;
+  planId: Payment.Plan["id"];
   status: "open" | "processing";
 };
 

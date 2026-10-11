@@ -6,17 +6,17 @@ describe("addTodo", () => {
   beforeEach(resetDb);
 
   test("inserts a todo scoped to the given user", async () => {
-    const userID = await seedUser();
-    const res = await addTodo({ userID }, { name: "write tests" });
+    const userId = await seedUser();
+    const res = await addTodo({ userId }, { name: "write tests" });
 
     expect(res).not.toBeNull();
     expect(res?.name).toBe("write tests");
-    expect(res?.userID).toBe(userID);
+    expect(res?.userId).toBe(userId);
   });
 
   test("defaults isComplete to false when not provided", async () => {
-    const userID = await seedUser();
-    const res = await addTodo({ userID }, { name: "another task" });
+    const userId = await seedUser();
+    const res = await addTodo({ userId }, { name: "another task" });
 
     expect(res?.isComplete).toBe(false);
   });

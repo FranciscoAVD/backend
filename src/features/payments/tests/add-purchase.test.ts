@@ -6,13 +6,13 @@ describe("addPurchase", () => {
   beforeEach(resetDb);
 
   test("inserts a purchase for the given user", async () => {
-    const userID = await seedUser();
+    const userId = await seedUser();
     const plan = await seedPlan();
 
     const res = await addPurchase(
-      { userID },
+      { userId },
       {
-        planID: plan.id,
+        planId: plan.id,
         stripeCheckoutSessionId: "cs_test_1",
         stripePaymentIntentId: "pi_test_1",
         amountTotal: plan.amount,
@@ -21,23 +21,23 @@ describe("addPurchase", () => {
     );
 
     expect(res).not.toBeNull();
-    expect(res?.userID).toBe(userID);
+    expect(res?.userId).toBe(userId);
     expect(res?.status).toBe("paid");
   });
 
   test("a retried insert for the same checkout session is a no-op", async () => {
-    const userID = await seedUser();
+    const userId = await seedUser();
     const plan = await seedPlan();
     const purchaseData = {
-      planID: plan.id,
+      planId: plan.id,
       stripeCheckoutSessionId: "cs_test_dup",
       stripePaymentIntentId: "pi_test_dup",
       amountTotal: plan.amount,
       currency: plan.currency,
     };
 
-    const first = await addPurchase({ userID }, purchaseData);
-    const second = await addPurchase({ userID }, purchaseData);
+    const first = await addPurchase({ userId }, purchaseData);
+    const second = await addPurchase({ userId }, purchaseData);
 
     expect(first).not.toBeNull();
     expect(second).toBeNull();

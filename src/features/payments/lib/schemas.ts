@@ -39,7 +39,7 @@ export const insertPlanSchema = createInsertSchema(plan, {
 export const selectPlanSchema = createSelectSchema(plan);
 
 export const insertPurchaseSchema = createInsertSchema(purchase).omit({
-  userID: true,
+  userId: true,
   status: true,
   amountRefunded: true,
   createdAt: true,
@@ -52,5 +52,5 @@ export const updatePurchaseSchema = createUpdateSchema(purchase).pick({
 export const selectPurchaseSchema = createSelectSchema(purchase);
 
 export const checkoutSchema = z.object({
-  planID: z.number().int().positive(),
+  planId: z.number().int().positive(),
 });

@@ -14,12 +14,12 @@ describe("savePendingCheckout / getPendingCheckout", () => {
   test("round-trips a pending checkout", async () => {
     await savePendingCheckout(
       "cs_1",
-      { userID: "u1", planID: 1, status: "open" },
+      { userId: "u1", planId: 1, status: "open" },
       PENDING_CHECKOUT_TTL_SEC,
     );
 
     const res = await getPendingCheckout("cs_1");
-    expect(res).toEqual({ userID: "u1", planID: 1, status: "open" });
+    expect(res).toEqual({ userId: "u1", planId: 1, status: "open" });
   });
 
   test("returns null for a session with no pending entry", async () => {
@@ -34,7 +34,7 @@ describe("markProcessing", () => {
   test("flips status to processing and keeps the rest of the data", async () => {
     await savePendingCheckout(
       "cs_1",
-      { userID: "u1", planID: 1, status: "open" },
+      { userId: "u1", planId: 1, status: "open" },
       PENDING_CHECKOUT_TTL_SEC,
     );
 
@@ -42,7 +42,7 @@ describe("markProcessing", () => {
     expect(ok).toBe(true);
 
     const res = await getPendingCheckout("cs_1");
-    expect(res).toEqual({ userID: "u1", planID: 1, status: "processing" });
+    expect(res).toEqual({ userId: "u1", planId: 1, status: "processing" });
   });
 
   test("returns false when there's no pending entry to update", async () => {
@@ -57,7 +57,7 @@ describe("removePendingCheckout", () => {
   test("deletes the entry", async () => {
     await savePendingCheckout(
       "cs_1",
-      { userID: "u1", planID: 1, status: "open" },
+      { userId: "u1", planId: 1, status: "open" },
       PENDING_CHECKOUT_TTL_SEC,
     );
 

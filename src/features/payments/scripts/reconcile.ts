@@ -57,11 +57,11 @@ async function targetState(
 }
 
 async function reconcile(session: Stripe.Checkout.Session) {
-  const userID = session.metadata?.userID;
-  if (!userID) throw new Error("Checkout session has no userID metadata");
+  const userId = session.metadata?.userId;
+  if (!userId) throw new Error("Checkout session has no userId metadata");
 
   const existing = await paymentsRepo.purchase.getBySession({
-    userID,
+    userId,
     stripeCheckoutSessionId: session.id,
   });
 
@@ -111,7 +111,7 @@ async function run() {
     if (
       session.mode !== "payment" ||
       session.payment_status === "unpaid" ||
-      !session.metadata?.planID
+      !session.metadata?.planId
     )
       continue;
 

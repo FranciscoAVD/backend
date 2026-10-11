@@ -10,13 +10,13 @@ describe("getAllPurchases", () => {
   beforeEach(resetDb);
 
   test("returns only the given user's purchases", async () => {
-    const userID = await seedUser();
-    const otherUserID = await seedUser();
+    const userId = await seedUser();
+    const otherUserId = await seedUser();
     const plan = await seedPlan();
     await addPurchase(
-      { userID },
+      { userId },
       {
-        planID: plan.id,
+        planId: plan.id,
         stripeCheckoutSessionId: "cs_mine",
         stripePaymentIntentId: "pi_mine",
         amountTotal: plan.amount,
@@ -24,9 +24,9 @@ describe("getAllPurchases", () => {
       },
     );
     await addPurchase(
-      { userID: otherUserID },
+      { userId: otherUserId },
       {
-        planID: plan.id,
+        planId: plan.id,
         stripeCheckoutSessionId: "cs_other",
         stripePaymentIntentId: "pi_other",
         amountTotal: plan.amount,
@@ -34,7 +34,7 @@ describe("getAllPurchases", () => {
       },
     );
 
-    const res = await getAllPurchases({ userID });
+    const res = await getAllPurchases({ userId });
     expect(res).toHaveLength(1);
     expect(res[0]?.stripeCheckoutSessionId).toBe("cs_mine");
   });
@@ -44,12 +44,12 @@ describe("getPurchaseBySession", () => {
   beforeEach(resetDb);
 
   test("returns the purchase scoped to the session and user", async () => {
-    const userID = await seedUser();
+    const userId = await seedUser();
     const plan = await seedPlan();
     await addPurchase(
-      { userID },
+      { userId },
       {
-        planID: plan.id,
+        planId: plan.id,
         stripeCheckoutSessionId: "cs_1",
         stripePaymentIntentId: "pi_1",
         amountTotal: plan.amount,
@@ -58,20 +58,20 @@ describe("getPurchaseBySession", () => {
     );
 
     const res = await getPurchaseBySession({
-      userID,
+      userId,
       stripeCheckoutSessionId: "cs_1",
     });
     expect(res?.stripeCheckoutSessionId).toBe("cs_1");
   });
 
   test("returns null when the session belongs to a different user", async () => {
-    const userID = await seedUser();
-    const otherUserID = await seedUser();
+    const userId = await seedUser();
+    const otherUserId = await seedUser();
     const plan = await seedPlan();
     await addPurchase(
-      { userID },
+      { userId },
       {
-        planID: plan.id,
+        planId: plan.id,
         stripeCheckoutSessionId: "cs_1",
         stripePaymentIntentId: "pi_1",
         amountTotal: plan.amount,
@@ -80,7 +80,7 @@ describe("getPurchaseBySession", () => {
     );
 
     const res = await getPurchaseBySession({
-      userID: otherUserID,
+      userId: otherUserId,
       stripeCheckoutSessionId: "cs_1",
     });
     expect(res).toBeNull();

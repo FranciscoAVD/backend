@@ -18,7 +18,7 @@ When adding a new DB-backed resource (routes/use-cases/schemas, following the `f
 - Type each use-case's payload parameter by mirroring which namespace member it needs — this is the part that matters, not just having the namespace exist:
   - Create actions take the `.Insert` variant: `addResource(user, data: Resource.Insert)`.
   - Update actions take the `.Update` variant: `updateResource(target, data: Resource.Update)`.
-  - Read/delete actions that need no payload instead take `Pick<Resource, "id" | "userID">` off the bare entity type, since they only need identifying fields.
+  - Read/delete actions that need no payload instead take `Pick<Resource, "id" | "userId">` off the bare entity type, since they only need identifying fields.
 
 Don't reach for this namespace pattern for things that aren't DB-backed resources with insert/update/select variants (middleware options, adapter contracts like better-auth's `secondaryStorage`) — a plain type is correct there.
 

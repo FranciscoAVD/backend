@@ -7,25 +7,25 @@ describe("getTodo", () => {
   beforeEach(resetDb);
 
   test("returns the todo when it belongs to the given user", async () => {
-    const userID = await seedUser();
-    const created = await addTodo({ userID }, { name: "task" });
+    const userId = await seedUser();
+    const created = await addTodo({ userId }, { name: "task" });
 
-    const res = await getTodo({ id: created!.id, userID });
+    const res = await getTodo({ id: created!.id, userId });
     expect(res?.id).toBe(created!.id);
   });
 
   test("returns null for a todo belonging to a different user", async () => {
-    const userID = await seedUser();
-    const otherUserID = await seedUser();
-    const created = await addTodo({ userID }, { name: "task" });
+    const userId = await seedUser();
+    const otherUserId = await seedUser();
+    const created = await addTodo({ userId }, { name: "task" });
 
-    const res = await getTodo({ id: created!.id, userID: otherUserID });
+    const res = await getTodo({ id: created!.id, userId: otherUserId });
     expect(res).toBeNull();
   });
 
   test("returns null for a nonexistent id", async () => {
-    const userID = await seedUser();
-    const res = await getTodo({ id: 999999, userID });
+    const userId = await seedUser();
+    const res = await getTodo({ id: 999999, userId });
     expect(res).toBeNull();
   });
 });
@@ -34,19 +34,19 @@ describe("getAllTodos", () => {
   beforeEach(resetDb);
 
   test("returns only the given user's todos", async () => {
-    const userID = await seedUser();
-    const otherUserID = await seedUser();
-    await addTodo({ userID }, { name: "mine" });
-    await addTodo({ userID: otherUserID }, { name: "not mine" });
+    const userId = await seedUser();
+    const otherUserId = await seedUser();
+    await addTodo({ userId }, { name: "mine" });
+    await addTodo({ userId: otherUserId }, { name: "not mine" });
 
-    const res = await getAllTodos({ userID });
+    const res = await getAllTodos({ userId });
     expect(res).toHaveLength(1);
     expect(res[0]?.name).toBe("mine");
   });
 
   test("returns an empty array when the user has no todos", async () => {
-    const userID = await seedUser();
-    const res = await getAllTodos({ userID });
+    const userId = await seedUser();
+    const res = await getAllTodos({ userId });
     expect(res).toEqual([]);
   });
 });

@@ -8,10 +8,10 @@ import {
 } from "@f/payments/lib/pending-checkout";
 import { getPurchaseBySession } from "@f/payments/use-cases/get-purchases";
 
-// userID here is always the live, authenticated caller's id, unlike a purchase
-// row's own (nullable) userID once that user is deleted
+// userId here is always the live, authenticated caller's id, unlike a purchase
+// row's own (nullable) userId once that user is deleted
 type CheckoutUser = {
-  userID: string;
+  userId: string;
   email: string;
   stripeCustomerId?: string | null;
 };
@@ -28,7 +28,7 @@ export async function createCheckout(
   plan: Pick<Payment.Plan, "id" | "stripePriceId">,
 ): Promise<{ sessionId: string; url: string | null }> {
   // also kept on the session so a confirmed payment can still be recorded if the Redis entry is gone
-  const metadata = { userID: user.userID, planID: String(plan.id) };
+  const metadata = { userId: user.userId, planId: String(plan.id) };
 
   const session = await getPaymentProcessor().checkout.sessions.create({
     mode: "payment",
@@ -37,7 +37,7 @@ export async function createCheckout(
       ? { customer: user.stripeCustomerId }
       : { customer_email: user.email, customer_creation: "always" as const }),
     line_items: [{ price: plan.stripePriceId, quantity: 1 }],
-    client_reference_id: user.userID,
+    client_reference_id: user.userId,
     metadata,
     payment_intent_data: { metadata },
     success_url: `${env.CLIENT_URL}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
@@ -47,7 +47,7 @@ export async function createCheckout(
 
   await savePendingCheckout(
     session.id,
-    { userID: user.userID, planID: plan.id, status: "open" },
+    { userId: user.userId, planId: plan.id, status: "open" },
     PENDING_CHECKOUT_TTL_SEC,
   );
 
@@ -61,13 +61,13 @@ export async function createCheckout(
  * @returns The checkout status, or null if the user has no checkout with that ID.
  */
 export async function getCheckoutStatus(
-  checkout: { userID: string } & Pick<Payment.Purchase, "stripeCheckoutSessionId">,
+  checkout: { userId: string } & Pick<Payment.Purchase, "stripeCheckoutSessionId">,
 ): Promise<Payment.Purchase["status"] | "open" | "processing" | null> {
   const purchase = await getPurchaseBySession(checkout);
   if (purchase) return purchase.status;
 
   const pending = await getPendingCheckout(checkout.stripeCheckoutSessionId);
-  if (pending && pending.userID === checkout.userID) return pending.status;
+  if (pending && pending.userId === checkout.userId) return pending.status;
 
   return null;
 }

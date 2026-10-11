@@ -24,17 +24,17 @@ const idOf = (ref: string | { id: string } | null) =>
  */
 async function resolveOwner(
   session: Stripe.Checkout.Session,
-): Promise<Pick<PendingCheckout, "userID" | "planID"> | null> {
+): Promise<Pick<PendingCheckout, "userId" | "planId"> | null> {
   const [pending, error] = await tryCatch(getPendingCheckout(session.id));
-  if (pending) return { userID: pending.userID, planID: pending.planID };
+  if (pending) return { userId: pending.userId, planId: pending.planId };
 
   logger.warn(
     { err: error ?? undefined, session: session.id },
     "payments.webhook.pending_missing",
   );
-  const userID = session.metadata?.userID;
-  const planID = Number(session.metadata?.planID);
-  return userID && Number.isInteger(planID) ? { userID, planID } : null;
+  const userId = session.metadata?.userId;
+  const planId = Number(session.metadata?.planId);
+  return userId && Number.isInteger(planId) ? { userId, planId } : null;
 }
 
 export async function confirmCheckout(session: Stripe.Checkout.Session) {
@@ -51,9 +51,9 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
   }
 
   await paymentsRepo.purchase.add(
-    { userID: owner.userID },
+    { userId: owner.userId },
     {
-      planID: owner.planID,
+      planId: owner.planId,
       stripeCheckoutSessionId: session.id,
       stripePaymentIntentId: idOf(session.payment_intent),
       amountTotal: session.amount_total ?? 0,
@@ -86,7 +86,7 @@ async function updateByCharge(
   const intent = await getPaymentProcessor().paymentIntents.retrieve(
     stripePaymentIntentId,
   );
-  if (intent.metadata.planID)
+  if (intent.metadata.planId)
     throw new Error("Purchase not recorded yet for this payment intent");
 }
 

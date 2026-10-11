@@ -63,7 +63,7 @@ const app = new Hono<PinoLoggerEnv>()
   })
   .get("/purchases", async (c) => {
     const { user } = c.get("session");
-    const [res, error] = await tryCatch(paymentsRepo.purchase.getAll({ userID: user.id }));
+    const [res, error] = await tryCatch(paymentsRepo.purchase.getAll({ userId: user.id }));
     if (error) {
       c.var.logger.error({ err: error, user: user.id }, "payments.purchase.getAll");
       return c.json(
@@ -82,7 +82,7 @@ const app = new Hono<PinoLoggerEnv>()
 
     const [res, error] = await tryCatch(
       paymentsRepo.checkout.getStatus({
-        userID: user.id,
+        userId: user.id,
         stripeCheckoutSessionId: sessionId,
       }),
     );
@@ -170,11 +170,11 @@ const app = new Hono<PinoLoggerEnv>()
       const { user } = c.get("session");
       const { data } = c.req.valid("json");
 
-      const [plan, planError] = await tryCatch(paymentsRepo.plan.get({ id: data.planID }));
+      const [plan, planError] = await tryCatch(paymentsRepo.plan.get({ id: data.planId }));
 
       if (planError) {
         c.var.logger.error(
-          { err: planError, user: user.id, plan: data.planID },
+          { err: planError, user: user.id, plan: data.planId },
           "payments.checkout.create",
         );
         return c.json(
@@ -196,7 +196,7 @@ const app = new Hono<PinoLoggerEnv>()
       const [res, error] = await tryCatch(
         paymentsRepo.checkout.create(
           {
-            userID: user.id,
+            userId: user.id,
             email: user.email,
             // only present when the stripe plugin is active, which it is whenever this route is reachable
             stripeCustomerId: (user as { stripeCustomerId?: string | null })

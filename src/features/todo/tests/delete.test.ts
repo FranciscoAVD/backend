@@ -8,31 +8,31 @@ describe("deleteTodo", () => {
   beforeEach(resetDb);
 
   test("deletes the todo, and it's no longer retrievable", async () => {
-    const userID = await seedUser();
-    const created = await addTodo({ userID }, { name: "task" });
+    const userId = await seedUser();
+    const created = await addTodo({ userId }, { name: "task" });
 
-    const res = await deleteTodo({ id: created!.id, userID });
+    const res = await deleteTodo({ id: created!.id, userId });
     expect(res?.id).toBe(created!.id);
 
-    const after = await getTodo({ id: created!.id, userID });
+    const after = await getTodo({ id: created!.id, userId });
     expect(after).toBeNull();
   });
 
   test("returns null when the todo belongs to a different user, and leaves it intact", async () => {
-    const userID = await seedUser();
-    const otherUserID = await seedUser();
-    const created = await addTodo({ userID }, { name: "task" });
+    const userId = await seedUser();
+    const otherUserId = await seedUser();
+    const created = await addTodo({ userId }, { name: "task" });
 
-    const res = await deleteTodo({ id: created!.id, userID: otherUserID });
+    const res = await deleteTodo({ id: created!.id, userId: otherUserId });
     expect(res).toBeNull();
 
-    const stillThere = await getTodo({ id: created!.id, userID });
+    const stillThere = await getTodo({ id: created!.id, userId });
     expect(stillThere).not.toBeNull();
   });
 
   test("returns null for a nonexistent id", async () => {
-    const userID = await seedUser();
-    const res = await deleteTodo({ id: 999999, userID });
+    const userId = await seedUser();
+    const res = await deleteTodo({ id: 999999, userId });
     expect(res).toBeNull();
   });
 });
