@@ -12,14 +12,13 @@ export const env = createEnv({
     // Payments
     STRIPE_SECRET_KEY: z.string(),
     STRIPE_WEBHOOK_SECRET: z.string(),
-    // Database
-    DB_PROVIDER: z.string(),
-    DB_USER: z.string(),
-    DB_PASSWORD: z.string().min(12),
+    // Database: either DB_URL, or every discrete field below - never both, never a mix
+    DB_PROVIDER: z.string().optional(),
+    DB_USER: z.string().optional(),
+    DB_PASSWORD: z.string().min(12).optional(),
     DB_HOST: z.string().optional().default("localhost"),
-    DB_PORT: z.coerce.number(),
-    DB_NAME: z.string(),
-    // Prod
+    DB_PORT: z.coerce.number().optional(),
+    DB_NAME: z.string().optional(),
     DB_URL: z.url().optional(),
     // Redis
     REDIS_PORT: z.coerce.number(),
@@ -32,3 +31,29 @@ export const env = createEnv({
   emptyStringAsUndefined: true,
   runtimeEnv: process.env,
 });
+
+const DISCRETE_DB_FIELDS = [
+  "DB_PROVIDER",
+  "DB_USER",
+  "DB_PASSWORD",
+  "DB_PORT",
+  "DB_NAME",
+] as const;
+
+const setDiscreteDbFields = DISCRETE_DB_FIELDS.filter(
+  (key) => env[key] !== undefined,
+);
+
+if (env.DB_URL && setDiscreteDbFields.length > 0) {
+  throw new Error(
+    `Set either DB_URL or the discrete DB_* fields, not both (DB_URL is set alongside ${setDiscreteDbFields.join(", ")})`,
+  );
+}
+if (!env.DB_URL && setDiscreteDbFields.length < DISCRETE_DB_FIELDS.length) {
+  const missing = DISCRETE_DB_FIELDS.filter(
+    (key) => !setDiscreteDbFields.includes(key),
+  );
+  throw new Error(
+    `Set either DB_URL or all of ${DISCRETE_DB_FIELDS.join(", ")} (missing ${missing.join(", ")})`,
+  );
+}
