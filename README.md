@@ -45,6 +45,16 @@ Seed an admin user with `./src/features/auth/lib/seed-admin.sh` (creates `admin@
 
 See `CLAUDE.md` for Bun-specific conventions (APIs to prefer, testing).
 
+## Testing
+
+```sh
+docker compose exec postgres psql -U admin -d backend -c "CREATE DATABASE backend_test"   # one-time
+bun run db:test:push   # re-run after schema changes
+bun run test
+```
+
+Always use `bun run test`, not bare `bun test` — the script points the DB-integration tests at `backend_test` instead of the dev database. See `CLAUDE.md`'s Testing section for what's covered so far and what isn't yet.
+
 ## Running with Docker
 
 `docker build -t backend .` produces a production image (multi-stage: `bun install --production` in its own layer, so it's only re-run when `bun.lock` changes). It expects every env var in `.env.example` to be set — e.g. `--env-file .env` — and listens on `SERVER_PORT` (`EXPOSE 8000` matches the example default). `compose.yaml` only provisions Postgres and Redis for local dev; it doesn't define a service for this image.

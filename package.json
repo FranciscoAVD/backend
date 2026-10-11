@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "bun run --hot src/index.ts",
     "start": "bun run src/index.ts",
+    "test": "DB_NAME=backend_test bun test",
     "db:push": "bun run drizzle-kit push",
+    "db:test:push": "DB_NAME=backend_test bun run drizzle-kit push",
     "db:studio": "bun run drizzle-kit studio",
     "db:seed-admin": "bash ./src/features/auth/lib/seed-admin.sh",
     "payments:reconcile": "bun run ./src/features/payments/scripts/reconcile.ts"

@@ -39,6 +39,15 @@ When something needs logging (a caught error, a noteworthy state), don't reach f
 
 A conditionally-mounted router (behind an env flag, if one exists again later) can't be part of this chain without either always mounting it or lying about `AppType` — keep it as a separate statement and accept it's excluded from `AppType`, or expose its own standalone `export type <Feature>AppType = typeof app` from that feature's route file for a client that knows it's enabled.
 
+# Testing
+
+**Always run `bun run test`, never bare `bun test`.** The `test` script sets `DB_NAME=backend_test`; bare `bun test` falls through to `.env`'s `DB_NAME` (the dev database) and will truncate real dev data the moment a test file's `beforeEach(resetDb)` runs.
+
+- One-time setup per machine: `docker compose exec postgres psql -U admin -d backend -c "CREATE DATABASE backend_test"`, then `bun run db:test:push` (re-run the latter after schema changes, same as `db:push` for dev).
+- DB-integration tests import `resetDb`/`seedUser`/`seedPlan` from `src/test-helpers/db.ts`. Call `resetDb()` in a top-level `beforeEach` so every test starts from an empty database; `seedUser()`/`seedPlan()` insert the minimal valid row a use-case's FK constraints need (bypassing better-auth/Stripe entirely — these tests exercise the use-case's query logic, not auth or payment processing).
+- Pure functions (no `db`/`redis`/Stripe import in their call chain, e.g. `payments/lib/utils.ts`) need none of the above — plain `describe`/`test`/`expect`, co-located as `<file>.test.ts` next to the file under test.
+- Covered so far: `payments/lib/utils.ts`'s pure functions, and the DB-only use-cases in `features/todo/use-cases/` and `features/payments/use-cases/` (`add-purchase`, `get-plans`, `get-purchases`, `update-purchase`). **Not yet covered** (needs a Stripe/Redis-faking strategy decided first): `add-plan.ts` and `checkout.ts` (Stripe), `payments/lib/webhook.ts` and `pending-checkout.ts` (Stripe/Redis), and route-level HTTP tests (would need to fake `sessionMiddleware`/`requireSessionMiddleware` and the rate limiter's live Redis dependency).
+
 # Branches
 
 Before starting work on a new feature, create a branch off an up-to-date `master` and do the feature's commits there, not on `master`: `git switch -c <feature-name>`, with a short kebab-case name for the feature (e.g. `payments`).
