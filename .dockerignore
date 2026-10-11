@@ -1,0 +1,7 @@
+node_modules
+.git
+.env*
+*.md
+drizzle.config.ts
+drizzle
+compose.yaml

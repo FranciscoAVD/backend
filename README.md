@@ -45,6 +45,10 @@ Seed an admin user with `./src/features/auth/lib/seed-admin.sh` (creates `admin@
 
 See `CLAUDE.md` for Bun-specific conventions (APIs to prefer, testing).
 
+## Running with Docker
+
+`docker build -t backend .` produces a production image (multi-stage: `bun install --production` in its own layer, so it's only re-run when `bun.lock` changes). It expects every env var in `.env.example` to be set — e.g. `--env-file .env` — and listens on `SERVER_PORT` (`EXPOSE 8000` matches the example default). `compose.yaml` only provisions Postgres and Redis for local dev; it doesn't define a service for this image.
+
 ## Client usage
 
 `src/index.ts` exports `AppType`, so a TS client gets full request/response type inference for free via `hono/client`, no codegen or OpenAPI spec needed:
