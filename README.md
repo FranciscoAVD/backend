@@ -53,7 +53,7 @@ bun run db:test:push   # re-run after schema changes
 bun run test
 ```
 
-Always use `bun run test`, not bare `bun test` — the script points the DB-integration tests at `backend_test` instead of the dev database. See `CLAUDE.md`'s Testing section for what's covered so far and what isn't yet.
+Always use `bun run test`, not bare `bun test` — the script points DB-integration tests at `backend_test` and Redis-dependent tests at Redis db index 1, instead of dev's. See `CLAUDE.md`'s Testing section for what's covered so far and what isn't yet.
 
 ## Running with Docker
 
