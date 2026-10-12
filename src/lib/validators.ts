@@ -2,12 +2,12 @@ import { validator } from "hono/validator";
 import { z } from "zod";
 import HTTP from "@vicstack/http";
 
+const ID_PATTERN = /^\d+$/;
+
 export const idParamValidator = validator("param", (value, c) => {
   const id = value["id"];
 
-  // Number(), not parseInt(): parseInt("12abc") is 12, silently accepting
-  // trailing garbage instead of rejecting it
-  if (!id || !Number.isInteger(Number(id)))
+  if (!id || !ID_PATTERN.test(id))
     return c.json(
       {
         error: {

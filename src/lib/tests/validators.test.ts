@@ -9,7 +9,6 @@ const app = new Hono().get("/:id", idParamValidator, (c) => {
 
 describe("idParamValidator", () => {
   test("rejects a numeric-prefixed garbage id like 12abc", async () => {
-    // parseInt("12abc") is 12 - Number() is what actually rejects trailing garbage
     const res = await app.request("/12abc");
     expect(res.status).toBe(400);
   });
@@ -22,6 +21,21 @@ describe("idParamValidator", () => {
 
   test("rejects a non-integer like 12.5", async () => {
     const res = await app.request("/12.5");
+    expect(res.status).toBe(400);
+  });
+
+  test("rejects a negative id", async () => {
+    const res = await app.request("/-12");
+    expect(res.status).toBe(400);
+  });
+
+  test("rejects a leading-plus id like +12", async () => {
+    const res = await app.request("/%2B12");
+    expect(res.status).toBe(400);
+  });
+
+  test("rejects hex notation like 0x10", async () => {
+    const res = await app.request("/0x10");
     expect(res.status).toBe(400);
   });
 });
