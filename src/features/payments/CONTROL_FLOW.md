@@ -247,8 +247,11 @@ late settlement whose webhook was lost needs to still fall inside the window.
 
 ## Checking active access: `hasActivePurchase`
 
-Nothing calls this yet, but it's the intended way to answer "does this user
-currently have access to this plan" once something needs to. Storage is always
+`GET /plans/:id/access` is the one place this is called from today - it answers
+"does the caller currently have access to this plan" (404 if the plan doesn't
+exist, 422 if it's `recurring` - that plan type's access is governed by its Stripe
+subscription period, not a `purchase` row, so `hasActivePurchase` would always
+answer `false` for it regardless of subscription state). Storage is always
 independent rows - each purchase's own `durationDays` is snapshotted at
 purchase time, never chained with any other purchase's - so `plan.overlapping`
 only changes how they're *read*: `overlapping: false` recomputes each
