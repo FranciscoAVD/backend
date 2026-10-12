@@ -22,6 +22,7 @@ describe("deleting a user", () => {
         currency: plan.currency,
       },
       { durationDays: plan.durationDays },
+      new Date(),
     );
 
     await db.delete(user).where(eq(user.id, userId));

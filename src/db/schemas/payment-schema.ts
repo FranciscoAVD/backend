@@ -19,6 +19,15 @@ export const purchaseStatus = pgEnum("purchase_status", [
   "refunded",
   "disputed",
 ]);
+export const paymentAuditType = pgEnum("payment_audit_type", [
+  // 409 at POST /checkout: a non-repeatable plan is already owned
+  "checkout_blocked_existing_purchase",
+  // 409 at POST /checkout: another open/processing checkout for the same (user, plan) exists
+  "checkout_blocked_pending_checkout",
+  // confirmCheckout: money was taken for an already-owned non-repeatable plan (the race the
+  // two guards above can't fully close) - still recorded as a purchase; this flags it for review
+  "duplicate_purchase_confirmed",
+]);
 
 export const plan = pgTable("plan", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -75,6 +84,9 @@ export const purchase = pgTable(
     // from the plan's durationDays at the time of purchase; null means it never expires.
     // Each purchase's window is independent, so two purchases of the same plan can overlap.
     expiresAt: timestamp("expires_at"),
+    // snapshot of the plan's durationDays at purchase time, so a later edit to the plan
+    // doesn't rewrite history for purchases already made (used to re-derive chained windows)
+    durationDays: integer("duration_days"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
       .notNull()
@@ -82,6 +94,28 @@ export const purchase = pgTable(
       .$onUpdate(() => new Date()),
   },
   (t) => [index("purchase_user_idx").on(t.userId)],
+);
+
+// a persistent, queryable trail of the race conditions around `plan.repeatable` - the two
+// checkout-blocked cases and the race that can't be fully closed, where money was already taken
+// for an already-owned non-repeatable plan and needs a human to review for a possible refund
+export const paymentAuditLog = pgTable(
+  "payment_audit_log",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    type: paymentAuditType("type").notNull(),
+    userId: text("user_id").references(() => user.id, { onDelete: "set null" }),
+    planId: integer("plan_id").references(() => plan.id, { onDelete: "set null" }),
+    existingPurchaseId: integer("existing_purchase_id").references(
+      () => purchase.id,
+      { onDelete: "set null" },
+    ),
+    // only set for duplicate_purchase_confirmed
+    stripeCheckoutSessionId: text("stripe_checkout_session_id"),
+    details: jsonb("details").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [index("payment_audit_log_user_idx").on(t.userId)],
 );
 
 export const planRelations = relations(plan, ({ many }) => ({

@@ -1,4 +1,5 @@
 import type Stripe from "stripe";
+import { SQL } from "bun";
 import {
   ALLOWED_EVENTS,
   CHECKOUT_SESSION_ID_PREFIX,
@@ -25,6 +26,31 @@ export function isCheckoutSessionId(value: unknown): value is string {
 /** @description Narrows a Stripe event to one listed in `ALLOWED_EVENTS`. */
 export function isAllowedEvent(event: Stripe.Event): event is AllowedEvent {
   return (ALLOWED_EVENTS as readonly string[]).includes(event.type);
+}
+
+/**
+ * @description Whether an error is a Postgres foreign-key violation on the given column. The
+ * SQLSTATE lives in `.errno` (not `.code`, which is Bun's own generic error code), and there's no
+ * usable per-column field - `.column`/`.line` are the JS source location the error was
+ * constructed at, not anything about the SQL. The reliable signal is the column name Postgres
+ * embeds in `.detail` (`Key (<column>)=... is not present in table ...`), which comes from
+ * Postgres itself and doesn't depend on Drizzle's auto-generated constraint name staying stable
+ * across a future `drizzle-kit push` regeneration. Drizzle wraps the real `SQL.PostgresError` in
+ * its own `DrizzleQueryError`, with the original attached as `.cause`, so both are checked.
+ */
+export function isForeignKeyViolation(error: unknown, column: string): boolean {
+  const cause =
+    error instanceof SQL.PostgresError
+      ? error
+      : error instanceof Error && error.cause instanceof SQL.PostgresError
+        ? error.cause
+        : null;
+  return (
+    cause !== null &&
+    cause.errno === "23503" &&
+    typeof cause.detail === "string" &&
+    cause.detail.includes(`(${column})=`)
+  );
 }
 
 /**

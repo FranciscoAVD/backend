@@ -1,7 +1,9 @@
 import { db } from "@d/connection";
 import { purchase as purchaseTable } from "@d/schemas/payment-schema";
 import type { Payment } from "@f/payments/lib/types";
-import { eq, and, asc } from "drizzle-orm";
+import { eq, and, asc, inArray } from "drizzle-orm";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * @description Select query for all purchases with a matching user ID. Assumes validation. Operation must be wrapped in try-catch
@@ -45,12 +47,13 @@ export async function getPurchaseBySession(
 }
 
 /**
- * @description Select query for a paid purchase of the given plan by the given user. Used to block
- * repurchasing a plan whose `repeatable` flag is false. Assumes validation. Operation must be wrapped in try-catch
+ * @description Select query for a purchase of the given plan by the given user that should block a
+ * repurchase of a plan whose `repeatable` flag is false - `paid` or `disputed` (money is still held
+ * either way); only `refunded` frees the slot. Assumes validation. Operation must be wrapped in try-catch
  * @param purchase object of the caller's own user ID and the plan ID, enforced by Pick<Payment.Purchase, "planId">
- * @returns Purchase object or null. If null, the user has no paid purchase of that plan yet.
+ * @returns Purchase object or null. If null, the user has no blocking purchase of that plan yet.
  */
-export async function getPaidPurchaseByPlan(
+export async function getBlockingPurchaseByPlan(
   purchase: { userId: string } & Pick<Payment.Purchase, "planId">,
 ): Promise<Payment.Purchase | null> {
   const res = await db
@@ -60,7 +63,7 @@ export async function getPaidPurchaseByPlan(
       and(
         eq(purchaseTable.userId, purchase.userId),
         eq(purchaseTable.planId, purchase.planId),
-        eq(purchaseTable.status, "paid"),
+        inArray(purchaseTable.status, ["paid", "disputed"]),
       ),
     );
   return res[0] ?? null;
@@ -71,8 +74,11 @@ export async function getPaidPurchaseByPlan(
  * never chains purchases - each row's expiresAt comes from its own createdAt + the plan's durationDays
  * at purchase time - so `overlapping` only changes how they're read: `true` treats any one unexpired
  * purchase as enough; `false` chains paid purchases end-to-end in order (gaps included, so a lapse
- * before the next purchase isn't backfilled) before checking whether now falls inside that merged
- * timeline. Assumes validation. Operation must be wrapped in try-catch
+ * before the next purchase isn't backfilled), recomputing each purchase's end as
+ * `(chain-adjusted start) + its own durationDays` rather than trusting its independently-computed,
+ * unchained `expiresAt` - a later purchase bought before an earlier one lapses must extend access
+ * from where the earlier one ends, not shorten it to its own naive window. Assumes validation.
+ * Operation must be wrapped in try-catch
  * @param target object of the caller's own user ID and the plan ID, enforced by Pick<Payment.Purchase, "planId">
  * @param plan object of the plan's overlapping setting, enforced by Pick<Payment.Plan, "overlapping">
  * @returns Whether the user has active access to the plan right now.
@@ -100,10 +106,11 @@ export async function hasActivePurchase(
 
   let chainEnd: Date | null = null;
   for (const p of purchases) {
-    const start = chainEnd && chainEnd > p.createdAt ? chainEnd : p.createdAt;
-    if (p.expiresAt === null) return now >= start;
-    if (now >= start && now < p.expiresAt) return true;
-    chainEnd = p.expiresAt;
+    const start: Date = chainEnd && chainEnd > p.createdAt ? chainEnd : p.createdAt;
+    if (p.durationDays == null) return now >= start;
+    const end: Date = new Date(start.getTime() + p.durationDays * DAY_MS);
+    if (now >= start && now < end) return true;
+    chainEnd = end;
   }
   return false;
 }

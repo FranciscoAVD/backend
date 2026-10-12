@@ -11,6 +11,7 @@ import {
 
 import { checkoutSchema, insertPlanSchema } from "@f/payments/lib/schemas";
 import { isCheckoutSessionId } from "@f/payments/lib/utils";
+import { hasActivePendingCheckout } from "@f/payments/lib/pending-checkout";
 
 import tryCatch from "@vicstack/try-catch";
 import HTTP from "@vicstack/http";
@@ -195,7 +196,7 @@ const app = new Hono<PinoLoggerEnv>()
 
       if (!plan.repeatable) {
         const [existing, existingError] = await tryCatch(
-          paymentsRepo.purchase.getPaidByPlan({
+          paymentsRepo.purchase.getBlockingByPlan({
             userId: user.id,
             planId: plan.id,
           }),
@@ -212,11 +213,59 @@ const app = new Hono<PinoLoggerEnv>()
           );
         }
 
-        if (existing)
+        if (existing) {
+          const [, auditError] = await tryCatch(
+            paymentsRepo.auditLog.add({
+              type: "checkout_blocked_existing_purchase",
+              userId: user.id,
+              planId: plan.id,
+              existingPurchaseId: existing.id,
+            }),
+          );
+          if (auditError)
+            c.var.logger.warn(
+              { err: auditError, user: user.id, plan: plan.id },
+              "payments.audit.write_failed",
+            );
           return c.json(
             { message: "You've already purchased this plan" },
             HTTP.Conflict,
           );
+        }
+
+        const [hasPending, pendingError] = await tryCatch(
+          hasActivePendingCheckout(user.id, plan.id),
+        );
+
+        if (pendingError) {
+          c.var.logger.error(
+            { err: pendingError, user: user.id, plan: plan.id },
+            "payments.checkout.create",
+          );
+          return c.json(
+            { message: "Something went wrong. Try again later." },
+            HTTP.InternalServerError,
+          );
+        }
+
+        if (hasPending) {
+          const [, auditError] = await tryCatch(
+            paymentsRepo.auditLog.add({
+              type: "checkout_blocked_pending_checkout",
+              userId: user.id,
+              planId: plan.id,
+            }),
+          );
+          if (auditError)
+            c.var.logger.warn(
+              { err: auditError, user: user.id, plan: plan.id },
+              "payments.audit.write_failed",
+            );
+          return c.json(
+            { message: "You already have a checkout in progress for this plan" },
+            HTTP.Conflict,
+          );
+        }
       }
 
       const [stripeCustomerId, customerError] = await tryCatch(
@@ -224,7 +273,6 @@ const app = new Hono<PinoLoggerEnv>()
           id: user.id,
           name: user.name,
           email: user.email,
-          stripeCustomerId: user.stripeCustomerId ?? null,
         }),
       );
 

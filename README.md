@@ -24,9 +24,9 @@ A `plan` is `recurring` (a subscription managed by better-auth's stripe plugin) 
 | POST | `/plans` | admin (`plan:create`) | creates the Stripe product + price(s), then the DB row |
 | GET | `/purchases` | caller | their own one-time purchases |
 | POST | `/checkout` | caller | one-time plans only — `recurring` 422s |
-| GET | `/checkout/:sessionId` | caller | `open`/`processing`/`paid`/`refunded`/`disputed` |
+| GET | `/checkout/:sessionId` | caller | `open`/`processing`/`failed`/`expired`/`paid`/`refunded`/`disputed` |
 
-The webhook (`/api/auth/stripe/webhook` → `handleStripeEvent` in `lib/webhook.ts`) writes and syncs `purchase` rows; `bun run payments:reconcile [--days 7] [--dry-run]` backfills anything a missed webhook left behind.
+The webhook (`/api/auth/stripe/webhook` → `handleStripeEvent` in `lib/webhook.ts`) writes and syncs `purchase` rows; `bun run payments:reconcile [--days 14] [--dry-run]` backfills anything a missed webhook left behind. See `CONTROL_FLOW.md` for the full request/webhook/reconciler control flow, including the `plan.repeatable`/`durationDays`/`overlapping` races and the `payment_audit_log` trail they write to.
 
 **Only need one of the two flows?**
 - *Drop subscriptions:* remove (or `enabled: false`) `auth.ts`'s `subscription` option — the only thing gating it. Don't create `recurring` plans.
@@ -37,10 +37,12 @@ The webhook (`/api/auth/stripe/webhook` → `handleStripeEvent` in `lib/webhook.
 | `lib/pending-checkout.ts` | Redis pending-checkout state |
 | `use-cases/checkout.ts` | `createCheckout` / `getCheckoutStatus` |
 | `lib/webhook.ts` | the Stripe webhook handler (also remove `auth.ts`'s `onEvent`) |
+| `lib/charge-state.ts` | `resolveChargeState`, shared by the webhook and the reconciler |
 | `lib/constants.ts` | `ALLOWED_EVENTS` |
-| one-time-only helpers in `lib/utils.ts` | `isAllowedEvent`, `isCheckoutSessionId`, `purchaseUpdateFromCharge`, `purchaseStatusFromDispute` |
-| `scripts/reconcile.ts` | the webhook backstop |
+| one-time-only helpers in `lib/utils.ts` | `isAllowedEvent`, `isCheckoutSessionId`, `isForeignKeyViolation`, `purchaseUpdateFromCharge`, `purchaseStatusFromDispute` |
+| `lib/reconcile.ts` + `scripts/reconcile.ts` | the webhook backstop |
 | `purchase` use-cases + `GET /purchases` | `add-purchase.ts` / `get-purchases.ts` / `update-purchase.ts` |
+| the audit log | `use-cases/add-audit-log.ts` / `get-audit-log.ts`, the `payment_audit_log` table |
 | `/checkout` + `/checkout/:sessionId` | the routes in `route.ts` that start/check a checkout |
 
 ## Folder structure

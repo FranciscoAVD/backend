@@ -9,12 +9,14 @@ import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import {
   getAllPurchases,
   getPurchaseBySession,
-  getPaidPurchaseByPlan,
+  getBlockingPurchaseByPlan,
   hasActivePurchase,
 } from "@f/payments/use-cases/get-purchases";
 import { updatePurchaseByPaymentIntent } from "@f/payments/use-cases/update-purchase";
 import { createCheckout, getCheckoutStatus } from "@f/payments/use-cases/checkout";
 import { ensureStripeCustomer } from "@f/payments/use-cases/ensure-customer";
+import { addAuditLog } from "@f/payments/use-cases/add-audit-log";
+import { getAuditLogByUser } from "@f/payments/use-cases/get-audit-log";
 
 export const paymentsRepo = {
   customer: {
@@ -31,12 +33,16 @@ export const paymentsRepo = {
     add: addPurchase,
     getAll: getAllPurchases,
     getBySession: getPurchaseBySession,
-    getPaidByPlan: getPaidPurchaseByPlan,
+    getBlockingByPlan: getBlockingPurchaseByPlan,
     hasActive: hasActivePurchase,
     updateByPaymentIntent: updatePurchaseByPaymentIntent,
   },
   checkout: {
     create: createCheckout,
     getStatus: getCheckoutStatus,
+  },
+  auditLog: {
+    add: addAuditLog,
+    getByUser: getAuditLogByUser,
   },
 };

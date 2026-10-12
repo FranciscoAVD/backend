@@ -58,7 +58,9 @@ export async function createCheckout(
  */
 export async function getCheckoutStatus(
   checkout: { userId: string } & Pick<Payment.Purchase, "stripeCheckoutSessionId">,
-): Promise<Payment.Purchase["status"] | "open" | "processing" | null> {
+): Promise<
+  Payment.Purchase["status"] | "open" | "processing" | "failed" | "expired" | null
+> {
   const purchase = await getPurchaseBySession(checkout);
   if (purchase) return purchase.status;
 

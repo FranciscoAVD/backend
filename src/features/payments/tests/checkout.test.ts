@@ -81,6 +81,7 @@ describe("getCheckoutStatus", () => {
         currency: plan.currency,
       },
       { durationDays: plan.durationDays },
+      new Date(),
     );
 
     const res = await getCheckoutStatus({

@@ -20,6 +20,7 @@ describe("updatePurchaseByPaymentIntent", () => {
         currency: plan.currency,
       },
       { durationDays: plan.durationDays },
+      new Date(),
     );
 
     const res = await updatePurchaseByPaymentIntent(

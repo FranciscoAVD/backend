@@ -9,7 +9,7 @@ import { sql } from "drizzle-orm";
  */
 export async function resetDb(): Promise<void> {
   await db.execute(
-    sql`TRUNCATE TABLE "user", todo, plan, purchase RESTART IDENTITY CASCADE`,
+    sql`TRUNCATE TABLE "user", todo, plan, purchase, payment_audit_log RESTART IDENTITY CASCADE`,
   );
 }
 
