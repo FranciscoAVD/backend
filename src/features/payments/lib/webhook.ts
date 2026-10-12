@@ -39,6 +39,13 @@ async function resolveOwner(
 export async function confirmCheckout(session: Stripe.Checkout.Session) {
   const owner = await resolveOwner(session);
   if (!owner) {
+    // no pending entry and no planId metadata at all - not one of ours (e.g. a Payment
+    // Link, a Dashboard-created session, another integration on the same Stripe account),
+    // not a dropped payment. Same ownership test updateByCharge/reconcile.ts already use.
+    if (!session.metadata?.planId) {
+      logger.warn({ session: session.id }, "payments.webhook.not_ours");
+      return;
+    }
     logger.error(
       {
         err: new Error("Paid checkout has no pending entry or metadata"),
@@ -68,10 +75,10 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
   // money is already taken either way, so the purchase is still recorded (never silently dropped,
   // same reasoning as the FK-violation case in addPurchase) - this just flags it for review.
   if (!plan.repeatable) {
-    const blocking = await paymentsRepo.purchase.getBlockingByPlan({
-      userId: owner.userId,
-      planId: owner.planId,
-    });
+    const blocking = await paymentsRepo.purchase.getBlockingByPlan(
+      { userId: owner.userId, planId: owner.planId },
+      { stripeCheckoutSessionId: session.id },
+    );
     if (blocking) {
       logger.error(
         {

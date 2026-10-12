@@ -121,6 +121,47 @@ describe("markFailed / markExpired", () => {
   });
 });
 
+describe("forward-only status transitions", () => {
+  beforeEach(resetRedis);
+
+  test("a retried/out-of-order markProcessing after markFailed doesn't resurrect the checkout", async () => {
+    await savePendingCheckout(
+      "cs_1",
+      { userId: "u1", planId: 1, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+    await markFailed("cs_1");
+
+    const ok = await markProcessing("cs_1");
+
+    expect(ok).toBe(false);
+    expect((await getPendingCheckout("cs_1"))?.status).toBe("failed");
+    expect(await hasActivePendingCheckout("u1", 1)).toBe(false);
+  });
+
+  test("a retried markFailed for an old session doesn't erase a newer session's pointer", async () => {
+    await savePendingCheckout(
+      "cs_A",
+      { userId: "u1", planId: 1, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+    await markFailed("cs_A");
+
+    // user starts a new checkout for the same (user, plan) after A failed
+    await savePendingCheckout(
+      "cs_B",
+      { userId: "u1", planId: 1, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+
+    // Stripe retries A's already-processed async_payment_failed event
+    await markFailed("cs_A");
+
+    expect((await getPendingCheckout("cs_B"))?.status).toBe("open");
+    expect(await hasActivePendingCheckout("u1", 1)).toBe(true);
+  });
+});
+
 describe("removePendingCheckout", () => {
   beforeEach(resetRedis);
 

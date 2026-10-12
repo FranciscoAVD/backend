@@ -361,6 +361,25 @@ describe("hasActivePurchase", () => {
     ).toBe(true);
   });
 
+  test("overlapping: false - a pre-migration row (durationDays null, expiresAt already past) isn't treated as lifetime access", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    // durationDays column added after this row existed - never backfilled
+    await insertPaidPurchase({
+      userId,
+      planId: plan.id,
+      createdAt: daysFromNow(-60),
+      expiresAt: daysFromNow(-30),
+      durationDays: null,
+    });
+
+    const res = await hasActivePurchase(
+      { userId, planId: plan.id },
+      { overlapping: false },
+    );
+    expect(res).toBe(false);
+  });
+
   test("returns false when the user has no paid purchase of the plan at all", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();

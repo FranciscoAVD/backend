@@ -88,6 +88,16 @@ export async function hasActivePendingCheckout(
   return pending.status === "open" || pending.status === "processing";
 }
 
+// open -> processing -> {failed, expired}; failed/expired share a rank so neither can
+// flip into the other. Stripe's retries/out-of-order delivery mean a later event for
+// the same session can carry an earlier status - that must never move the status backward.
+const STATUS_RANK: Record<PendingCheckout["status"], number> = {
+  open: 0,
+  processing: 1,
+  failed: 2,
+  expired: 2,
+};
+
 async function transition(
   sessionId: string,
   status: PendingCheckout["status"],
@@ -96,8 +106,17 @@ async function transition(
 ): Promise<boolean> {
   const pending = await getPendingCheckout(sessionId);
   if (!pending) return false;
+  if (STATUS_RANK[status] < STATUS_RANK[pending.status]) return false;
 
-  await savePendingCheckout(sessionId, { ...pending, status }, ttlSec);
+  // writes the status directly, unlike savePendingCheckout, which would also repoint the
+  // (user, plan) pointer at this session - a retried transition for an old, superseded
+  // session must never drag the pointer back off a newer session that's since taken it over
+  await redis.set(
+    key(sessionId),
+    JSON.stringify({ ...pending, status }),
+    "EX",
+    ttlSec,
+  );
   if (clearPointer)
     await clearPointerIfMatches(pending.userId, pending.planId, sessionId);
   return true;
@@ -105,7 +124,8 @@ async function transition(
 
 /**
  * @description Marks a checkout as paid-but-unsettled and extends its TTL.
- * @returns false if there was no pending entry to update.
+ * @returns false if there was no pending entry to update, or if it's already failed/expired
+ * (a retried/out-of-order event arriving after a terminal status must not resurrect it).
  */
 export async function markProcessing(sessionId: string): Promise<boolean> {
   return transition(sessionId, "processing", PROCESSING_TTL_SEC, false);
@@ -114,7 +134,7 @@ export async function markProcessing(sessionId: string): Promise<boolean> {
 /**
  * @description Marks a checkout as failed (e.g. a delayed payment method was declined) and
  * immediately frees the (user, plan) slot so the user can retry right away.
- * @returns false if there was no pending entry to update.
+ * @returns false if there was no pending entry to update, or if it's already expired.
  */
 export async function markFailed(sessionId: string): Promise<boolean> {
   return transition(sessionId, "failed", TERMINAL_TTL_SEC, true);
@@ -123,7 +143,7 @@ export async function markFailed(sessionId: string): Promise<boolean> {
 /**
  * @description Marks a checkout as expired (the user never completed it) and immediately frees
  * the (user, plan) slot so the user can retry right away.
- * @returns false if there was no pending entry to update.
+ * @returns false if there was no pending entry to update, or if it's already failed.
  */
 export async function markExpired(sessionId: string): Promise<boolean> {
   return transition(sessionId, "expired", TERMINAL_TTL_SEC, true);

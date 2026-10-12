@@ -143,6 +143,16 @@ flowchart TD
     E --> DispX["charge.dispute.closed"] --> UpdByCharge2
 ```
 
+`markProcessing`/`markFailed`/`markExpired` all go through `pending-checkout.ts`'s
+`transition`, which only moves a status forward (`open` → `processing` →
+`failed`/`expired`, ranked in that order) and never backward - a retried or
+out-of-order event for a status the session has already passed (e.g. a redelivered
+unpaid `completed` arriving after `async_payment_failed`) is a no-op. `transition`
+also never repoints the `checkout:active:userId:planId` pointer at the session it's
+updating (only ever clears it, and only if it's still the current one) - so a retried
+`markFailed` for an old, already-superseded session can't drag the pointer off a
+newer session that's since taken over the (user, plan) slot.
+
 ### `confirmCheckout`: turning a paid session into a `purchase` row
 
 Both drop branches below **throw** rather than log-and-return: a silently
@@ -157,8 +167,10 @@ flowchart TD
     HasPending -- yes --> Owner["{ userId, planId }"]
     HasPending -- no, or Redis error --> Metadata["fall back to\nsession.metadata\n(set on the session at createCheckout time)"]
     Metadata --> HasMetadata{"metadata has\nuserId + planId?"}
-    HasMetadata -- no --> Throw1["throw\n(logged first: payments.webhook.metadata)"]
     HasMetadata -- yes --> Owner
+    HasMetadata -- no --> HasPlanId{"metadata has\na planId at all?"}
+    HasPlanId -- no --> NotOurs["log warning: payments.webhook.not_ours,\nreturn (not a drop - a payment-mode session\nthis app never created, e.g. a Payment Link\nor another integration on the same account)"]
+    HasPlanId -- yes, but still unresolvable --> Throw1["throw\n(ours, genuinely broken -\nlogged first: payments.webhook.metadata)"]
 
     Owner --> FetchPlan["paymentsRepo.plan.get(planId)"]
     FetchPlan --> PlanFound{"plan still exists?"}
@@ -166,7 +178,7 @@ flowchart TD
     PlanFound -- yes --> RepeatCheck{"!plan.repeatable?"}
 
     RepeatCheck -- no --> AddPurchase
-    RepeatCheck -- yes --> Blocking["paymentsRepo.purchase.getBlockingByPlan(userId, planId)"]
+    RepeatCheck -- yes --> Blocking["paymentsRepo.purchase.getBlockingByPlan(\n{ userId, planId },\nexclude: { stripeCheckoutSessionId: session.id })"]
     Blocking --> AlreadyOwns{"a blocking purchase\nfor a DIFFERENT session\nalready exists?"}
     AlreadyOwns -- no --> AddPurchase
     AlreadyOwns -- yes --> LogDup["log error: payments.webhook.duplicate_purchase\n+ audit log: duplicate_purchase_confirmed\n(best-effort; the money's already taken,\nso this still falls through to AddPurchase -\nthe financial record must never be dropped)"]
@@ -175,6 +187,11 @@ flowchart TD
     AddPurchase["paymentsRepo.purchase.add:\npurchasedAt = session.created (not insert time)\nexpiresAt = plan.durationDays ? purchasedAt + durationDays : null\nINSERT ... ON CONFLICT (stripeCheckoutSessionId) DO NOTHING\n(on a user_id FK violation - the user was deleted\nmid-checkout - retries once with userId: null)"]
     AddPurchase --> RemovePending["paymentsRepo.checkout.removePending(session.id)\n(best-effort; a leftover key just expires via its TTL)"]
 ```
+
+The `exclude` on `getBlockingByPlan` matters for a Stripe redelivery of the *same*
+session: without it, the second delivery would find the purchase row the first
+delivery just wrote and wrongly flag it as `duplicate_purchase_confirmed` - the
+blocking check only looks for a *different* session's purchase.
 
 `addPurchase` is idempotent on `stripeCheckoutSessionId`, so a retried
 `checkout.session.completed` (Stripe's at-least-once delivery) is a no-op the
@@ -238,6 +255,10 @@ only changes how they're *read*: `overlapping: false` recomputes each
 purchase's end as `(chain-adjusted start) + its own durationDays`, rather than
 trusting its independently-computed `expiresAt`, so a later purchase bought
 before an earlier one lapses correctly extends access instead of shortening it.
+A row with no `durationDays` snapshot at all falls back to its own `expiresAt`
+instead of being treated as perpetual - that distinguishes a genuinely
+never-expiring purchase (`expiresAt` also `null`) from a pre-migration row that
+predates this column and was never backfilled.
 
 ```mermaid
 flowchart TD
@@ -250,9 +271,12 @@ flowchart TD
 
     Overlap -- false --> Walk["walk purchases in order,\nchaining: start = max(chainEnd, createdAt)"]
     Walk --> PerDuration{"this purchase's\nown durationDays?"}
-    PerDuration -- "null (perpetual)" --> NowPast{"now >= start?"}
-    NowPast -- yes --> True2["true"]
-    NowPast -- no --> False2["false"]
+    PerDuration -- "null" --> ExpiresNull{"expiresAt also null?\n(no duration snapshot at all - either\ngenuinely perpetual, or a pre-migration\nrow written before this column existed)"}
+    ExpiresNull -- yes --> True2["true"]
+    ExpiresNull -- no --> InExpiresWindow{"start <= now < expiresAt?"}
+    InExpiresWindow -- yes --> True2b["true"]
+    InExpiresWindow -- no --> Advance2["chainEnd = expiresAt,\nmove to next purchase"]
+    Advance2 --> Walk
     PerDuration -- "set" --> Recompute["end = start + durationDays\n(recomputed from the chain-adjusted start,\nnot the purchase's own stored expiresAt)"]
     Recompute --> InWindow{"start <= now < end?"}
     InWindow -- yes --> True3["true"]
