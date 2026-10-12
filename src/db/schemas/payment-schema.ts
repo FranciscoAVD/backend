@@ -32,6 +32,14 @@ export const plan = pgTable("plan", {
   annualAmount: integer("annual_amount"),
   trialDays: integer("trial_days"),
   limits: jsonb("limits").$type<Record<string, unknown>>(),
+  // one-time plans only: whether the same user can buy this plan more than once
+  repeatable: boolean("repeatable").notNull().default(false),
+  // one-time plans only: days of access a purchase grants from its own createdAt,
+  // independent of any other purchase of the same plan; null means it never expires
+  durationDays: integer("duration_days"),
+  // only meaningful when repeatable + durationDays are both set: whether a second purchase's
+  // access window can run concurrently with an unexpired one, or must instead chain on after it
+  overlapping: boolean("overlapping").notNull().default(true),
   stripeProductId: text("stripe_product_id").notNull(),
   stripePriceId: text("stripe_price_id").notNull().unique(),
   annualDiscountPriceId: text("annual_discount_price_id"),
@@ -64,6 +72,9 @@ export const purchase = pgTable(
     amountTotal: integer("amount_total").notNull(),
     amountRefunded: integer("amount_refunded").notNull().default(0),
     currency: varchar("currency", { length: 3 }).notNull(),
+    // from the plan's durationDays at the time of purchase; null means it never expires.
+    // Each purchase's window is independent, so two purchases of the same plan can overlap.
+    expiresAt: timestamp("expires_at"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
       .notNull()

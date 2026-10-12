@@ -50,6 +50,19 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
     return;
   }
 
+  const plan = await paymentsRepo.plan.get({ id: owner.planId });
+  if (!plan) {
+    logger.error(
+      {
+        err: new Error("Purchased plan no longer exists"),
+        session: session.id,
+        plan: owner.planId,
+      },
+      "payments.webhook.plan_missing",
+    );
+    return;
+  }
+
   await paymentsRepo.purchase.add(
     { userId: owner.userId },
     {
@@ -59,6 +72,7 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
       amountTotal: session.amount_total ?? 0,
       currency: session.currency ?? "",
     },
+    { durationDays: plan.durationDays },
   );
 
   // the purchase is already stored; a leftover key just expires with its TTL

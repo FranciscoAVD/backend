@@ -193,17 +193,54 @@ const app = new Hono<PinoLoggerEnv>()
           HTTP.UnprocessableEntity,
         );
 
-      const [res, error] = await tryCatch(
-        paymentsRepo.checkout.create(
-          {
+      if (!plan.repeatable) {
+        const [existing, existingError] = await tryCatch(
+          paymentsRepo.purchase.getPaidByPlan({
             userId: user.id,
-            email: user.email,
-            // only present when the stripe plugin is active, which it is whenever this route is reachable
-            stripeCustomerId: (user as { stripeCustomerId?: string | null })
-              .stripeCustomerId,
-          },
-          plan,
-        ),
+            planId: plan.id,
+          }),
+        );
+
+        if (existingError) {
+          c.var.logger.error(
+            { err: existingError, user: user.id, plan: plan.id },
+            "payments.checkout.create",
+          );
+          return c.json(
+            { message: "Something went wrong. Try again later." },
+            HTTP.InternalServerError,
+          );
+        }
+
+        if (existing)
+          return c.json(
+            { message: "You've already purchased this plan" },
+            HTTP.Conflict,
+          );
+      }
+
+      const [stripeCustomerId, customerError] = await tryCatch(
+        paymentsRepo.customer.ensure({
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          stripeCustomerId: user.stripeCustomerId ?? null,
+        }),
+      );
+
+      if (customerError) {
+        c.var.logger.error(
+          { err: customerError, user: user.id },
+          "payments.customer.ensure",
+        );
+        return c.json(
+          { message: "Something went wrong. Try again later." },
+          HTTP.InternalServerError,
+        );
+      }
+
+      const [res, error] = await tryCatch(
+        paymentsRepo.checkout.create({ userId: user.id, stripeCustomerId }, plan),
       );
 
       if (error) {

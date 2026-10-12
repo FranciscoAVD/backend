@@ -12,14 +12,13 @@ import { getPurchaseBySession } from "@f/payments/use-cases/get-purchases";
 // row's own (nullable) userId once that user is deleted
 type CheckoutUser = {
   userId: string;
-  email: string;
-  stripeCustomerId?: string | null;
+  stripeCustomerId: string;
 };
 
 /**
  * @description Creates a one-time Stripe Checkout Session and tracks it in Redis until Stripe
  * confirms the payment. Assumes the plan was checked to be active and one-time. Operation must be wrapped in try-catch
- * @param user object of user ID, email and Stripe customer ID
+ * @param user object of user ID and Stripe customer ID
  * @param plan object of plan ID and Stripe price ID enforced by Pick<Payment.Plan, "id" | "stripePriceId">
  * @returns Object containing the session ID and the Stripe-hosted checkout URL.
  */
@@ -32,10 +31,7 @@ export async function createCheckout(
 
   const session = await getPaymentProcessor().checkout.sessions.create({
     mode: "payment",
-    // users created before the stripe plugin was added have no customer yet
-    ...(user.stripeCustomerId
-      ? { customer: user.stripeCustomerId }
-      : { customer_email: user.email, customer_creation: "always" as const }),
+    customer: user.stripeCustomerId,
     line_items: [{ price: plan.stripePriceId, quantity: 1 }],
     client_reference_id: user.userId,
     metadata,

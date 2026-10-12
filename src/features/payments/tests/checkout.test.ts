@@ -10,14 +10,20 @@ mock.module("@f/payments/payment", () => ({
       sessions: {
         create: async (args: Record<string, unknown>) => {
           sessionCreateCalls.push(args);
-          return { id: "cs_test_fake", url: "https://checkout.stripe.com/fake" };
+          return {
+            id: "cs_test_fake",
+            url: "https://checkout.stripe.com/fake",
+          };
         },
       },
     },
   }),
 }));
 
-import { createCheckout, getCheckoutStatus } from "@f/payments/use-cases/checkout";
+import {
+  createCheckout,
+  getCheckoutStatus,
+} from "@f/payments/use-cases/checkout";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import { getPendingCheckout } from "@f/payments/lib/pending-checkout";
 
@@ -32,7 +38,7 @@ describe("createCheckout", () => {
     const plan = await seedPlan({ stripePriceId: "price_abc" });
 
     const res = await createCheckout(
-      { userId: "u1", email: "u1@example.test" },
+      { userId: "u1", stripeCustomerId: "cus_abc" },
       { id: plan.id, stripePriceId: plan.stripePriceId },
     );
 
@@ -45,24 +51,10 @@ describe("createCheckout", () => {
     expect(pending).toEqual({ userId: "u1", planId: plan.id, status: "open" });
   });
 
-  test("uses customer_email when the user has no Stripe customer id yet", async () => {
+  test("uses the user's Stripe customer id", async () => {
     const plan = await seedPlan();
     await createCheckout(
-      { userId: "u1", email: "u1@example.test" },
-      { id: plan.id, stripePriceId: plan.stripePriceId },
-    );
-
-    expect(sessionCreateCalls[0]).toMatchObject({
-      customer_email: "u1@example.test",
-      customer_creation: "always",
-    });
-    expect(sessionCreateCalls[0]).not.toHaveProperty("customer");
-  });
-
-  test("uses the existing Stripe customer id when the user has one", async () => {
-    const plan = await seedPlan();
-    await createCheckout(
-      { userId: "u1", email: "u1@example.test", stripeCustomerId: "cus_abc" },
+      { userId: "u1", stripeCustomerId: "cus_abc" },
       { id: plan.id, stripePriceId: plan.stripePriceId },
     );
 
@@ -88,6 +80,7 @@ describe("getCheckoutStatus", () => {
         amountTotal: plan.amount,
         currency: plan.currency,
       },
+      { durationDays: plan.durationDays },
     );
 
     const res = await getCheckoutStatus({
@@ -100,7 +93,7 @@ describe("getCheckoutStatus", () => {
   test("falls back to the pending Redis entry when no purchase row exists yet", async () => {
     const plan = await seedPlan();
     await createCheckout(
-      { userId: "u1", email: "u1@example.test" },
+      { userId: "u1", stripeCustomerId: "cus_abc" },
       { id: plan.id, stripePriceId: plan.stripePriceId },
     );
 
@@ -114,7 +107,7 @@ describe("getCheckoutStatus", () => {
   test("returns null when the pending entry belongs to a different user", async () => {
     const plan = await seedPlan();
     await createCheckout(
-      { userId: "u1", email: "u1@example.test" },
+      { userId: "u1", stripeCustomerId: "cus_abc" },
       { id: plan.id, stripePriceId: plan.stripePriceId },
     );
 

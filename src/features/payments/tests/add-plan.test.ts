@@ -11,6 +11,7 @@ const onePlan = (
   currency: "usd",
   annualAmount: null,
   trialDays: null,
+  durationDays: null,
   ...overrides,
 });
 
