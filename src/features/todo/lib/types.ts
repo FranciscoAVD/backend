@@ -1,12 +1,8 @@
-import {
-  insertTodoSchema,
-  updateTodoSchema,
-  selectTodoSchema,
-} from "@f/todo/lib/schemas";
+import { todoSchemas } from "@f/todo/lib/schemas";
 import { z } from "zod";
 
 export namespace Todo {
-  export type Insert = z.infer<typeof insertTodoSchema>;
-  export type Update = z.infer<typeof updateTodoSchema>;
+  export type Insert = z.infer<typeof todoSchemas.insert>;
+  export type Update = z.infer<typeof todoSchemas.update>;
 }
-export type Todo = z.infer<typeof selectTodoSchema>;
+export type Todo = z.infer<typeof todoSchemas.select>;

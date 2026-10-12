@@ -5,12 +5,12 @@ import {
   createSelectSchema,
 } from "drizzle-zod";
 
-export const insertTodoSchema = createInsertSchema(todo).omit({
+const insertTodoSchema = createInsertSchema(todo).omit({
   userId: true,
   createdAt: true,
   updatedAt: true,
 });
-export const updateTodoSchema = createUpdateSchema(todo)
+const updateTodoSchema = createUpdateSchema(todo)
   .omit({
     userId: true,
     createdAt: true,
@@ -19,4 +19,10 @@ export const updateTodoSchema = createUpdateSchema(todo)
   .refine((data) => Object.keys(data).length > 0, {
     message: "At least one field must be provided.",
   });
-export const selectTodoSchema = createSelectSchema(todo);
+const selectTodoSchema = createSelectSchema(todo);
+
+export const todoSchemas = {
+  select: selectTodoSchema,
+  insert: insertTodoSchema,
+  update: updateTodoSchema,
+};

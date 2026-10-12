@@ -8,7 +8,7 @@ import {
   type RequireSessionEnv,
 } from "@f/auth/middleware";
 
-import { insertTodoSchema, updateTodoSchema } from "@f/todo/lib/schemas";
+import { todoSchemas } from "@f/todo/lib/schemas";
 
 import tryCatch from "@vicstack/try-catch";
 import HTTP from "@vicstack/http";
@@ -66,7 +66,7 @@ const app = new Hono<PinoLoggerEnv>()
   .post(
     "/",
     requirePermissionMiddleware({ todo: ["create"] }),
-    jsonValidator(insertTodoSchema),
+    jsonValidator(todoSchemas.insert),
     async (c) => {
       const { user } = c.get("session");
       const body = c.req.valid("json");
@@ -104,7 +104,7 @@ const app = new Hono<PinoLoggerEnv>()
     "/:id",
     idParamValidator,
     requirePermissionMiddleware({ todo: ["update"] }),
-    jsonValidator(updateTodoSchema),
+    jsonValidator(todoSchemas.update),
     async (c) => {
       const { user } = c.get("session");
       const { id } = c.req.valid("param");
