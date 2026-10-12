@@ -128,14 +128,44 @@ describe("confirmCheckout", () => {
     );
   });
 
-  test("throws when the owner can't be resolved at all - no silent drop", async () => {
+  test("throws when there's a planId in metadata but no owner can be resolved - no silent drop", async () => {
     const userId = await seedUser();
 
+    // has planId metadata (so it's recognizably ours) but no userId - still unresolvable
     await expect(
-      confirmCheckout(session({ id: "cs_3", metadata: null })),
+      confirmCheckout(session({ id: "cs_3", metadata: { planId: "1" } })),
     ).rejects.toThrow();
 
     expect(await getAllPurchases({ userId })).toEqual([]);
+  });
+
+  test("a payment-mode session this app never created (no planId metadata) is ignored, not thrown", async () => {
+    // e.g. a Payment Link, a Dashboard-created session, or another integration on the
+    // same Stripe account - genuinely not ours, so this must not be treated as a drop
+    await expect(
+      confirmCheckout(session({ id: "cs_payment_link", metadata: null })),
+    ).resolves.toBeUndefined();
+  });
+
+  test("redelivering the same confirmed session doesn't log a false duplicate_purchase_confirmed", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ repeatable: false });
+    const s = session({
+      id: "cs_redelivered",
+      metadata: { userId, planId: String(plan.id) },
+    });
+
+    await confirmCheckout(s);
+    await confirmCheckout(s); // Stripe's at-least-once redelivery of the same event
+
+    const purchases = await getAllPurchases({ userId });
+    expect(purchases).toHaveLength(1);
+
+    const audits = await db
+      .select()
+      .from(paymentAuditLogTable)
+      .where(eq(paymentAuditLogTable.userId, userId));
+    expect(audits).toEqual([]);
   });
 
   test("throws when the purchased plan no longer exists - no silent drop", async () => {

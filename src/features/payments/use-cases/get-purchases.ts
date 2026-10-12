@@ -1,7 +1,7 @@
 import { db } from "@d/connection";
 import { purchase as purchaseTable } from "@d/schemas/payment-schema";
 import type { Payment } from "@f/payments/lib/types";
-import { eq, and, asc, inArray } from "drizzle-orm";
+import { eq, and, ne, asc, inArray } from "drizzle-orm";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -49,12 +49,17 @@ export async function getPurchaseBySession(
 /**
  * @description Select query for a purchase of the given plan by the given user that should block a
  * repurchase of a plan whose `repeatable` flag is false - `paid` or `disputed` (money is still held
- * either way); only `refunded` frees the slot. Assumes validation. Operation must be wrapped in try-catch
+ * either way); only `refunded` frees the slot. `exclude`, when given, leaves out a specific checkout
+ * session - `confirmCheckout`'s own re-check uses this so a Stripe redelivery of the same session
+ * doesn't find the row its own earlier delivery just wrote and flag it as a duplicate. Assumes
+ * validation. Operation must be wrapped in try-catch
  * @param purchase object of the caller's own user ID and the plan ID, enforced by Pick<Payment.Purchase, "planId">
+ * @param exclude optional checkout session to leave out of the match, enforced by Pick<Payment.Purchase, "stripeCheckoutSessionId">
  * @returns Purchase object or null. If null, the user has no blocking purchase of that plan yet.
  */
 export async function getBlockingPurchaseByPlan(
   purchase: { userId: string } & Pick<Payment.Purchase, "planId">,
+  exclude?: Pick<Payment.Purchase, "stripeCheckoutSessionId">,
 ): Promise<Payment.Purchase | null> {
   const res = await db
     .select()
@@ -64,6 +69,9 @@ export async function getBlockingPurchaseByPlan(
         eq(purchaseTable.userId, purchase.userId),
         eq(purchaseTable.planId, purchase.planId),
         inArray(purchaseTable.status, ["paid", "disputed"]),
+        exclude
+          ? ne(purchaseTable.stripeCheckoutSessionId, exclude.stripeCheckoutSessionId)
+          : undefined,
       ),
     );
   return res[0] ?? null;
@@ -107,7 +115,15 @@ export async function hasActivePurchase(
   let chainEnd: Date | null = null;
   for (const p of purchases) {
     const start: Date = chainEnd && chainEnd > p.createdAt ? chainEnd : p.createdAt;
-    if (p.durationDays == null) return now >= start;
+    if (p.durationDays == null) {
+      // no duration snapshot: either a genuinely perpetual purchase (expiresAt also
+      // null), or a pre-migration row written before this column existed - either way,
+      // trust its own expiresAt rather than treating a null duration as "never expires"
+      if (p.expiresAt === null) return true;
+      if (now >= start && now < p.expiresAt) return true;
+      chainEnd = p.expiresAt;
+      continue;
+    }
     const end: Date = new Date(start.getTime() + p.durationDays * DAY_MS);
     if (now >= start && now < end) return true;
     chainEnd = end;
