@@ -41,7 +41,7 @@ flowchart TD
     CheckOwned --> AlreadyOwns{"a blocking purchase\nalready exists?"}
     AlreadyOwns -- yes --> Audit1["audit log: checkout_blocked_existing_purchase\n(best-effort)"]
     Audit1 --> Conflict["409 You've already purchased this plan"]
-    AlreadyOwns -- no --> CheckPending["hasActivePendingCheckout(userId, planId)\n(Redis pointer, no Stripe call yet)"]
+    AlreadyOwns -- no --> CheckPending["paymentsRepo.checkout.hasPending(userId, planId)\n(Redis pointer, no Stripe call yet)"]
     CheckPending -->|redis error| Err500e["500"]
     CheckPending --> HasPending{"an open/processing\ncheckout already exists?"}
     HasPending -- yes --> Audit2["audit log: checkout_blocked_pending_checkout\n(best-effort)"]
@@ -131,12 +131,12 @@ a no-op for this feature - the plugin already dealt with it above.
 ```mermaid
 flowchart TD
     E["event.type"] --> CSC{"checkout.session.completed\n(mode: payment only)"}
-    CSC -- payment_status: unpaid --> MarkProcessing["markProcessing(session.id)\nRedis TTL extended to 14 days\n(delayed payment methods, e.g. bank debits)"]
+    CSC -- payment_status: unpaid --> MarkProcessing["paymentsRepo.checkout.markProcessing(session.id)\nRedis TTL extended to 14 days\n(delayed payment methods, e.g. bank debits)"]
     CSC -- otherwise paid --> Confirm["confirmCheckout(session)"]
 
     E --> APS["async_payment_succeeded\n(mode: payment)"] --> Confirm
-    E --> APF["async_payment_failed\n(mode: payment)"] --> MarkFailed["markFailed(session.id)\n(short-lived terminal status,\nfrees the (user, plan) slot right away)"]
-    E --> Exp["checkout.session.expired\n(mode: payment)"] --> MarkExpired["markExpired(session.id)\n(same, status: expired)"]
+    E --> APF["async_payment_failed\n(mode: payment)"] --> MarkFailed["paymentsRepo.checkout.markFailed(session.id)\n(short-lived terminal status,\nfrees the (user, plan) slot right away)"]
+    E --> Exp["checkout.session.expired\n(mode: payment)"] --> MarkExpired["paymentsRepo.checkout.markExpired(session.id)\n(same, status: expired)"]
 
     E --> Ref["charge.refunded"] --> UpdByCharge1["updateByCharge(payment_intent)"]
     E --> DispC["charge.dispute.created"] --> UpdByCharge2["updateByCharge(payment_intent)"]
@@ -152,7 +152,7 @@ otherwise miscount it as a successful insert - see the reconciler section).
 
 ```mermaid
 flowchart TD
-    Start(["confirmCheckout(session)"]) --> ResolveOwner["resolveOwner:\ngetPendingCheckout(session.id)"]
+    Start(["confirmCheckout(session)"]) --> ResolveOwner["resolveOwner:\npaymentsRepo.checkout.getPending(session.id)"]
     ResolveOwner --> HasPending{"pending entry\nfound in Redis?"}
     HasPending -- yes --> Owner["{ userId, planId }"]
     HasPending -- no, or Redis error --> Metadata["fall back to\nsession.metadata\n(set on the session at createCheckout time)"]
@@ -173,7 +173,7 @@ flowchart TD
     LogDup --> AddPurchase
 
     AddPurchase["paymentsRepo.purchase.add:\npurchasedAt = session.created (not insert time)\nexpiresAt = plan.durationDays ? purchasedAt + durationDays : null\nINSERT ... ON CONFLICT (stripeCheckoutSessionId) DO NOTHING\n(on a user_id FK violation - the user was deleted\nmid-checkout - retries once with userId: null)"]
-    AddPurchase --> RemovePending["removePendingCheckout(session.id)\n(best-effort; a leftover key just expires via its TTL)"]
+    AddPurchase --> RemovePending["paymentsRepo.checkout.removePending(session.id)\n(best-effort; a leftover key just expires via its TTL)"]
 ```
 
 `addPurchase` is idempotent on `stripeCheckoutSessionId`, so a retried
