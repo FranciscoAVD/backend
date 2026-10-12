@@ -2,17 +2,9 @@ import type Stripe from "stripe";
 import { logger } from "@/lib/logger";
 import tryCatch from "@vicstack/try-catch";
 import type { PendingCheckout } from "@f/payments/lib/pending-checkout";
-import {
-  getPendingCheckout,
-  markProcessing,
-  removePendingCheckout,
-} from "@f/payments/lib/pending-checkout";
 import { paymentsRepo } from "@f/payments/repo";
-import {
-  isAllowedEvent,
-  purchaseStatusFromDispute,
-  purchaseUpdateFromCharge,
-} from "@f/payments/lib/utils";
+import { isAllowedEvent } from "@f/payments/lib/utils";
+import { resolveChargeState } from "@f/payments/lib/charge-state";
 import { getPaymentProcessor } from "@f/payments/payment";
 
 const idOf = (ref: string | { id: string } | null) =>
@@ -25,7 +17,9 @@ const idOf = (ref: string | { id: string } | null) =>
 async function resolveOwner(
   session: Stripe.Checkout.Session,
 ): Promise<Pick<PendingCheckout, "userId" | "planId"> | null> {
-  const [pending, error] = await tryCatch(getPendingCheckout(session.id));
+  const [pending, error] = await tryCatch(
+    paymentsRepo.checkout.getPending(session.id),
+  );
   if (pending) return { userId: pending.userId, planId: pending.planId };
 
   logger.warn(
@@ -37,6 +31,11 @@ async function resolveOwner(
   return userId && Number.isInteger(planId) ? { userId, planId } : null;
 }
 
+/**
+ * @description Records a confirmed payment. Both drop cases below throw rather than return, so
+ * the plugin answers non-2xx and Stripe retries/eventually flags the endpoint as failing in its
+ * dashboard - a silently-swallowed 200 would mean a payment with no trace of ever going wrong.
+ */
 export async function confirmCheckout(session: Stripe.Checkout.Session) {
   const owner = await resolveOwner(session);
   if (!owner) {
@@ -47,7 +46,7 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
       },
       "payments.webhook.metadata",
     );
-    return;
+    throw new Error("Paid checkout has no pending entry or metadata");
   }
 
   const plan = await paymentsRepo.plan.get({ id: owner.planId });
@@ -60,7 +59,52 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
       },
       "payments.webhook.plan_missing",
     );
-    return;
+    throw new Error("Purchased plan no longer exists");
+  }
+
+  // the realistic "two tabs" race is already blocked before a Checkout Session is even created
+  // (see paymentsRepo.checkout.hasPending in route.ts); this re-check catches the narrower one it can't -
+  // two webhook deliveries confirming two separately-started sessions for the same plan. The
+  // money is already taken either way, so the purchase is still recorded (never silently dropped,
+  // same reasoning as the FK-violation case in addPurchase) - this just flags it for review.
+  if (!plan.repeatable) {
+    const blocking = await paymentsRepo.purchase.getBlockingByPlan({
+      userId: owner.userId,
+      planId: owner.planId,
+    });
+    if (blocking) {
+      logger.error(
+        {
+          err: new Error(
+            "Paid checkout for an already-owned non-repeatable plan",
+          ),
+          session: session.id,
+          user: owner.userId,
+          plan: owner.planId,
+          existingPurchase: blocking.id,
+        },
+        "payments.webhook.duplicate_purchase",
+      );
+      const [, auditError] = await tryCatch(
+        paymentsRepo.auditLog.add({
+          type: "duplicate_purchase_confirmed",
+          userId: owner.userId,
+          planId: owner.planId,
+          existingPurchaseId: blocking.id,
+          stripeCheckoutSessionId: session.id,
+          details: {
+            stripePaymentIntentId: idOf(session.payment_intent),
+            amountTotal: session.amount_total ?? 0,
+          },
+        }),
+      );
+      if (auditError)
+        logger.warn(
+          { err: auditError, session: session.id },
+          "payments.audit.write_failed",
+        );
+      // fall through: the purchase row is still recorded below
+    }
   }
 
   await paymentsRepo.purchase.add(
@@ -73,24 +117,30 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
       currency: session.currency ?? "",
     },
     { durationDays: plan.durationDays },
+    new Date(session.created * 1000),
   );
 
   // the purchase is already stored; a leftover key just expires with its TTL
-  const [, error] = await tryCatch(removePendingCheckout(session.id));
+  const [, error] = await tryCatch(paymentsRepo.checkout.removePending(session.id));
   if (error)
-    logger.warn({ err: error, session: session.id }, "payments.webhook.cleanup");
+    logger.warn(
+      { err: error, session: session.id },
+      "payments.webhook.cleanup",
+    );
 }
 
 async function updateByCharge(
   paymentIntent: string | { id: string } | null,
-  update: Parameters<typeof paymentsRepo.purchase.updateByPaymentIntent>[1],
-) {
+): Promise<void> {
   const stripePaymentIntentId = idOf(paymentIntent);
   if (!stripePaymentIntentId) return;
 
+  const target = await resolveChargeState(stripePaymentIntentId);
+  if (!target) return;
+
   const updated = await paymentsRepo.purchase.updateByPaymentIntent(
     { stripePaymentIntentId },
-    update,
+    target,
   );
   if (updated) return;
 
@@ -118,7 +168,7 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
         const session = event.data.object;
         if (session.mode !== "payment") return;
         if (session.payment_status === "unpaid") {
-          await markProcessing(session.id);
+          await paymentsRepo.checkout.markProcessing(session.id);
           return;
         }
         await confirmCheckout(session);
@@ -133,34 +183,28 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
         const session = event.data.object;
         if (session.mode !== "payment") return;
         logger.warn({ session: session.id }, "payments.webhook.async_failed");
-        await removePendingCheckout(session.id);
+        await paymentsRepo.checkout.markFailed(session.id);
         return;
       }
       case "checkout.session.expired": {
         const session = event.data.object;
-        if (session.mode === "payment") await removePendingCheckout(session.id);
+        if (session.mode === "payment")
+          await paymentsRepo.checkout.markExpired(session.id);
         return;
       }
       case "charge.refunded": {
         const charge = event.data.object;
-        await updateByCharge(
-          charge.payment_intent,
-          purchaseUpdateFromCharge(charge),
-        );
+        await updateByCharge(charge.payment_intent);
         return;
       }
       case "charge.dispute.created": {
         const dispute = event.data.object;
-        await updateByCharge(dispute.payment_intent, {
-          status: purchaseStatusFromDispute(dispute),
-        });
+        await updateByCharge(dispute.payment_intent);
         return;
       }
       case "charge.dispute.closed": {
         const dispute = event.data.object;
-        await updateByCharge(dispute.payment_intent, {
-          status: purchaseStatusFromDispute(dispute),
-        });
+        await updateByCharge(dispute.payment_intent);
         return;
       }
       default:

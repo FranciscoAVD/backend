@@ -4,15 +4,15 @@ import { db } from "@d/connection";
 import { user as userTable } from "@d/schemas/auth-schema";
 import { resetDb, seedUser } from "@/test-helpers/db";
 
-let customersCreateCalls: Record<string, unknown>[] = [];
+let customersCreateCalls: { args: Record<string, unknown>; options: unknown }[] = [];
 
 // no free local "real Stripe" to run against, unlike Postgres — so the SDK
 // surface ensureStripeCustomer actually calls is faked here via bun:test's mock.module
 mock.module("@f/payments/payment", () => ({
   getPaymentProcessor: () => ({
     customers: {
-      create: async (args: Record<string, unknown>) => {
-        customersCreateCalls.push(args);
+      create: async (args: Record<string, unknown>, options: unknown) => {
+        customersCreateCalls.push({ args, options });
         return { id: `cus_${customersCreateCalls.length}` };
       },
     },
@@ -27,13 +27,14 @@ describe("ensureStripeCustomer", () => {
     customersCreateCalls = [];
   });
 
-  test("returns the existing Stripe customer id without calling Stripe", async () => {
+  test("returns the existing Stripe customer id without calling Stripe, even when the caller doesn't know it", async () => {
     const userId = await seedUser({ stripeCustomerId: "cus_existing" });
+    // simulates a stale cached session that never learned about the customer id -
+    // ensureStripeCustomer must re-read the live row itself, not trust the caller
     const res = await ensureStripeCustomer({
       id: userId,
       name: "Test User",
       email: "test@example.test",
-      stripeCustomerId: "cus_existing",
     });
 
     expect(res).toBe("cus_existing");
@@ -46,22 +47,32 @@ describe("ensureStripeCustomer", () => {
       id: userId,
       name: "Test User",
       email: "test@example.test",
-      stripeCustomerId: null,
     });
 
     expect(res).toBe("cus_1");
-    expect(customersCreateCalls).toEqual([
-      {
-        email: "test@example.test",
-        name: "Test User",
-        metadata: { userId, customerType: "user" },
-      },
-    ]);
+    expect(customersCreateCalls[0]?.args).toEqual({
+      email: "test@example.test",
+      name: "Test User",
+      metadata: { userId, customerType: "user" },
+    });
 
     const [row] = await db
       .select()
       .from(userTable)
       .where(eq(userTable.id, userId));
     expect(row?.stripeCustomerId).toBe("cus_1");
+  });
+
+  test("passes a deterministic idempotency key scoped to the user", async () => {
+    const userId = await seedUser({ stripeCustomerId: null });
+    await ensureStripeCustomer({
+      id: userId,
+      name: "Test User",
+      email: "test@example.test",
+    });
+
+    expect(customersCreateCalls[0]?.options).toEqual({
+      idempotencyKey: `customer-${userId}`,
+    });
   });
 });

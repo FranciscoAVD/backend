@@ -1,4 +1,7 @@
 import { describe, expect, test, beforeEach } from "bun:test";
+import { eq } from "drizzle-orm";
+import { db } from "@d/connection";
+import { purchase as purchaseTable } from "@d/schemas/payment-schema";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import { resetDb, seedUser, seedPlan } from "@/test-helpers/db";
 
@@ -19,6 +22,7 @@ describe("addPurchase", () => {
         currency: plan.currency,
       },
       { durationDays: plan.durationDays },
+      new Date(),
     );
 
     expect(res).not.toBeNull();
@@ -37,12 +41,18 @@ describe("addPurchase", () => {
       currency: plan.currency,
     };
 
-    const first = await addPurchase({ userId }, purchaseData, {
-      durationDays: plan.durationDays,
-    });
-    const second = await addPurchase({ userId }, purchaseData, {
-      durationDays: plan.durationDays,
-    });
+    const first = await addPurchase(
+      { userId },
+      purchaseData,
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
+    const second = await addPurchase(
+      { userId },
+      purchaseData,
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
 
     expect(first).not.toBeNull();
     expect(second).toBeNull();
@@ -62,16 +72,17 @@ describe("addPurchase", () => {
         currency: plan.currency,
       },
       { durationDays: plan.durationDays },
+      new Date(),
     );
 
     expect(res?.expiresAt).toBeNull();
   });
 
-  test("sets expiresAt durationDays out from now when the plan has one", async () => {
+  test("sets expiresAt durationDays out from the given purchasedAt, not from insert time", async () => {
     const userId = await seedUser();
     const plan = await seedPlan({ durationDays: 30 });
+    const purchasedAt = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000); // 10 days ago
 
-    const before = Date.now();
     const res = await addPurchase(
       { userId },
       {
@@ -82,12 +93,14 @@ describe("addPurchase", () => {
         currency: plan.currency,
       },
       { durationDays: plan.durationDays },
+      purchasedAt,
     );
 
-    const expiresAt = res?.expiresAt?.getTime() ?? 0;
-    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
-    expect(expiresAt).toBeGreaterThanOrEqual(before + thirtyDaysMs);
-    expect(expiresAt).toBeLessThan(Date.now() + thirtyDaysMs + 5000);
+    expect(res?.createdAt.getTime()).toBe(purchasedAt.getTime());
+    // 30 days from 10 days ago = 20 days from now, not 30 - a late (e.g. reconciler) insert
+    // must not grant bonus access past what the real purchase moment would have given
+    const expected = purchasedAt.getTime() + 30 * 24 * 60 * 60 * 1000;
+    expect(res?.expiresAt?.getTime()).toBe(expected);
   });
 
   test("two purchases of the same plan each get their own, independent expiresAt", async () => {
@@ -104,6 +117,7 @@ describe("addPurchase", () => {
         currency: plan.currency,
       },
       { durationDays: plan.durationDays },
+      new Date(),
     );
     const second = await addPurchase(
       { userId },
@@ -115,6 +129,7 @@ describe("addPurchase", () => {
         currency: plan.currency,
       },
       { durationDays: plan.durationDays },
+      new Date(),
     );
 
     expect(first?.expiresAt).not.toBeNull();
@@ -123,5 +138,32 @@ describe("addPurchase", () => {
     expect(
       Math.abs((first?.expiresAt?.getTime() ?? 0) - (second?.expiresAt?.getTime() ?? 0)),
     ).toBeLessThan(5000);
+  });
+
+  test("inserts with userId: null when the user no longer exists", async () => {
+    const plan = await seedPlan();
+
+    const res = await addPurchase(
+      { userId: "does-not-exist" },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_test_deleted_user",
+        stripePaymentIntentId: "pi_test_deleted_user",
+        amountTotal: plan.amount,
+        currency: plan.currency,
+      },
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
+
+    expect(res).not.toBeNull();
+    expect(res?.userId).toBeNull();
+
+    const [row] = await db
+      .select()
+      .from(purchaseTable)
+      .where(eq(purchaseTable.stripeCheckoutSessionId, "cs_test_deleted_user"));
+    expect(row?.userId).toBeNull();
+    expect(row?.amountTotal).toBe(plan.amount);
   });
 });

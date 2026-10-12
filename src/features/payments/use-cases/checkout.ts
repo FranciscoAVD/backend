@@ -5,6 +5,7 @@ import {
   PENDING_CHECKOUT_TTL_SEC,
   getPendingCheckout,
   savePendingCheckout,
+  hasActivePendingCheckout,
 } from "@f/payments/lib/pending-checkout";
 import { getPurchaseBySession } from "@f/payments/use-cases/get-purchases";
 
@@ -58,7 +59,9 @@ export async function createCheckout(
  */
 export async function getCheckoutStatus(
   checkout: { userId: string } & Pick<Payment.Purchase, "stripeCheckoutSessionId">,
-): Promise<Payment.Purchase["status"] | "open" | "processing" | null> {
+): Promise<
+  Payment.Purchase["status"] | "open" | "processing" | "failed" | "expired" | null
+> {
   const purchase = await getPurchaseBySession(checkout);
   if (purchase) return purchase.status;
 
@@ -67,3 +70,29 @@ export async function getCheckoutStatus(
 
   return null;
 }
+
+/**
+ * @description Whether the user already has an open/processing checkout for this plan - used to
+ * block a second one on a non-repeatable plan before Stripe is even involved. Operation must be
+ * wrapped in try-catch
+ * @param userId the caller's own (always real, live) user ID
+ * @param planId the plan being checked out
+ * @returns Whether an active (not failed/expired) pending checkout exists for that pair.
+ */
+export async function hasPendingCheckout(
+  userId: string,
+  planId: number,
+): Promise<boolean> {
+  return hasActivePendingCheckout(userId, planId);
+}
+
+// re-exported so the webhook handler (not a use-case itself, but a consumer of this feature's
+// checkout flow like route.ts is) can reach these through paymentsRepo too, instead of importing
+// lib/pending-checkout.ts directly
+export {
+  getPendingCheckout,
+  markProcessing,
+  markFailed,
+  markExpired,
+  removePendingCheckout,
+} from "@f/payments/lib/pending-checkout";

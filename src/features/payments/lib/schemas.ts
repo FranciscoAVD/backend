@@ -1,4 +1,4 @@
-import { plan, purchase } from "@d/schemas/payment-schema";
+import { plan, purchase, paymentAuditLog } from "@d/schemas/payment-schema";
 import {
   createInsertSchema,
   createUpdateSchema,
@@ -49,6 +49,7 @@ export const insertPurchaseSchema = createInsertSchema(purchase).omit({
   status: true,
   amountRefunded: true,
   expiresAt: true,
+  durationDays: true,
   createdAt: true,
   updatedAt: true,
 });
@@ -61,3 +62,8 @@ export const selectPurchaseSchema = createSelectSchema(purchase);
 export const checkoutSchema = z.object({
   planId: z.number().int().positive(),
 });
+
+export const insertPaymentAuditLogSchema = createInsertSchema(
+  paymentAuditLog,
+).omit({ createdAt: true });
+export const selectPaymentAuditLogSchema = createSelectSchema(paymentAuditLog);
