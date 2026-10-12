@@ -10,6 +10,7 @@ export const insertPlanSchema = createInsertSchema(plan, {
   amount: (s) => s.positive(),
   annualAmount: (s) => s.positive(),
   trialDays: (s) => s.positive(),
+  durationDays: (s) => s.positive(),
   currency: (s) => s.length(3).toLowerCase(),
 })
   .omit({
@@ -35,13 +36,19 @@ export const insertPlanSchema = createInsertSchema(plan, {
         "One-time plans can't have an interval, annual amount or trial days.",
       path: ["type"],
     },
-  );
+  )
+  .refine((data) => data.type !== "recurring" || data.durationDays == null, {
+    message:
+      "Recurring plans can't have a duration; access is governed by the Stripe subscription period.",
+    path: ["durationDays"],
+  });
 export const selectPlanSchema = createSelectSchema(plan);
 
 export const insertPurchaseSchema = createInsertSchema(purchase).omit({
   userId: true,
   status: true,
   amountRefunded: true,
+  expiresAt: true,
   createdAt: true,
   updatedAt: true,
 });

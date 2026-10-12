@@ -9,11 +9,17 @@ import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import {
   getAllPurchases,
   getPurchaseBySession,
+  getPaidPurchaseByPlan,
+  hasActivePurchase,
 } from "@f/payments/use-cases/get-purchases";
 import { updatePurchaseByPaymentIntent } from "@f/payments/use-cases/update-purchase";
 import { createCheckout, getCheckoutStatus } from "@f/payments/use-cases/checkout";
+import { ensureStripeCustomer } from "@f/payments/use-cases/ensure-customer";
 
 export const paymentsRepo = {
+  customer: {
+    ensure: ensureStripeCustomer,
+  },
   plan: {
     add: addPlan,
     get: getPlan,
@@ -25,6 +31,8 @@ export const paymentsRepo = {
     add: addPurchase,
     getAll: getAllPurchases,
     getBySession: getPurchaseBySession,
+    getPaidByPlan: getPaidPurchaseByPlan,
+    hasActive: hasActivePurchase,
     updateByPaymentIntent: updatePurchaseByPaymentIntent,
   },
   checkout: {

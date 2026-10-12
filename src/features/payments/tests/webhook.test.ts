@@ -39,10 +39,7 @@ const session = (
     ...overrides,
   }) as unknown as Stripe.Checkout.Session;
 
-const event = (
-  type: Stripe.Event.Type,
-  object: unknown,
-): Stripe.Event =>
+const event = (type: Stripe.Event.Type, object: unknown): Stripe.Event =>
   ({
     id: "evt_1",
     type,
@@ -94,6 +91,16 @@ describe("confirmCheckout", () => {
     const userId = await seedUser();
 
     await confirmCheckout(session({ id: "cs_3", metadata: null }));
+
+    expect(await getAllPurchases({ userId })).toEqual([]);
+  });
+
+  test("records nothing when the purchased plan no longer exists", async () => {
+    const userId = await seedUser();
+
+    await confirmCheckout(
+      session({ id: "cs_4", metadata: { userId, planId: "999999" } }),
+    );
 
     expect(await getAllPurchases({ userId })).toEqual([]);
   });
@@ -193,6 +200,7 @@ describe("handleStripeEvent", () => {
         amountTotal: plan.amount,
         currency: plan.currency,
       },
+      { durationDays: plan.durationDays },
     );
 
     await handleStripeEvent(
@@ -248,6 +256,7 @@ describe("handleStripeEvent", () => {
         amountTotal: plan.amount,
         currency: plan.currency,
       },
+      { durationDays: plan.durationDays },
     );
 
     await handleStripeEvent(

@@ -21,6 +21,7 @@ describe("deleting a user", () => {
         amountTotal: plan.amount,
         currency: plan.currency,
       },
+      { durationDays: plan.durationDays },
     );
 
     await db.delete(user).where(eq(user.id, userId));
