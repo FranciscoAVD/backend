@@ -13,7 +13,16 @@ import {
   hasActivePurchase,
 } from "@f/payments/use-cases/get-purchases";
 import { updatePurchaseByPaymentIntent } from "@f/payments/use-cases/update-purchase";
-import { createCheckout, getCheckoutStatus } from "@f/payments/use-cases/checkout";
+import {
+  createCheckout,
+  getCheckoutStatus,
+  hasPendingCheckout,
+  getPendingCheckout,
+  markProcessing,
+  markFailed,
+  markExpired,
+  removePendingCheckout,
+} from "@f/payments/use-cases/checkout";
 import { ensureStripeCustomer } from "@f/payments/use-cases/ensure-customer";
 import { addAuditLog } from "@f/payments/use-cases/add-audit-log";
 import { getAuditLogByUser } from "@f/payments/use-cases/get-audit-log";
@@ -40,6 +49,12 @@ export const paymentsRepo = {
   checkout: {
     create: createCheckout,
     getStatus: getCheckoutStatus,
+    hasPending: hasPendingCheckout,
+    getPending: getPendingCheckout,
+    markProcessing,
+    markFailed,
+    markExpired,
+    removePending: removePendingCheckout,
   },
   auditLog: {
     add: addAuditLog,

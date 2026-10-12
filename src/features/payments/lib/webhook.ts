@@ -2,13 +2,6 @@ import type Stripe from "stripe";
 import { logger } from "@/lib/logger";
 import tryCatch from "@vicstack/try-catch";
 import type { PendingCheckout } from "@f/payments/lib/pending-checkout";
-import {
-  getPendingCheckout,
-  markProcessing,
-  markFailed,
-  markExpired,
-  removePendingCheckout,
-} from "@f/payments/lib/pending-checkout";
 import { paymentsRepo } from "@f/payments/repo";
 import { isAllowedEvent } from "@f/payments/lib/utils";
 import { resolveChargeState } from "@f/payments/lib/charge-state";
@@ -24,7 +17,9 @@ const idOf = (ref: string | { id: string } | null) =>
 async function resolveOwner(
   session: Stripe.Checkout.Session,
 ): Promise<Pick<PendingCheckout, "userId" | "planId"> | null> {
-  const [pending, error] = await tryCatch(getPendingCheckout(session.id));
+  const [pending, error] = await tryCatch(
+    paymentsRepo.checkout.getPending(session.id),
+  );
   if (pending) return { userId: pending.userId, planId: pending.planId };
 
   logger.warn(
@@ -68,7 +63,7 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
   }
 
   // the realistic "two tabs" race is already blocked before a Checkout Session is even created
-  // (see hasActivePendingCheckout in route.ts); this re-check catches the narrower one it can't -
+  // (see paymentsRepo.checkout.hasPending in route.ts); this re-check catches the narrower one it can't -
   // two webhook deliveries confirming two separately-started sessions for the same plan. The
   // money is already taken either way, so the purchase is still recorded (never silently dropped,
   // same reasoning as the FK-violation case in addPurchase) - this just flags it for review.
@@ -80,7 +75,9 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
     if (blocking) {
       logger.error(
         {
-          err: new Error("Paid checkout for an already-owned non-repeatable plan"),
+          err: new Error(
+            "Paid checkout for an already-owned non-repeatable plan",
+          ),
           session: session.id,
           user: owner.userId,
           plan: owner.planId,
@@ -124,9 +121,12 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
   );
 
   // the purchase is already stored; a leftover key just expires with its TTL
-  const [, error] = await tryCatch(removePendingCheckout(session.id));
+  const [, error] = await tryCatch(paymentsRepo.checkout.removePending(session.id));
   if (error)
-    logger.warn({ err: error, session: session.id }, "payments.webhook.cleanup");
+    logger.warn(
+      { err: error, session: session.id },
+      "payments.webhook.cleanup",
+    );
 }
 
 async function updateByCharge(
@@ -168,7 +168,7 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
         const session = event.data.object;
         if (session.mode !== "payment") return;
         if (session.payment_status === "unpaid") {
-          await markProcessing(session.id);
+          await paymentsRepo.checkout.markProcessing(session.id);
           return;
         }
         await confirmCheckout(session);
@@ -183,12 +183,13 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
         const session = event.data.object;
         if (session.mode !== "payment") return;
         logger.warn({ session: session.id }, "payments.webhook.async_failed");
-        await markFailed(session.id);
+        await paymentsRepo.checkout.markFailed(session.id);
         return;
       }
       case "checkout.session.expired": {
         const session = event.data.object;
-        if (session.mode === "payment") await markExpired(session.id);
+        if (session.mode === "payment")
+          await paymentsRepo.checkout.markExpired(session.id);
         return;
       }
       case "charge.refunded": {

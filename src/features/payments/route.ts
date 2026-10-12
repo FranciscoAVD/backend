@@ -11,7 +11,6 @@ import {
 
 import { checkoutSchema, insertPlanSchema } from "@f/payments/lib/schemas";
 import { isCheckoutSessionId } from "@f/payments/lib/utils";
-import { hasActivePendingCheckout } from "@f/payments/lib/pending-checkout";
 
 import tryCatch from "@vicstack/try-catch";
 import HTTP from "@vicstack/http";
@@ -234,7 +233,7 @@ const app = new Hono<PinoLoggerEnv>()
         }
 
         const [hasPending, pendingError] = await tryCatch(
-          hasActivePendingCheckout(user.id, plan.id),
+          paymentsRepo.checkout.hasPending(user.id, plan.id),
         );
 
         if (pendingError) {
