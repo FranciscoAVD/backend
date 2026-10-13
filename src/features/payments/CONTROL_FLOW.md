@@ -356,6 +356,30 @@ only affects purchases made *after* it - `addPurchase` snapshots the plan's
 `durationDays` onto the purchase row at purchase time, so it never rewrites history
 for purchases already made.
 
+## The trial pattern
+
+Two unrelated things both get called "trial" here - don't confuse them:
+
+- **One-time paid trial** (e.g. $1 for 7 days): a `one_time` plan with
+  `repeatable: false` and `durationDays` set. This is *this feature's own*
+  gating, not a separate mechanism - `getBlockingPurchaseByPlan` blocks a
+  second purchase while one is still `paid`/`disputed`, and once
+  `hasActivePurchase` says the `durationDays` window has elapsed, the guard
+  no longer finds a blocking purchase and a new one becomes buyable again.
+  That's intended: the trial is meant to end and be gone, not linger as a
+  dead end that blocks a real purchase forever.
+- **Subscription trial** (e.g. 14 days of Pro, then it bills): `trialDays`
+  on a `recurring` plan, handled entirely by `@better-auth/stripe` - it
+  grants the trial, auto-bills when it ends, and only grants one per account
+  by checking the user's subscription history before creating another. None
+  of this feature's code is involved.
+
+A genuinely *free*, one-time (non-subscription) trial isn't supported and
+doesn't need to be: `insertPlanSchema` requires `amount` to be positive, and
+Stripe Checkout in `payment` mode can't settle a $0 total without a coupon -
+every realistic "free trial" need is the subscription-trial shape above,
+which better-auth already owns end-to-end.
+
 ## Known noise / tech debt (not fixed here)
 
 - **Spurious plugin log on every one-time purchase** - see "Stripe webhook
