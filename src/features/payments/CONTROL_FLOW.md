@@ -69,6 +69,36 @@ cache - so a value read from the session can be stale. It also passes a
 second customer (though it doesn't fully dedupe two truly simultaneous requests
 - Stripe's idempotency semantics don't strictly guarantee that).
 
+### Adding Stripe params: `lib/checkout-extensions.ts`
+
+`createCheckout` calls `getCheckoutSessionParams({ user, plan })` before
+building the Stripe request - an extension point for promo codes
+(`discounts`/`allow_promotion_codes`), tax (`automatic_tax`/`tax_id_collection`),
+a different `line_items` quantity, or anything else
+`stripe.checkout.sessions.create` accepts that this app doesn't set itself.
+Mirrors `@better-auth/stripe`'s own `subscription.getCheckoutSessionParams`
+option for the subscription flow (verified in
+`node_modules/@better-auth/stripe/dist/index.mjs`) - same idea, for this
+flow. The default implementation returns `undefined` (no-op); an app wanting
+any of this edits the function directly, the same "change it here, not
+where it's read" convention `access-policy.ts` already established.
+
+What always wins over whatever it returns, by object-literal ordering in
+`createCheckout` (the explicit fields are listed after the extension's
+params are spread first) - `mode`, `customer`, `client_reference_id`,
+`success_url`, `cancel_url`, and `expires_at` (kept in lockstep with
+`PENDING_CHECKOUT_TTL_SEC`; letting it drift would open a window where
+Stripe still accepts the session but Redis has already forgotten it). The
+`userId`/`planId`/`durationDays` keys of `metadata` and
+`payment_intent_data.metadata` also always win (merged rather than replaced
+wholesale, so an app can still tag a session with its own additional keys
+alongside them) - `confirmCheckout` and the reconciler depend on those three
+to resolve a session back to a purchase at all. `line_items` is
+deliberately **not** protected, unlike the subscription plugin (which has
+its own seat/multi-item logic to guard) - a returned `line_items` fully
+replaces the `[{ price, quantity: 1 }]` default, since nothing else here
+depends on it. That's the mechanism for a different quantity.
+
 `GET /checkout/:sessionId` (`getCheckoutStatus`) answers the client's polling: it
 reads the `purchase` row if one exists yet (`paid`/`refunded`/`disputed`), otherwise
 falls back to the pending Redis entry (`open`/`processing`/`failed`/`expired` - the

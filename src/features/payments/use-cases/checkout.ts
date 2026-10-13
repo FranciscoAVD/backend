@@ -7,6 +7,7 @@ import {
   savePendingCheckout,
 } from "@f/payments/lib/pending-checkout";
 import { encodeDurationDays } from "@f/payments/lib/utils";
+import { getCheckoutSessionParams } from "@f/payments/lib/checkout-extensions";
 import { getPurchaseBySession } from "@f/payments/use-cases/get-purchases";
 
 // userId here is always the live, authenticated caller's id, unlike a purchase
@@ -21,29 +22,40 @@ type CheckoutUser = {
  * confirms the payment. The plan's `durationDays` is snapshotted onto the session's metadata here,
  * at checkout time, so an admin edit made while the payment is still settling (up to 14 days for
  * bank debits, or later via the reconciler) can't change what this buyer gets.
+ *
+ * `getCheckoutSessionParams` (`lib/checkout-extensions.ts`) can add further Stripe params (promo
+ * codes, tax, a different `line_items` quantity, ...) - see that file for exactly what always
+ * wins over its return value and why.
+ *
  * Assumes the plan was checked to be active and one-time. Operation must be wrapped in try-catch
  * @param user object of user ID and Stripe customer ID
- * @param plan object of plan ID, Stripe price ID and duration enforced by Pick<Payment.Plan, "id" | "stripePriceId" | "durationDays">
+ * @param plan the full plan row - passed whole (not narrowed to just the fields this function
+ * itself reads) since `getCheckoutSessionParams` may need to inspect any of it
  * @returns Object containing the session ID and the Stripe-hosted checkout URL.
  */
 export async function createCheckout(
   user: CheckoutUser,
-  plan: Pick<Payment.Plan, "id" | "stripePriceId" | "durationDays">,
+  plan: Payment.Plan,
 ): Promise<{ sessionId: string; url: string | null }> {
+  const extra = (await getCheckoutSessionParams({ user, plan })) ?? {};
+  const { metadata: extraMetadata, payment_intent_data: extraPID, line_items: extraLineItems, ...rest } = extra;
+
   // also kept on the session so a confirmed payment can still be recorded if the Redis entry is gone
   const metadata = {
+    ...extraMetadata,
     userId: user.userId,
     planId: String(plan.id),
     durationDays: encodeDurationDays(plan.durationDays),
   };
 
   const session = await getPaymentProcessor().checkout.sessions.create({
+    ...rest,
     mode: "payment",
     customer: user.stripeCustomerId,
-    line_items: [{ price: plan.stripePriceId, quantity: 1 }],
+    line_items: extraLineItems ?? [{ price: plan.stripePriceId, quantity: 1 }],
     client_reference_id: user.userId,
     metadata,
-    payment_intent_data: { metadata },
+    payment_intent_data: { ...extraPID, metadata },
     success_url: `${env.CLIENT_URL}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${env.CLIENT_URL}/checkout/cancel`,
     expires_at: Math.floor(Date.now() / 1000) + PENDING_CHECKOUT_TTL_SEC,

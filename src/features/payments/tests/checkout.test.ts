@@ -20,6 +20,13 @@ mock.module("@f/payments/payment", () => ({
   }),
 }));
 
+// extension point under test - a plain module the test re-mocks per case, same mock.module
+// pattern as Stripe above; default export matches checkout-extensions.ts's own no-op
+let extensionParams: Record<string, unknown> | undefined;
+mock.module("@f/payments/lib/checkout-extensions", () => ({
+  getCheckoutSessionParams: async () => extensionParams,
+}));
+
 import {
   createCheckout,
   getCheckoutStatus,
@@ -32,6 +39,7 @@ describe("createCheckout", () => {
     await resetDb();
     await resetRedis();
     sessionCreateCalls = [];
+    extensionParams = undefined;
   });
 
   test("creates a Stripe checkout session and tracks it as pending in Redis", async () => {
@@ -39,7 +47,7 @@ describe("createCheckout", () => {
 
     const res = await createCheckout(
       { userId: "u1", stripeCustomerId: "cus_abc" },
-      { id: plan.id, stripePriceId: plan.stripePriceId, durationDays: plan.durationDays },
+      plan,
     );
 
     expect(res).toEqual({
@@ -55,7 +63,7 @@ describe("createCheckout", () => {
     const plan = await seedPlan();
     await createCheckout(
       { userId: "u1", stripeCustomerId: "cus_abc" },
-      { id: plan.id, stripePriceId: plan.stripePriceId, durationDays: plan.durationDays },
+      plan,
     );
 
     expect(sessionCreateCalls[0]).toMatchObject({ customer: "cus_abc" });
@@ -65,7 +73,7 @@ describe("createCheckout", () => {
     const plan = await seedPlan({ durationDays: 30 });
     await createCheckout(
       { userId: "u1", stripeCustomerId: "cus_abc" },
-      { id: plan.id, stripePriceId: plan.stripePriceId, durationDays: plan.durationDays },
+      plan,
     );
 
     const metadata = { userId: "u1", planId: String(plan.id), durationDays: "30" };
@@ -79,10 +87,65 @@ describe("createCheckout", () => {
     const plan = await seedPlan({ durationDays: null });
     await createCheckout(
       { userId: "u1", stripeCustomerId: "cus_abc" },
-      { id: plan.id, stripePriceId: plan.stripePriceId, durationDays: plan.durationDays },
+      plan,
     );
 
     expect(sessionCreateCalls[0]).toMatchObject({ metadata: { durationDays: "none" } });
+  });
+
+  test("getCheckoutSessionParams's additional params reach Stripe", async () => {
+    extensionParams = { allow_promotion_codes: true, automatic_tax: { enabled: true } };
+    const plan = await seedPlan();
+
+    await createCheckout({ userId: "u1", stripeCustomerId: "cus_abc" }, plan);
+
+    expect(sessionCreateCalls[0]).toMatchObject({
+      allow_promotion_codes: true,
+      automatic_tax: { enabled: true },
+    });
+  });
+
+  test("a line_items override replaces the default quantity", async () => {
+    extensionParams = { line_items: [{ price: "price_other", quantity: 3 }] };
+    const plan = await seedPlan({ stripePriceId: "price_abc" });
+
+    await createCheckout({ userId: "u1", stripeCustomerId: "cus_abc" }, plan);
+
+    expect(sessionCreateCalls[0]).toMatchObject({
+      line_items: [{ price: "price_other", quantity: 3 }],
+    });
+  });
+
+  test("the extension can't override userId/planId/durationDays in metadata, but can add its own keys", async () => {
+    extensionParams = {
+      metadata: { userId: "someone-else", campaign: "spring-sale" },
+      payment_intent_data: { metadata: { planId: "999999" } },
+    };
+    const plan = await seedPlan({ durationDays: 30 });
+
+    await createCheckout({ userId: "u1", stripeCustomerId: "cus_abc" }, plan);
+
+    const metadata = {
+      campaign: "spring-sale",
+      userId: "u1",
+      planId: String(plan.id),
+      durationDays: "30",
+    };
+    expect(sessionCreateCalls[0]).toMatchObject({ metadata, payment_intent_data: { metadata } });
+  });
+
+  test("the extension can't override mode, customer or expires_at", async () => {
+    extensionParams = {
+      mode: "subscription",
+      customer: "cus_wrong",
+      expires_at: 1,
+    };
+    const plan = await seedPlan();
+
+    await createCheckout({ userId: "u1", stripeCustomerId: "cus_abc" }, plan);
+
+    expect(sessionCreateCalls[0]).toMatchObject({ mode: "payment", customer: "cus_abc" });
+    expect(sessionCreateCalls[0]?.expires_at).toBeGreaterThan(1);
   });
 });
 
@@ -119,7 +182,7 @@ describe("getCheckoutStatus", () => {
     const plan = await seedPlan();
     await createCheckout(
       { userId: "u1", stripeCustomerId: "cus_abc" },
-      { id: plan.id, stripePriceId: plan.stripePriceId, durationDays: plan.durationDays },
+      plan,
     );
 
     const res = await getCheckoutStatus({
@@ -133,7 +196,7 @@ describe("getCheckoutStatus", () => {
     const plan = await seedPlan();
     await createCheckout(
       { userId: "u1", stripeCustomerId: "cus_abc" },
-      { id: plan.id, stripePriceId: plan.stripePriceId, durationDays: plan.durationDays },
+      plan,
     );
 
     const res = await getCheckoutStatus({
