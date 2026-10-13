@@ -97,19 +97,18 @@ const app = new Hono<PinoLoggerEnv>()
 
     if (!plan) return c.json({ message: "Plan not found" }, HTTP.NotFound);
 
-    // subscriptions' access is governed by their Stripe subscription period, not a
-    // `purchase` row - hasActivePurchase would silently always answer false for one
-    if (plan.type !== "one_time")
-      return c.json(
-        { message: "Plan is not a one-time plan" },
-        HTTP.UnprocessableEntity,
-      );
-
+    // one_time access lives in the `purchase` table; recurring access is governed by
+    // the subscription's own Stripe period, tracked in better-auth's `subscription` table
     const [active, activeError] = await tryCatch(
-      paymentsRepo.purchase.hasActive(
-        { userId: user.id, planId: plan.id },
-        { overlapping: plan.overlapping },
-      ),
+      plan.type === "one_time"
+        ? paymentsRepo.purchase.hasActive(
+            { userId: user.id, planId: plan.id },
+            { overlapping: plan.overlapping },
+          )
+        : paymentsRepo.subscription.hasActive(
+            { userId: user.id },
+            { name: plan.name },
+          ),
     );
     if (activeError) {
       c.var.logger.error(

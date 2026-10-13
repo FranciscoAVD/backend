@@ -245,23 +245,36 @@ The default scan window is 14 days (derived from `PROCESSING_TTL_SEC`), not 7 -
 delayed payment methods (e.g. bank debits) can take that long to settle, and a
 late settlement whose webhook was lost needs to still fall inside the window.
 
-## Checking active access: `hasActivePurchase`
+## Checking active access: `GET /plans/:id/access`
 
-`GET /plans/:id/access` is the one place this is called from today - it answers
-"does the caller currently have access to this plan" (404 if the plan doesn't
-exist, 422 if it's `recurring` - that plan type's access is governed by its Stripe
-subscription period, not a `purchase` row, so `hasActivePurchase` would always
-answer `false` for it regardless of subscription state). Storage is always
-independent rows - each purchase's own `durationDays` is snapshotted at
-purchase time, never chained with any other purchase's - so `plan.overlapping`
-only changes how they're *read*: `overlapping: false` recomputes each
-purchase's end as `(chain-adjusted start) + its own durationDays`, rather than
-trusting its independently-computed `expiresAt`, so a later purchase bought
-before an earlier one lapses correctly extends access instead of shortening it.
-A row with no `durationDays` snapshot at all falls back to its own `expiresAt`
-instead of being treated as perpetual - that distinguishes a genuinely
-never-expiring purchase (`expiresAt` also `null`) from a pre-migration row that
-predates this column and was never backfilled.
+The one route that answers "does the caller currently have access to this
+plan" (404 if the plan doesn't exist). Which of the two feature's two systems
+it checks depends on `plan.type`, mirroring the same split as checkout above:
+
+```mermaid
+flowchart TD
+    Start(["GET /plans/:id/access"]) --> LookupPlan["paymentsRepo.plan.get(id)"]
+    LookupPlan --> PlanFound{"plan exists?"}
+    PlanFound -- no --> NotFound["404 Plan not found"]
+    PlanFound -- yes --> Type{"plan.type?"}
+    Type -- one_time --> HasActivePurchase["hasActivePurchase(userId, planId, plan.overlapping)"]
+    Type -- recurring --> HasActiveSubscription["hasActiveSubscription(userId, plan.name)"]
+    HasActivePurchase --> Return["200 { active }"]
+    HasActiveSubscription --> Return
+```
+
+### `one_time`: `hasActivePurchase`
+
+Storage is always independent rows - each purchase's own `durationDays` is
+snapshotted at purchase time, never chained with any other purchase's - so
+`plan.overlapping` only changes how they're *read*: `overlapping: false`
+recomputes each purchase's end as `(chain-adjusted start) + its own
+durationDays`, rather than trusting its independently-computed `expiresAt`, so
+a later purchase bought before an earlier one lapses correctly extends access
+instead of shortening it. A row with no `durationDays` snapshot at all falls
+back to its own `expiresAt` instead of being treated as perpetual - that
+distinguishes a genuinely never-expiring purchase (`expiresAt` also `null`)
+from a pre-migration row that predates this column and was never backfilled.
 
 ```mermaid
 flowchart TD
@@ -286,6 +299,28 @@ flowchart TD
     InWindow -- no --> Advance["chainEnd = end,\nmove to next purchase\n(a gap before the next one isn't backfilled)"]
     Advance --> Walk
     Walk -->|no purchases left| False3["false"]
+```
+
+### `recurring`: `hasActiveSubscription`
+
+Reads better-auth's own `subscription` table directly (`referenceId` = the
+caller's user id - this app never enables the organization plugin, so a
+subscription is always keyed by user, never by org) rather than calling the
+plugin's `/subscription/list` endpoint: this feature only needs a boolean, not
+the limits/priceId enrichment that endpoint adds, and reading the table
+avoids reconstructing a session-bearing request just to call it. Matches
+`sub.plan` against `plan.name` case-insensitively, the same way the plugin's
+own plan lookup does, and treats `active`/`trialing` as the active statuses -
+mirroring `isActiveOrTrialing`, the check the plugin itself uses to decide
+whether a user is already subscribed (e.g. to block a duplicate upgrade) -
+rather than also checking `periodEnd`, which the plugin doesn't check either.
+
+```mermaid
+flowchart TD
+    Start(["hasActiveSubscription(userId, plan.name)"]) --> Fetch["SELECT subscription\nWHERE referenceId = userId\nAND lower(plan) = lower(plan.name)\nAND status IN (active, trialing)"]
+    Fetch --> Any{"any row?"}
+    Any -- yes --> True["true"]
+    Any -- no --> False["false"]
 ```
 
 ## The audit log: `payment_audit_log`

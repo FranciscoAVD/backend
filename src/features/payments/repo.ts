@@ -14,6 +14,7 @@ import {
   hasActivePurchase,
 } from "@f/payments/use-cases/get-purchases";
 import { updatePurchaseByPaymentIntent } from "@f/payments/use-cases/update-purchase";
+import { hasActiveSubscription } from "@f/payments/use-cases/get-subscription";
 import {
   createCheckout,
   getCheckoutStatus,
@@ -50,6 +51,9 @@ export const paymentsRepo = {
     getBlockingByPlan: getBlockingPurchaseByPlan,
     hasActive: hasActivePurchase,
     updateByPaymentIntent: updatePurchaseByPaymentIntent,
+  },
+  subscription: {
+    hasActive: hasActiveSubscription,
   },
   checkout: {
     create: createCheckout,

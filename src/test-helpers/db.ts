@@ -1,16 +1,40 @@
 import { db } from "@d/connection";
-import { user } from "@d/schemas/auth-schema";
+import { user, subscription } from "@d/schemas/auth-schema";
 import { plan } from "@d/schemas/payment-schema";
 import { sql } from "drizzle-orm";
 
 /**
  * @description Empties every table these tests touch, for isolation between tests.
  * Must only ever run against the `backend_test` database (`bun run test`, never bare `bun test`).
+ * `subscription` has no FK back to `user` (better-auth keys it by a plain `referenceId` string),
+ * so it needs listing explicitly - `user`'s CASCADE alone won't reach it.
  */
 export async function resetDb(): Promise<void> {
   await db.execute(
-    sql`TRUNCATE TABLE "user", todo, plan, purchase, payment_audit_log RESTART IDENTITY CASCADE`,
+    sql`TRUNCATE TABLE "user", todo, plan, purchase, payment_audit_log, subscription RESTART IDENTITY CASCADE`,
   );
+}
+
+/**
+ * @description Inserts a minimal valid `subscription` row directly, bypassing Stripe and the
+ * better-auth plugin entirely - these tests only need a row matching the shape
+ * `hasActiveSubscription` queries, not a real Stripe-backed subscription.
+ */
+export async function seedSubscription(
+  overrides: Partial<typeof subscription.$inferInsert> & {
+    referenceId: string;
+    plan: string;
+  },
+): Promise<typeof subscription.$inferSelect> {
+  const [row] = await db
+    .insert(subscription)
+    .values({
+      id: crypto.randomUUID(),
+      status: "active",
+      ...overrides,
+    })
+    .returning();
+  return row!;
 }
 
 /**
