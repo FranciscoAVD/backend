@@ -61,7 +61,7 @@ export const paymentsRepo = {
     markExpired,
     removePending: removePendingCheckout,
   },
-  auditLog: {
+  audit: {
     add: addAuditLog,
     getByUser: getAuditLogByUser,
     getAll: getAllAuditLog,

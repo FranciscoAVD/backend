@@ -297,9 +297,9 @@ two `POST /checkout` guards and `confirmCheckout`'s own re-check write to -
 already-owned non-repeatable plan, and the purchase is still recorded - see
 above). All three writes are best-effort: a failure is logged as a warning and
 never blocks the response or webhook outcome it's attached to. `GET
-/audit-log` (admin, `auditLog:list`) exposes it - every entry, most recent
+/audit-log` (admin, `audit:list`) exposes it - every entry, most recent
 first, or one customer's via `?userId=`, backed by
-`paymentsRepo.auditLog.getAll`/`getByUser` respectively.
+`paymentsRepo.audit.getAll`/`getByUser` respectively.
 
 ## Where `repeatable`, `durationDays` and `overlapping` come from
 

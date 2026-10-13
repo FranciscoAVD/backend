@@ -9,7 +9,7 @@ export const statement = {
   ...defaultStatements,
   todo: ["create", "update", "delete"],
   plan: ["create", "update"],
-  auditLog: ["list"],
+  audit: ["list"],
 } as const;
 
 export const ac = createAccessControl(statement);
@@ -21,6 +21,6 @@ export const user = ac.newRole({
 export const admin = ac.newRole({
   todo: ["create", "update", "delete"],
   plan: ["create", "update"],
-  auditLog: ["list"],
+  audit: ["list"],
   ...adminAc.statements,
 });

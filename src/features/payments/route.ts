@@ -126,19 +126,19 @@ const app = new Hono<PinoLoggerEnv>()
   })
   .get(
     "/audit-log",
-    requirePermissionMiddleware({ auditLog: ["list"] }),
+    requirePermissionMiddleware({ audit: ["list"] }),
     async (c) => {
       const { user } = c.get("session");
       const targetUserId = c.req.query("userId");
 
       const [res, error] = await tryCatch(
         targetUserId
-          ? paymentsRepo.auditLog.getByUser({ userId: targetUserId })
-          : paymentsRepo.auditLog.getAll(),
+          ? paymentsRepo.audit.getByUser({ userId: targetUserId })
+          : paymentsRepo.audit.getAll(),
       );
 
       if (error) {
-        c.var.logger.error({ err: error, user: user.id }, "payments.auditLog.get");
+        c.var.logger.error({ err: error, user: user.id }, "payments.audit.get");
         return c.json(
           { message: "Something went wrong. Try again later." },
           HTTP.InternalServerError,
@@ -326,7 +326,7 @@ const app = new Hono<PinoLoggerEnv>()
 
         if (existing) {
           const [, auditError] = await tryCatch(
-            paymentsRepo.auditLog.add({
+            paymentsRepo.audit.add({
               type: "checkout_blocked_existing_purchase",
               userId: user.id,
               planId: plan.id,
@@ -361,7 +361,7 @@ const app = new Hono<PinoLoggerEnv>()
 
         if (hasPending) {
           const [, auditError] = await tryCatch(
-            paymentsRepo.auditLog.add({
+            paymentsRepo.audit.add({
               type: "checkout_blocked_pending_checkout",
               userId: user.id,
               planId: plan.id,
