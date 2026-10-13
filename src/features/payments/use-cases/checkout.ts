@@ -5,7 +5,6 @@ import {
   PENDING_CHECKOUT_TTL_SEC,
   getPendingCheckout,
   savePendingCheckout,
-  hasActivePendingCheckout,
 } from "@f/payments/lib/pending-checkout";
 import { encodeDurationDays } from "@f/payments/lib/utils";
 import { getPurchaseBySession } from "@f/payments/use-cases/get-purchases";
@@ -77,21 +76,6 @@ export async function getCheckoutStatus(
   if (pending && pending.userId === checkout.userId) return pending.status;
 
   return null;
-}
-
-/**
- * @description Whether the user already has an open/processing checkout for this plan - used to
- * block a second one on a non-repeatable plan before Stripe is even involved. Operation must be
- * wrapped in try-catch
- * @param userId the caller's own (always real, live) user ID
- * @param planId the plan being checked out
- * @returns Whether an active (not failed/expired) pending checkout exists for that pair.
- */
-export async function hasPendingCheckout(
-  userId: string,
-  planId: number,
-): Promise<boolean> {
-  return hasActivePendingCheckout(userId, planId);
 }
 
 // re-exported so the webhook handler (not a use-case itself, but a consumer of this feature's

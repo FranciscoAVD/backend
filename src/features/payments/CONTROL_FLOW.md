@@ -498,3 +498,11 @@ which better-auth already owns end-to-end.
   `@better-auth/stripe`'s declared peer range stops at `^22` (and separately,
   its peer on `better-auth` itself is `^1.7.7` while this repo runs `1.7.4`).
   Nothing is currently broken; revisit if an actual incompatibility surfaces.
+- **`reservePendingCheckout`'s TTL-based lock has a narrow theoretical gap** -
+  `RESERVATION_TTL_SEC` (5 min) is generous enough to outlast
+  `ensureStripeCustomer` + `checkout.sessions.create` under any normal
+  network condition, but it's still a TTL, not a true lock: if the request
+  somehow took longer than that, a second request could claim the slot
+  before `savePendingCheckout` overwrites the reservation with the real
+  session id, and both would reach Stripe. Accepted as effectively
+  unreachable in practice rather than engineered around.

@@ -75,7 +75,7 @@ export async function confirmCheckout(
   }
 
   // the realistic "two tabs" race is already blocked before a Checkout Session is even created
-  // (see paymentsRepo.checkout.hasPending in route.ts); this re-check catches the narrower one it can't -
+  // (see paymentsRepo.checkout.reserve in route.ts); this re-check catches the narrower one it can't -
   // two webhook deliveries confirming two separately-started sessions for the same plan. The
   // money is already taken either way, so the purchase is still recorded (never silently dropped,
   // same reasoning as the FK-violation case in addPurchase) - this just flags it for review.

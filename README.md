@@ -52,7 +52,7 @@ Give it the same env vars as the main app (`DB_URL`/`DB_*`, `REDIS_URL`, `STRIPE
 | `lib/webhook.ts` | the Stripe webhook handler (also remove `auth.ts`'s `onEvent`) |
 | `lib/charge-state.ts` | `resolveChargeState`, shared by the webhook and the reconciler |
 | `lib/constants.ts` | `ALLOWED_EVENTS` |
-| one-time-only helpers in `lib/utils.ts` | `isAllowedEvent`, `isCheckoutSessionId`, `isForeignKeyViolation`, `purchaseUpdateFromCharge`, `purchaseStatusFromDispute` |
+| one-time-only helpers in `lib/utils.ts` | `isAllowedEvent`, `isCheckoutSessionId`, `isForeignKeyViolation`, `purchaseUpdateFromCharge`, `purchaseStatusFromDispute`, `encodeDurationDays`, `decodeDurationDays` |
 | `lib/reconcile.ts` + `scripts/reconcile.ts` | the webhook backstop |
 | `purchase` use-cases + `GET /purchases` | `add-purchase.ts` / `get-purchases.ts` / `update-purchase.ts` |
 | the audit log | `use-cases/add-audit-log.ts` / `get-audit-log.ts`, the `payment_audit_log` table |

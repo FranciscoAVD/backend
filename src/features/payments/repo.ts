@@ -26,7 +26,6 @@ import { updateSubscriptionFields } from "@f/payments/use-cases/update-subscript
 import {
   createCheckout,
   getCheckoutStatus,
-  hasPendingCheckout,
   getPendingCheckout,
   reservePendingCheckout,
   releaseReservation,
@@ -74,7 +73,6 @@ export const paymentsRepo = {
   checkout: {
     create: createCheckout,
     getStatus: getCheckoutStatus,
-    hasPending: hasPendingCheckout,
     getPending: getPendingCheckout,
     reserve: reservePendingCheckout,
     releaseReservation,
