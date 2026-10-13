@@ -3,7 +3,7 @@ import { logger } from "@/lib/logger";
 import tryCatch from "@vicstack/try-catch";
 import type { PendingCheckout } from "@f/payments/lib/pending-checkout";
 import { paymentsRepo } from "@f/payments/repo";
-import { isAllowedEvent } from "@f/payments/lib/utils";
+import { isAllowedEvent, decodeDurationDays } from "@f/payments/lib/utils";
 import { resolveChargeState } from "@f/payments/lib/charge-state";
 import { getPaymentProcessor } from "@f/payments/payment";
 
@@ -35,8 +35,13 @@ async function resolveOwner(
  * @description Records a confirmed payment. Both drop cases below throw rather than return, so
  * the plugin answers non-2xx and Stripe retries/eventually flags the endpoint as failing in its
  * dashboard - a silently-swallowed 200 would mean a payment with no trace of ever going wrong.
+ * @returns true if this call inserted the purchase row; false if it was already recorded (a
+ * redelivery, or the webhook and the reconciler racing) or the session isn't one of ours. Lets
+ * the reconciler count only inserts that actually happened.
  */
-export async function confirmCheckout(session: Stripe.Checkout.Session) {
+export async function confirmCheckout(
+  session: Stripe.Checkout.Session,
+): Promise<boolean> {
   const owner = await resolveOwner(session);
   if (!owner) {
     // no pending entry and no planId metadata at all - not one of ours (e.g. a Payment
@@ -44,7 +49,7 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
     // not a dropped payment. Same ownership test updateByCharge/reconcile.ts already use.
     if (!session.metadata?.planId) {
       logger.warn({ session: session.id }, "payments.webhook.not_ours");
-      return;
+      return false;
     }
     logger.error(
       {
@@ -114,7 +119,17 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
     }
   }
 
-  await paymentsRepo.purchase.add(
+  // the duration snapshotted at checkout time, so an admin edit made while this payment was
+  // settling doesn't change what the buyer gets; sessions created before the snapshot existed
+  // fall back to the plan's current setting (the old behavior)
+  const snapshot = decodeDurationDays(session.metadata?.durationDays);
+  if (!snapshot)
+    logger.warn(
+      { session: session.id, plan: owner.planId },
+      "payments.webhook.duration_snapshot_missing",
+    );
+
+  const inserted = await paymentsRepo.purchase.add(
     { userId: owner.userId },
     {
       planId: owner.planId,
@@ -123,7 +138,7 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
       amountTotal: session.amount_total ?? 0,
       currency: session.currency ?? "",
     },
-    { durationDays: plan.durationDays },
+    snapshot ?? { durationDays: plan.durationDays },
     new Date(session.created * 1000),
   );
 
@@ -134,6 +149,8 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
       { err: error, session: session.id },
       "payments.webhook.cleanup",
     );
+
+  return inserted !== null;
 }
 
 async function updateByCharge(

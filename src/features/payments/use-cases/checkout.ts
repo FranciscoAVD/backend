@@ -7,6 +7,7 @@ import {
   savePendingCheckout,
   hasActivePendingCheckout,
 } from "@f/payments/lib/pending-checkout";
+import { encodeDurationDays } from "@f/payments/lib/utils";
 import { getPurchaseBySession } from "@f/payments/use-cases/get-purchases";
 
 // userId here is always the live, authenticated caller's id, unlike a purchase
@@ -18,17 +19,24 @@ type CheckoutUser = {
 
 /**
  * @description Creates a one-time Stripe Checkout Session and tracks it in Redis until Stripe
- * confirms the payment. Assumes the plan was checked to be active and one-time. Operation must be wrapped in try-catch
+ * confirms the payment. The plan's `durationDays` is snapshotted onto the session's metadata here,
+ * at checkout time, so an admin edit made while the payment is still settling (up to 14 days for
+ * bank debits, or later via the reconciler) can't change what this buyer gets.
+ * Assumes the plan was checked to be active and one-time. Operation must be wrapped in try-catch
  * @param user object of user ID and Stripe customer ID
- * @param plan object of plan ID and Stripe price ID enforced by Pick<Payment.Plan, "id" | "stripePriceId">
+ * @param plan object of plan ID, Stripe price ID and duration enforced by Pick<Payment.Plan, "id" | "stripePriceId" | "durationDays">
  * @returns Object containing the session ID and the Stripe-hosted checkout URL.
  */
 export async function createCheckout(
   user: CheckoutUser,
-  plan: Pick<Payment.Plan, "id" | "stripePriceId">,
+  plan: Pick<Payment.Plan, "id" | "stripePriceId" | "durationDays">,
 ): Promise<{ sessionId: string; url: string | null }> {
   // also kept on the session so a confirmed payment can still be recorded if the Redis entry is gone
-  const metadata = { userId: user.userId, planId: String(plan.id) };
+  const metadata = {
+    userId: user.userId,
+    planId: String(plan.id),
+    durationDays: encodeDurationDays(plan.durationDays),
+  };
 
   const session = await getPaymentProcessor().checkout.sessions.create({
     mode: "payment",
@@ -91,6 +99,8 @@ export async function hasPendingCheckout(
 // lib/pending-checkout.ts directly
 export {
   getPendingCheckout,
+  reservePendingCheckout,
+  releaseReservation,
   markProcessing,
   markFailed,
   markExpired,

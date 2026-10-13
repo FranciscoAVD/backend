@@ -5,6 +5,8 @@ import {
   isAllowedEvent,
   purchaseUpdateFromCharge,
   purchaseStatusFromDispute,
+  encodeDurationDays,
+  decodeDurationDays,
 } from "@f/payments/lib/utils";
 
 describe("isCheckoutSessionId", () => {
@@ -83,4 +85,26 @@ describe("purchaseStatusFromDispute", () => {
       "disputed",
     );
   });
+});
+
+describe("encodeDurationDays / decodeDurationDays", () => {
+  test("round-trips a duration", () => {
+    expect(decodeDurationDays(encodeDurationDays(30))).toEqual({ durationDays: 30 });
+  });
+
+  test("round-trips 'never expires' as an explicit value, not a missing one", () => {
+    expect(encodeDurationDays(null)).toBe("none");
+    expect(decodeDurationDays(encodeDurationDays(null))).toEqual({ durationDays: null });
+  });
+
+  test("returns undefined when there's no snapshot, so the caller falls back", () => {
+    expect(decodeDurationDays(undefined)).toBeUndefined();
+  });
+
+  test.each(["", "0", "-5", "1.5", "abc", "30days", "007"])(
+    "returns undefined for a malformed value: %p",
+    (value) => {
+      expect(decodeDurationDays(value)).toBeUndefined();
+    },
+  );
 });

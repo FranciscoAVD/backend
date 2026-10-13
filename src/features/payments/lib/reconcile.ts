@@ -37,8 +37,9 @@ export async function reconcile(
   const userId = session.metadata?.userId;
   if (!userId) throw new Error("Checkout session has no userId metadata");
 
-  const existing = await paymentsRepo.purchase.getBySession({
-    userId,
+  // not scoped to the metadata's userId: a purchase whose user was since deleted has userId
+  // null, and a user-scoped lookup would miss it and re-"insert" it on every run
+  const existing = await paymentsRepo.purchase.getBySessionAnyUser({
     stripeCheckoutSessionId: session.id,
   });
 
@@ -47,14 +48,20 @@ export async function reconcile(
   if (!existing) {
     if (dryRun) {
       logger.info({ session: session.id, dryRun }, "payments.reconcile.would_insert");
+      inserted = true;
     } else {
-      await confirmCheckout(session);
-      logger.info({ session: session.id }, "payments.reconcile.insert");
+      // confirmCheckout reports what actually happened: false if the row appeared between the
+      // lookup above and this insert (the webhook landed first), so that's not counted
+      inserted = await confirmCheckout(session);
+      if (inserted) logger.info({ session: session.id }, "payments.reconcile.insert");
     }
-    inserted = true;
-    // a freshly recorded (or, in a dry run, hypothetically recorded) purchase starts out paid
-    // with nothing refunded
-    current = { status: "paid", amountRefunded: 0 };
+    current = inserted
+      ? // a freshly recorded (or, in a dry run, hypothetically recorded) purchase starts out
+        // paid with nothing refunded
+        { status: "paid", amountRefunded: 0 }
+      : await paymentsRepo.purchase.getBySessionAnyUser({
+          stripeCheckoutSessionId: session.id,
+        });
   }
 
   const intent = session.payment_intent as Stripe.PaymentIntent | null;

@@ -47,6 +47,25 @@ export async function getPurchaseBySession(
 }
 
 /**
+ * @description Select query for the purchase recorded for a checkout session, whoever owns it -
+ * including a purchase whose user was since deleted (`userId` set null), which the user-scoped
+ * `getPurchaseBySession` can't see. For system callers that already know the session is ours
+ * (the reconciler), never for a route answering a user. Assumes validation. Operation must be
+ * wrapped in try-catch
+ * @param purchase object of session ID enforced by Pick<Payment.Purchase, "stripeCheckoutSessionId">
+ * @returns Purchase object or null. If null, no purchase is recorded for that session yet.
+ */
+export async function getPurchaseBySessionAnyUser(
+  purchase: Pick<Payment.Purchase, "stripeCheckoutSessionId">,
+): Promise<Payment.Purchase | null> {
+  const res = await db
+    .select()
+    .from(purchaseTable)
+    .where(eq(purchaseTable.stripeCheckoutSessionId, purchase.stripeCheckoutSessionId));
+  return res[0] ?? null;
+}
+
+/**
  * @description Select query for a purchase of the given plan by the given user that should block a
  * repurchase of a plan whose `repeatable` flag is false - `paid` or `disputed` (money is still held
  * either way); only `refunded` frees the slot. `exclude`, when given, leaves out a specific checkout

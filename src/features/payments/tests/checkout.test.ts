@@ -39,7 +39,7 @@ describe("createCheckout", () => {
 
     const res = await createCheckout(
       { userId: "u1", stripeCustomerId: "cus_abc" },
-      { id: plan.id, stripePriceId: plan.stripePriceId },
+      { id: plan.id, stripePriceId: plan.stripePriceId, durationDays: plan.durationDays },
     );
 
     expect(res).toEqual({
@@ -55,10 +55,34 @@ describe("createCheckout", () => {
     const plan = await seedPlan();
     await createCheckout(
       { userId: "u1", stripeCustomerId: "cus_abc" },
-      { id: plan.id, stripePriceId: plan.stripePriceId },
+      { id: plan.id, stripePriceId: plan.stripePriceId, durationDays: plan.durationDays },
     );
 
     expect(sessionCreateCalls[0]).toMatchObject({ customer: "cus_abc" });
+  });
+
+  test("snapshots the plan's durationDays onto both metadata objects", async () => {
+    const plan = await seedPlan({ durationDays: 30 });
+    await createCheckout(
+      { userId: "u1", stripeCustomerId: "cus_abc" },
+      { id: plan.id, stripePriceId: plan.stripePriceId, durationDays: plan.durationDays },
+    );
+
+    const metadata = { userId: "u1", planId: String(plan.id), durationDays: "30" };
+    expect(sessionCreateCalls[0]).toMatchObject({
+      metadata,
+      payment_intent_data: { metadata },
+    });
+  });
+
+  test("snapshots a never-expiring plan as an explicit marker, not a missing key", async () => {
+    const plan = await seedPlan({ durationDays: null });
+    await createCheckout(
+      { userId: "u1", stripeCustomerId: "cus_abc" },
+      { id: plan.id, stripePriceId: plan.stripePriceId, durationDays: plan.durationDays },
+    );
+
+    expect(sessionCreateCalls[0]).toMatchObject({ metadata: { durationDays: "none" } });
   });
 });
 
@@ -95,7 +119,7 @@ describe("getCheckoutStatus", () => {
     const plan = await seedPlan();
     await createCheckout(
       { userId: "u1", stripeCustomerId: "cus_abc" },
-      { id: plan.id, stripePriceId: plan.stripePriceId },
+      { id: plan.id, stripePriceId: plan.stripePriceId, durationDays: plan.durationDays },
     );
 
     const res = await getCheckoutStatus({
@@ -109,7 +133,7 @@ describe("getCheckoutStatus", () => {
     const plan = await seedPlan();
     await createCheckout(
       { userId: "u1", stripeCustomerId: "cus_abc" },
-      { id: plan.id, stripePriceId: plan.stripePriceId },
+      { id: plan.id, stripePriceId: plan.stripePriceId, durationDays: plan.durationDays },
     );
 
     const res = await getCheckoutStatus({

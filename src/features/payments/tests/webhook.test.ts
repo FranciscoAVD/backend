@@ -144,7 +144,67 @@ describe("confirmCheckout", () => {
     // same Stripe account - genuinely not ours, so this must not be treated as a drop
     await expect(
       confirmCheckout(session({ id: "cs_payment_link", metadata: null })),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
+  });
+
+  test("reports whether it inserted the purchase: true the first time, false on a redelivery", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    const s = session({ id: "cs_once", metadata: { userId, planId: String(plan.id) } });
+
+    expect(await confirmCheckout(s)).toBe(true);
+    expect(await confirmCheckout(s)).toBe(false);
+  });
+
+  test("reports false for a session that isn't one of ours", async () => {
+    expect(await confirmCheckout(session({ id: "cs_foreign", metadata: {} }))).toBe(false);
+  });
+
+  test("uses the durationDays snapshotted at checkout time, not the plan's current setting", async () => {
+    const userId = await seedUser();
+    // the plan was edited from 30 to 90 days while the payment was still settling
+    const plan = await seedPlan({ durationDays: 90 });
+    const created = Math.floor(Date.now() / 1000);
+
+    await confirmCheckout(
+      session({
+        id: "cs_snapshot",
+        created,
+        metadata: { userId, planId: String(plan.id), durationDays: "30" },
+      }),
+    );
+
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase?.durationDays).toBe(30);
+    expect(purchase?.expiresAt?.getTime()).toBe(created * 1000 + 30 * 24 * 60 * 60 * 1000);
+  });
+
+  test("a 'never expires' snapshot stays perpetual even if the plan later gained a duration", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ durationDays: 7 });
+
+    await confirmCheckout(
+      session({
+        id: "cs_perpetual",
+        metadata: { userId, planId: String(plan.id), durationDays: "none" },
+      }),
+    );
+
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase?.durationDays).toBeNull();
+    expect(purchase?.expiresAt).toBeNull();
+  });
+
+  test("falls back to the plan's current durationDays for a session created before the snapshot existed", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ durationDays: 14 });
+
+    await confirmCheckout(
+      session({ id: "cs_legacy", metadata: { userId, planId: String(plan.id) } }),
+    );
+
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase?.durationDays).toBe(14);
   });
 
   test("redelivering the same confirmed session doesn't log a false duplicate_purchase_confirmed", async () => {

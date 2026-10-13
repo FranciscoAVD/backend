@@ -84,3 +84,31 @@ export function purchaseStatusFromDispute(
       return "disputed";
   }
 }
+
+// Stripe drops a metadata key whose value is "", so "never expires" needs its own marker to
+// stay distinguishable from "this session predates the snapshot" (key absent)
+const NO_EXPIRY = "none";
+
+/**
+ * @description Encodes a plan's `durationDays` for Checkout Session metadata, snapshotted at
+ * checkout time. `null` (never expires) is stored as an explicit marker, not left out.
+ */
+export function encodeDurationDays(
+  durationDays: Payment.Plan["durationDays"],
+): string {
+  return durationDays == null ? NO_EXPIRY : String(durationDays);
+}
+
+/**
+ * @description Decodes `encodeDurationDays`'s output from a Checkout Session's metadata.
+ * @returns `{ durationDays }` (a positive integer, or null for "never expires") when the session
+ * carries a valid snapshot, or undefined when it doesn't - a session created before snapshotting
+ * was added, or a malformed value - so the caller falls back to the plan's current setting.
+ */
+export function decodeDurationDays(
+  value: string | undefined,
+): { durationDays: Payment.Plan["durationDays"] } | undefined {
+  if (value === NO_EXPIRY) return { durationDays: null };
+  if (value === undefined || !/^[1-9]\d*$/.test(value)) return undefined;
+  return { durationDays: Number(value) };
+}

@@ -21,9 +21,11 @@ flowchart TD
 
 `route.ts`'s handler, in the order the checks actually run. The two guards under
 `plan.repeatable` close the realistic "two tabs" race (a user opening a second
-checkout before the first confirms); they can't close every race - see
-`confirmCheckout`'s own re-check further down for the narrower one that reaches
-the webhook anyway.
+checkout before the first confirms). The second one is an atomic reservation
+(`SET NX` on the `checkout:active:userId:planId` pointer), not a check followed by
+a later write, so two concurrent requests can't both get past it and both reach
+Stripe. They still can't close every race - see `confirmCheckout`'s own re-check
+further down for the narrower one that reaches the webhook anyway.
 
 ```mermaid
 flowchart TD
@@ -41,18 +43,18 @@ flowchart TD
     CheckOwned --> AlreadyOwns{"a blocking purchase\nalready exists?"}
     AlreadyOwns -- yes --> Audit1["audit log: checkout_blocked_existing_purchase\n(best-effort)"]
     Audit1 --> Conflict["409 You've already purchased this plan"]
-    AlreadyOwns -- no --> CheckPending["paymentsRepo.checkout.hasPending(userId, planId)\n(Redis pointer, no Stripe call yet)"]
-    CheckPending -->|redis error| Err500e["500"]
-    CheckPending --> HasPending{"an open/processing\ncheckout already exists?"}
-    HasPending -- yes --> Audit2["audit log: checkout_blocked_pending_checkout\n(best-effort)"]
+    AlreadyOwns -- no --> Reserve["paymentsRepo.checkout.reserve(userId, planId)\n(atomic SET NX of the Redis pointer to a\nreserving:token placeholder, TTL 5 min;\nclears a stale pointer and retries)"]
+    Reserve -->|redis error| Err500e["500"]
+    Reserve --> Claimed{"slot claimed?\n(no open/processing checkout\nor other live reservation)"}
+    Claimed -- no --> Audit2["audit log: checkout_blocked_pending_checkout\n(best-effort)"]
     Audit2 --> Conflict2["409 You already have a checkout\nin progress for this plan"]
-    HasPending -- no --> EnsureCustomer
+    Claimed -- yes --> EnsureCustomer
 
-    EnsureCustomer["paymentsRepo.customer.ensure(id, name, email)\n(always re-reads the live user row itself -\nnever trusts a caller-supplied id, which can\nbe a stale cached session - see below)"] -->|stripe/db error| Err500c["500"]
+    EnsureCustomer["paymentsRepo.customer.ensure(id, name, email)\n(always re-reads the live user row itself -\nnever trusts a caller-supplied id, which can\nbe a stale cached session - see below)"] -->|stripe/db error| Err500c["500\n(releases the reservation)"]
     EnsureCustomer --> CreateSession
 
-    CreateSession["createCheckout:\nstripe.checkout.sessions.create\n(mode: payment, customer: stripeCustomerId)"] -->|stripe error| Err500d["500"]
-    CreateSession --> SavePending["savePendingCheckout\n(Redis key checkout:sessionId + a\ncheckout:active:userId:planId pointer,\nstatus: open, TTL 24h)"]
+    CreateSession["createCheckout:\nstripe.checkout.sessions.create\n(mode: payment, customer: stripeCustomerId,\nmetadata: userId, planId, durationDays snapshot)"] -->|stripe error| Err500d["500\n(releases the reservation)"]
+    CreateSession --> SavePending["savePendingCheckout\n(Redis key checkout:sessionId + a\ncheckout:active:userId:planId pointer,\nreplacing the reservation;\nstatus: open, TTL 24h)"]
     SavePending -->|redis error| Err500f["500\n(harmless - the Stripe session\nstill expires on its own)"]
     SavePending --> Return200["200 { sessionId, url }"]
     Return200 --> Redirect(["client redirects user to\nthe Stripe-hosted url"])
@@ -131,7 +133,7 @@ a no-op for this feature - the plugin already dealt with it above.
 ```mermaid
 flowchart TD
     E["event.type"] --> CSC{"checkout.session.completed\n(mode: payment only)"}
-    CSC -- payment_status: unpaid --> MarkProcessing["paymentsRepo.checkout.markProcessing(session.id)\nRedis TTL extended to 14 days\n(delayed payment methods, e.g. bank debits)"]
+    CSC -- payment_status: unpaid --> MarkProcessing["paymentsRepo.checkout.markProcessing(session.id)\nRedis TTL extended to 14 days, pointer too\n(delayed payment methods, e.g. bank debits)"]
     CSC -- otherwise paid --> Confirm["confirmCheckout(session)"]
 
     E --> APS["async_payment_succeeded\n(mode: payment)"] --> Confirm
@@ -148,10 +150,14 @@ flowchart TD
 `failed`/`expired`, ranked in that order) and never backward - a retried or
 out-of-order event for a status the session has already passed (e.g. a redelivered
 unpaid `completed` arriving after `async_payment_failed`) is a no-op. `transition`
-also never repoints the `checkout:active:userId:planId` pointer at the session it's
-updating (only ever clears it, and only if it's still the current one) - so a retried
-`markFailed` for an old, already-superseded session can't drag the pointer off a
-newer session that's since taken over the (user, plan) slot.
+also never repoints the `checkout:active:userId:planId` pointer away from a newer
+session: `markFailed`/`markExpired` clear it only if it still points at this
+session, and `markProcessing` extends it to the same 14 days as the entry only if
+it still points at this session (or is free). The extension matters: without it
+the pointer kept its original 24h TTL, so for days 2-14 of a bank debit the guard
+stopped seeing the checkout and a second one could be opened. Both pointer
+operations are atomic Lua scripts, so a newer session written between the check
+and the write is never lost.
 
 ### `confirmCheckout`: turning a paid session into a `purchase` row
 
@@ -184,7 +190,7 @@ flowchart TD
     AlreadyOwns -- yes --> LogDup["log error: payments.webhook.duplicate_purchase\n+ audit log: duplicate_purchase_confirmed\n(best-effort; the money's already taken,\nso this still falls through to AddPurchase -\nthe financial record must never be dropped)"]
     LogDup --> AddPurchase
 
-    AddPurchase["paymentsRepo.purchase.add:\npurchasedAt = session.created (not insert time)\nexpiresAt = plan.durationDays ? purchasedAt + durationDays : null\nINSERT ... ON CONFLICT (stripeCheckoutSessionId) DO NOTHING\n(on a user_id FK violation - the user was deleted\nmid-checkout - retries once with userId: null)"]
+    AddPurchase["paymentsRepo.purchase.add:\npurchasedAt = session.created (not insert time)\ndurationDays = session.metadata snapshot\n(plan's current value only for older sessions)\nexpiresAt = durationDays ? purchasedAt + durationDays : null\nINSERT ... ON CONFLICT (stripeCheckoutSessionId) DO NOTHING\n(on a user_id FK violation - the user was deleted\nmid-checkout - retries once with userId: null)"]
     AddPurchase --> RemovePending["paymentsRepo.checkout.removePending(session.id)\n(best-effort; a leftover key just expires via its TTL)"]
 ```
 
@@ -197,10 +203,19 @@ blocking check only looks for a *different* session's purchase.
 `checkout.session.completed` (Stripe's at-least-once delivery) is a no-op the
 second time. `createdAt`/`expiresAt` are derived from the Stripe session's own
 `created` timestamp, not insert time - so a purchase recorded late (e.g. by the
-reconciler) doesn't get bonus days of access. Each purchase's own `durationDays`
-is snapshotted onto its row at insert time, independent of any other purchase
-of the same plan or any later edit to the plan itself (see "checking active
-access" below).
+reconciler) doesn't get bonus days of access. For the same reason, `durationDays`
+comes from the snapshot `createCheckout` writes into the session's metadata
+(`"none"` for a never-expiring plan, since Stripe drops empty metadata values),
+not the plan's value when the payment confirms - an admin edit while a bank debit
+is settling must not change what that buyer gets. Sessions created before the
+snapshot existed fall back to the plan's current value
+(`payments.webhook.duration_snapshot_missing`). That value is then stored on the
+purchase row, independent of any other purchase of the same plan or any later
+edit to the plan itself (see "checking active access" below).
+
+`confirmCheckout` returns whether it actually inserted the row (`false` for a
+redelivery, a session that isn't ours, or the reconciler losing a race to the
+webhook).
 
 ### `updateByCharge`: refunds and disputes
 
@@ -236,10 +251,13 @@ CLI wrapper (arg parsing, exit code); the logic importable from `lib/reconcile.t
 is what `reconcile.test.ts` exercises directly.
 
 Counting is tied to what actually happened, not attempted: `inserted` only
-increments once `confirmCheckout` has actually resolved (or, in `--dry-run`,
-would have been attempted) - if it throws (an unresolvable owner, a deleted
-plan), that exception propagates out and the session is counted as `failed`
-instead, never silently miscounted as a successful insert.
+increments when `confirmCheckout` reports it actually inserted the row (or, in
+`--dry-run`, would have been attempted) - if it throws (an unresolvable owner, a
+deleted plan), that exception propagates out and the session is counted as
+`failed` instead, never silently miscounted as a successful insert. The
+"already recorded?" lookup (`getBySessionAnyUser`) isn't scoped to the
+metadata's `userId`: a purchase whose user was since deleted has `userId: null`,
+and a user-scoped lookup would miss it and re-count it as inserted on every run.
 
 The default scan window is 14 days (derived from `PROCESSING_TTL_SEC`), not 7 -
 delayed payment methods (e.g. bank debits) can take that long to settle, and a
@@ -430,9 +448,10 @@ All three (plus `limits`, `active`, `trialDays`) are editable via `PATCH /plans/
 pricing/identity fields (`name`, `type`, `amount`, `interval`, the Stripe ids) aren't,
 since they're either baked into an already-created Stripe Price or relied on as a
 lookup key elsewhere (`name`, by `getSubscriptionPlans`). An edit to `durationDays`
-only affects purchases made *after* it - `addPurchase` snapshots the plan's
-`durationDays` onto the purchase row at purchase time, so it never rewrites history
-for purchases already made. Flipping `repeatable` from `false` to `true` is rejected
+only affects checkouts started *after* it - `createCheckout` snapshots the plan's
+`durationDays` into the session's metadata, and `addPurchase` stores that snapshot
+on the purchase row, so it never rewrites history for purchases already made or
+still settling. Flipping `repeatable` from `false` to `true` is rejected
 (409) while any user still has a blocking purchase of the plan
 (`paymentsRepo.purchase.hasAnyBlocking`) - otherwise it would silently reopen a
 once-only/trial plan to every past purchaser, not just whoever's buying it next.

@@ -7,8 +7,13 @@ import {
   markExpired,
   removePendingCheckout,
   hasActivePendingCheckout,
+  reservePendingCheckout,
+  releaseReservation,
   PENDING_CHECKOUT_TTL_SEC,
+  PROCESSING_TTL_SEC,
+  RESERVATION_TTL_SEC,
 } from "@f/payments/lib/pending-checkout";
+import { redis } from "@/lib/redis";
 import { resetRedis } from "@/test-helpers/redis";
 
 describe("savePendingCheckout / getPendingCheckout", () => {
@@ -239,5 +244,149 @@ describe("hasActivePendingCheckout", () => {
     await removePendingCheckout("cs_old");
 
     expect(await hasActivePendingCheckout("u1", 1)).toBe(true);
+  });
+});
+
+describe("markProcessing keeps the (user, plan) slot held", () => {
+  beforeEach(resetRedis);
+
+  test("extends the pointer's TTL to match the processing entry, not just the entry's own", async () => {
+    await savePendingCheckout(
+      "cs_1",
+      { userId: "u1", planId: 1, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+
+    await markProcessing("cs_1");
+
+    // both keys must outlive the original 24h, or the guard stops seeing a checkout
+    // that can still settle for up to 14 days
+    expect(await redis.ttl("checkout:cs_1")).toBeGreaterThan(PENDING_CHECKOUT_TTL_SEC);
+    expect(await redis.ttl("checkout:active:u1:1")).toBeGreaterThan(PENDING_CHECKOUT_TTL_SEC);
+    expect(await redis.ttl("checkout:active:u1:1")).toBeLessThanOrEqual(PROCESSING_TTL_SEC);
+  });
+
+  test("restores the pointer if it was already gone, since the session still holds the slot", async () => {
+    await savePendingCheckout(
+      "cs_1",
+      { userId: "u1", planId: 1, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+    await redis.del("checkout:active:u1:1");
+
+    await markProcessing("cs_1");
+
+    expect(await redis.get("checkout:active:u1:1")).toBe("cs_1");
+    expect(await hasActivePendingCheckout("u1", 1)).toBe(true);
+  });
+
+  test("doesn't take the pointer back from a newer session that holds it", async () => {
+    await savePendingCheckout(
+      "cs_old",
+      { userId: "u1", planId: 1, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+    await savePendingCheckout(
+      "cs_new",
+      { userId: "u1", planId: 1, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+
+    await markProcessing("cs_old");
+
+    expect(await redis.get("checkout:active:u1:1")).toBe("cs_new");
+    expect(await redis.ttl("checkout:active:u1:1")).toBeLessThanOrEqual(PENDING_CHECKOUT_TTL_SEC);
+  });
+});
+
+describe("reservePendingCheckout / releaseReservation", () => {
+  beforeEach(resetRedis);
+
+  test("claims a free slot, and the claim blocks the guard while it's held", async () => {
+    const token = await reservePendingCheckout("u1", 1);
+
+    expect(token).not.toBeNull();
+    expect(await hasActivePendingCheckout("u1", 1)).toBe(true);
+    expect(await redis.ttl("checkout:active:u1:1")).toBeLessThanOrEqual(RESERVATION_TTL_SEC);
+  });
+
+  test("only one of many concurrent reservations for the same slot succeeds", async () => {
+    const tokens = await Promise.all(
+      Array.from({ length: 20 }, () => reservePendingCheckout("u1", 1)),
+    );
+
+    expect(tokens.filter((t) => t !== null)).toHaveLength(1);
+  });
+
+  test("reservations for different plans or users don't block each other", async () => {
+    expect(await reservePendingCheckout("u1", 1)).not.toBeNull();
+    expect(await reservePendingCheckout("u1", 2)).not.toBeNull();
+    expect(await reservePendingCheckout("u2", 1)).not.toBeNull();
+  });
+
+  test("is refused while an open checkout holds the slot", async () => {
+    await savePendingCheckout(
+      "cs_1",
+      { userId: "u1", planId: 1, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+
+    expect(await reservePendingCheckout("u1", 1)).toBeNull();
+  });
+
+  test("clears a stale pointer (its session's key already expired) and claims the slot", async () => {
+    await savePendingCheckout(
+      "cs_gone",
+      { userId: "u1", planId: 1, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+    await redis.del("checkout:cs_gone");
+
+    expect(await reservePendingCheckout("u1", 1)).not.toBeNull();
+  });
+
+  test("claims the slot once the previous checkout failed", async () => {
+    await savePendingCheckout(
+      "cs_1",
+      { userId: "u1", planId: 1, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+    await markFailed("cs_1");
+
+    expect(await reservePendingCheckout("u1", 1)).not.toBeNull();
+  });
+
+  test("saving the session replaces the reservation with the real session id", async () => {
+    await reservePendingCheckout("u1", 1);
+    await savePendingCheckout(
+      "cs_1",
+      { userId: "u1", planId: 1, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+
+    expect(await redis.get("checkout:active:u1:1")).toBe("cs_1");
+    expect(await hasActivePendingCheckout("u1", 1)).toBe(true);
+  });
+
+  test("releasing frees the slot for the next attempt", async () => {
+    const token = (await reservePendingCheckout("u1", 1))!;
+
+    await releaseReservation("u1", 1, token);
+
+    expect(await hasActivePendingCheckout("u1", 1)).toBe(false);
+    expect(await reservePendingCheckout("u1", 1)).not.toBeNull();
+  });
+
+  test("releasing a reservation that's since been replaced leaves the newer pointer alone", async () => {
+    const token = (await reservePendingCheckout("u1", 1))!;
+    await savePendingCheckout(
+      "cs_1",
+      { userId: "u1", planId: 1, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+
+    await releaseReservation("u1", 1, token);
+
+    expect(await redis.get("checkout:active:u1:1")).toBe("cs_1");
   });
 });

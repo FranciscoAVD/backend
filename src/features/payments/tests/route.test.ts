@@ -44,12 +44,18 @@ mock.module("@f/auth/middleware", () => ({
 // one needs no dynamic-import treatment: every caller of getPaymentProcessor() calls it
 // fresh at request time, not eagerly at module-evaluation time.
 let sessionCreateCalls: Record<string, unknown>[] = [];
+// knobs for POST /checkout's concurrency/failure tests: a delay widens the window between the
+// guard and the Stripe call, as a real network round-trip would; a failure exercises cleanup
+let sessionCreateDelayMs = 0;
+let sessionCreateFails = false;
 mock.module("@f/payments/payment", () => ({
   getPaymentProcessor: () => ({
     checkout: {
       sessions: {
         create: async (args: Record<string, unknown>) => {
           sessionCreateCalls.push(args);
+          if (sessionCreateDelayMs) await Bun.sleep(sessionCreateDelayMs);
+          if (sessionCreateFails) throw new Error("Stripe is down");
           return { id: "cs_test_fake", url: "https://checkout.stripe.com/fake" };
         },
       },
@@ -422,6 +428,8 @@ describe("POST /checkout", () => {
     await resetDb();
     await resetRedis();
     sessionCreateCalls = [];
+    sessionCreateDelayMs = 0;
+    sessionCreateFails = false;
   });
 
   test("404s for a nonexistent plan", async () => {
@@ -557,5 +565,45 @@ describe("POST /checkout", () => {
 
     const pending = await getPendingCheckout("cs_test_fake");
     expect(pending).toMatchObject({ userId, planId: plan.id, status: "open" });
+  });
+
+  test("non-repeatable plan: concurrent requests reach Stripe once - the rest 409", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: false });
+    setSession({ id: userId, ...regularUser });
+    sessionCreateDelayMs = 50;
+
+    const statuses = await Promise.all(
+      Array.from({ length: 5 }, async () => {
+        const res = await app.request("/checkout", {
+          method: "POST",
+          headers: jsonHeaders,
+          body: JSON.stringify({ planId: plan.id }),
+        });
+        return res.status;
+      }),
+    );
+
+    expect(statuses.filter((status) => status === 200)).toHaveLength(1);
+    expect(statuses.filter((status) => status === 409)).toHaveLength(4);
+    expect(sessionCreateCalls).toHaveLength(1);
+  });
+
+  test("non-repeatable plan: a Stripe failure frees the slot so the user can retry right away", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: false });
+    setSession({ id: userId, ...regularUser });
+    const request = () =>
+      app.request("/checkout", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({ planId: plan.id }),
+      });
+
+    sessionCreateFails = true;
+    expect((await request()).status).toBe(500);
+
+    sessionCreateFails = false;
+    expect((await request()).status).toBe(200);
   });
 });

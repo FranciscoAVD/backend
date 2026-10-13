@@ -1,7 +1,7 @@
 import { describe, expect, test, beforeEach, mock } from "bun:test";
 import type Stripe from "stripe";
 import { db } from "@d/connection";
-import { subscription as subscriptionTable } from "@d/schemas/auth-schema";
+import { subscription as subscriptionTable, user as userTable } from "@d/schemas/auth-schema";
 import { eq } from "drizzle-orm";
 import { resetDb, seedUser, seedPlan, seedSubscription } from "@/test-helpers/db";
 import { resetRedis } from "@/test-helpers/redis";
@@ -20,7 +20,7 @@ mock.module("@f/payments/payment", () => ({
 }));
 
 import { run, runSubscriptions } from "@f/payments/lib/reconcile";
-import { getAllPurchases } from "@f/payments/use-cases/get-purchases";
+import { getAllPurchases, getPurchaseBySessionAnyUser } from "@f/payments/use-cases/get-purchases";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 
 const fakeSubscription = (overrides: Record<string, unknown> = {}): Stripe.Subscription =>
@@ -132,6 +132,74 @@ describe("run", () => {
     expect(summary).toEqual({ scanned: 1, inserted: 0, updated: 1, failed: 0 });
     const [purchase] = await getAllPurchases({ userId });
     expect(purchase?.status).toBe("refunded");
+  });
+
+  test("a purchase whose user was since deleted isn't re-counted as inserted on every run", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    await addPurchase(
+      { userId },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_orphaned",
+        stripePaymentIntentId: "pi_orphaned",
+        amountTotal: plan.amount,
+        currency: plan.currency,
+      },
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
+    // deleting the user sets the purchase's userId to null, but the Stripe session's
+    // metadata still carries the old id
+    await db.delete(userTable).where(eq(userTable.id, userId));
+    fakeSessions = [
+      fakeSession({
+        id: "cs_orphaned",
+        metadata: { userId, planId: String(plan.id) },
+        payment_intent: {
+          id: "pi_orphaned",
+          latest_charge: { amount_refunded: 0, refunded: false, disputed: false },
+        } as unknown as Stripe.PaymentIntent,
+      }),
+    ];
+
+    expect(await run(7, false)).toEqual({ scanned: 1, inserted: 0, updated: 0, failed: 0 });
+    expect(await run(7, false)).toEqual({ scanned: 1, inserted: 0, updated: 0, failed: 0 });
+  });
+
+  test("still syncs refund state on a purchase whose user was since deleted", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    await addPurchase(
+      { userId },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_orphaned_refund",
+        stripePaymentIntentId: "pi_orphaned_refund",
+        amountTotal: plan.amount,
+        currency: plan.currency,
+      },
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
+    await db.delete(userTable).where(eq(userTable.id, userId));
+    fakeSessions = [
+      fakeSession({
+        id: "cs_orphaned_refund",
+        metadata: { userId, planId: String(plan.id) },
+        payment_intent: {
+          id: "pi_orphaned_refund",
+          latest_charge: { amount_refunded: plan.amount, refunded: true, disputed: false },
+        } as unknown as Stripe.PaymentIntent,
+      }),
+    ];
+
+    expect(await run(7, false)).toEqual({ scanned: 1, inserted: 0, updated: 1, failed: 0 });
+    const purchase = await getPurchaseBySessionAnyUser({
+      stripeCheckoutSessionId: "cs_orphaned_refund",
+    });
+    expect(purchase?.status).toBe("refunded");
+    expect(purchase?.userId).toBeNull();
   });
 
   test("ignores subscription-mode and still-unpaid sessions", async () => {

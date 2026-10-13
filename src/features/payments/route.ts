@@ -402,6 +402,22 @@ const app = new Hono<PinoLoggerEnv>()
           HTTP.UnprocessableEntity,
         );
 
+      // the (user, plan) slot this request claimed, for a non-repeatable plan - released below if
+      // anything fails before savePendingCheckout replaces it with the real session id
+      let reservation: string | null = null;
+      const releaseReservation = async () => {
+        if (!reservation) return;
+        const [, releaseError] = await tryCatch(
+          paymentsRepo.checkout.releaseReservation(user.id, plan.id, reservation),
+        );
+        // best-effort: an unreleased reservation frees itself after RESERVATION_TTL_SEC
+        if (releaseError)
+          c.var.logger.warn(
+            { err: releaseError, user: user.id, plan: plan.id },
+            "payments.checkout.release_reservation",
+          );
+      };
+
       if (!plan.repeatable) {
         const [existing, existingError] = await tryCatch(
           paymentsRepo.purchase.getBlockingByPlan({
@@ -441,8 +457,10 @@ const app = new Hono<PinoLoggerEnv>()
           );
         }
 
-        const [hasPending, pendingError] = await tryCatch(
-          paymentsRepo.checkout.hasPending(user.id, plan.id),
+        // an atomic claim, not a check-then-create: two concurrent requests can't both get
+        // past this and both reach Stripe
+        const [token, pendingError] = await tryCatch(
+          paymentsRepo.checkout.reserve(user.id, plan.id),
         );
 
         if (pendingError) {
@@ -456,7 +474,7 @@ const app = new Hono<PinoLoggerEnv>()
           );
         }
 
-        if (hasPending) {
+        if (!token) {
           const [, auditError] = await tryCatch(
             paymentsRepo.audit.add({
               type: "checkout_blocked_pending_checkout",
@@ -474,6 +492,7 @@ const app = new Hono<PinoLoggerEnv>()
             HTTP.Conflict,
           );
         }
+        reservation = token;
       }
 
       const [stripeCustomerId, customerError] = await tryCatch(
@@ -489,6 +508,7 @@ const app = new Hono<PinoLoggerEnv>()
           { err: customerError, user: user.id },
           "payments.customer.ensure",
         );
+        await releaseReservation();
         return c.json(
           { message: "Something went wrong. Try again later." },
           HTTP.InternalServerError,
@@ -504,6 +524,10 @@ const app = new Hono<PinoLoggerEnv>()
           { err: error, user: user.id, plan: plan.id },
           "payments.checkout.create",
         );
+        // only releases if the pointer still holds this request's reservation: if the Stripe
+        // session was created but saving it to Redis failed, the reservation is all that's left
+        // guarding the slot, and releasing it is no worse than the pre-reservation behavior
+        await releaseReservation();
         return c.json(
           { message: "Something went wrong. Try again later." },
           HTTP.InternalServerError,
