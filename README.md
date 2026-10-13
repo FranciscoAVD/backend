@@ -21,7 +21,9 @@ A `plan` is `recurring` (a subscription managed by better-auth's stripe plugin) 
 | | Route | Who | Notes |
 | --- | --- | --- | --- |
 | GET | `/plans` | any signed-in user | active plans only |
+| GET | `/plans/:id` | any signed-in user | any plan, regardless of `active` |
 | POST | `/plans` | admin (`plan:create`) | creates the Stripe product + price(s), then the DB row |
+| PATCH | `/plans/:id` | admin (`plan:update`) | `limits`/`active`/`repeatable`/`durationDays`/`overlapping`/`trialDays` only - pricing/identity fields are fixed once created; "deleting" a plan is `{ active: false }` |
 | GET | `/purchases` | caller | their own one-time purchases |
 | POST | `/checkout` | caller | one-time plans only — `recurring` 422s |
 | GET | `/checkout/:sessionId` | caller | `open`/`processing`/`failed`/`expired`/`paid`/`refunded`/`disputed` |

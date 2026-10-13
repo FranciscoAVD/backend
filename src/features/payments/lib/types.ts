@@ -1,5 +1,6 @@
 import {
   insertPlanSchema,
+  updatePlanSchema,
   selectPlanSchema,
   insertPurchaseSchema,
   updatePurchaseSchema,
@@ -12,6 +13,7 @@ import { z } from "zod";
 export namespace Payment {
   export namespace Plan {
     export type Insert = z.infer<typeof insertPlanSchema>;
+    export type Update = z.infer<typeof updatePlanSchema>;
   }
   export type Plan = z.infer<typeof selectPlanSchema>;
 

@@ -42,6 +42,23 @@ export const insertPlanSchema = createInsertSchema(plan, {
       "Recurring plans can't have a duration; access is governed by the Stripe subscription period.",
     path: ["durationDays"],
   });
+export const updatePlanSchema = createUpdateSchema(plan, {
+  trialDays: (s) => s.positive(),
+  durationDays: (s) => s.positive(),
+})
+  // allow-list, not a deny-list, of the Stripe-independent policy fields a plan's
+  // pricing/identity (name, type, amount, interval, Stripe ids, ...) stays out of this
+  .pick({
+    limits: true,
+    active: true,
+    repeatable: true,
+    durationDays: true,
+    overlapping: true,
+    trialDays: true,
+  })
+  .refine((data) => Object.keys(data).length > 0, {
+    message: "At least one field must be provided.",
+  });
 export const selectPlanSchema = createSelectSchema(plan);
 
 export const insertPurchaseSchema = createInsertSchema(purchase).omit({

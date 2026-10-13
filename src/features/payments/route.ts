@@ -9,13 +9,17 @@ import {
   type RequireSessionEnv,
 } from "@f/auth/middleware";
 
-import { checkoutSchema, insertPlanSchema } from "@f/payments/lib/schemas";
+import {
+  checkoutSchema,
+  insertPlanSchema,
+  updatePlanSchema,
+} from "@f/payments/lib/schemas";
 import { isCheckoutSessionId } from "@f/payments/lib/utils";
 
 import tryCatch from "@vicstack/try-catch";
 import HTTP from "@vicstack/http";
 
-import { jsonValidator } from "@/lib/validators";
+import { idParamValidator, jsonValidator } from "@/lib/validators";
 
 import { rateLimiter } from "@/lib/rate-limit";
 
@@ -60,6 +64,23 @@ const app = new Hono<PinoLoggerEnv>()
       );
     }
     return c.json({ data: res, message: "Plans found" }, HTTP.OK);
+  })
+  .get("/plans/:id", idParamValidator, async (c) => {
+    const { user } = c.get("session");
+    const { id } = c.req.valid("param");
+
+    const [res, error] = await tryCatch(paymentsRepo.plan.get({ id }));
+    if (error) {
+      c.var.logger.error({ err: error, user: user.id, plan: id }, "payments.plan.get");
+      return c.json(
+        { message: "Something went wrong. Try again later." },
+        HTTP.InternalServerError,
+      );
+    }
+
+    return !res
+      ? c.json({ message: "Plan not found" }, HTTP.NotFound)
+      : c.json({ data: res, message: "Plan found" }, HTTP.OK);
   })
   .get("/purchases", async (c) => {
     const { user } = c.get("session");
@@ -161,6 +182,31 @@ const app = new Hono<PinoLoggerEnv>()
         { data: res, message: "Plan created" },
         HTTP.Created,
       );
+    },
+  )
+  .patch(
+    "/plans/:id",
+    idParamValidator,
+    requirePermissionMiddleware({ plan: ["update"] }),
+    jsonValidator(updatePlanSchema),
+    async (c) => {
+      const { user } = c.get("session");
+      const { id } = c.req.valid("param");
+      const { data } = c.req.valid("json");
+
+      const [res, error] = await tryCatch(paymentsRepo.plan.update({ id }, data));
+
+      if (error) {
+        c.var.logger.error({ err: error, user: user.id, plan: id }, "payments.plan.update");
+        return c.json(
+          { message: "Something went wrong. Try again later." },
+          HTTP.InternalServerError,
+        );
+      }
+
+      return !res
+        ? c.json({ message: "Plan not found" }, HTTP.NotFound)
+        : c.body(null, HTTP.NoContent);
     },
   )
   .post(
