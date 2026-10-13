@@ -296,8 +296,10 @@ two `POST /checkout` guards and `confirmCheckout`'s own re-check write to -
 `duplicate_purchase_confirmed` (the one where money was actually taken for an
 already-owned non-repeatable plan, and the purchase is still recorded - see
 above). All three writes are best-effort: a failure is logged as a warning and
-never blocks the response or webhook outcome it's attached to. Not yet exposed
-through any route - query it directly, or via `paymentsRepo.auditLog.getByUser`.
+never blocks the response or webhook outcome it's attached to. `GET
+/audit-log` (admin, `audit:list`) exposes it - every entry, most recent
+first, or one customer's via `?userId=`, backed by
+`paymentsRepo.audit.getAll`/`getByUser` respectively.
 
 ## Where `repeatable`, `durationDays` and `overlapping` come from
 

@@ -93,7 +93,7 @@ export async function confirmCheckout(session: Stripe.Checkout.Session) {
         "payments.webhook.duplicate_purchase",
       );
       const [, auditError] = await tryCatch(
-        paymentsRepo.auditLog.add({
+        paymentsRepo.audit.add({
           type: "duplicate_purchase_confirmed",
           userId: owner.userId,
           planId: owner.planId,

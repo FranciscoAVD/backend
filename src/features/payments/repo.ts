@@ -26,7 +26,10 @@ import {
 } from "@f/payments/use-cases/checkout";
 import { ensureStripeCustomer } from "@f/payments/use-cases/ensure-customer";
 import { addAuditLog } from "@f/payments/use-cases/add-audit-log";
-import { getAuditLogByUser } from "@f/payments/use-cases/get-audit-log";
+import {
+  getAuditLogByUser,
+  getAllAuditLog,
+} from "@f/payments/use-cases/get-audit-log";
 
 export const paymentsRepo = {
   customer: {
@@ -58,8 +61,9 @@ export const paymentsRepo = {
     markExpired,
     removePending: removePendingCheckout,
   },
-  auditLog: {
+  audit: {
     add: addAuditLog,
     getByUser: getAuditLogByUser,
+    getAll: getAllAuditLog,
   },
 };
