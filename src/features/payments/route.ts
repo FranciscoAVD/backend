@@ -53,35 +53,62 @@ const sessionIdParamValidator = validator("param", (value, c) => {
 const app = new Hono<PinoLoggerEnv>()
   .use(sessionMiddleware)
   .use(requireSessionMiddleware)
-  .get("/plans", async (c) => {
-    const { user } = c.get("session");
-    const [res, error] = await tryCatch(paymentsRepo.plan.getAll());
-    if (error) {
-      c.var.logger.error({ err: error, user: user.id }, "payments.plan.getAll");
-      return c.json(
-        { message: "Something went wrong. Try again later." },
-        HTTP.InternalServerError,
-      );
-    }
-    return c.json({ data: res, message: "Plans found" }, HTTP.OK);
-  })
-  .get("/plans/:id", idParamValidator, async (c) => {
-    const { user } = c.get("session");
-    const { id } = c.req.valid("param");
+  .get(
+    "/plans",
+    requirePermissionMiddleware({ plan: ["read:active"] }),
+    async (c) => {
+      const { user } = c.get("session");
+      const [res, error] = await tryCatch(paymentsRepo.plan.getAll());
+      if (error) {
+        c.var.logger.error({ err: error, user: user.id }, "payments.plan.getAll");
+        return c.json(
+          { message: "Something went wrong. Try again later." },
+          HTTP.InternalServerError,
+        );
+      }
+      return c.json({ data: res, message: "Plans found" }, HTTP.OK);
+    },
+  )
+  .get(
+    "/plans/:id",
+    idParamValidator,
+    requirePermissionMiddleware({ plan: ["read:active"] }),
+    async (c) => {
+      const { user } = c.get("session");
+      const { id } = c.req.valid("param");
 
-    const [res, error] = await tryCatch(paymentsRepo.plan.get({ id }));
-    if (error) {
-      c.var.logger.error({ err: error, user: user.id, plan: id }, "payments.plan.get");
-      return c.json(
-        { message: "Something went wrong. Try again later." },
-        HTTP.InternalServerError,
-      );
-    }
+      const [res, error] = await tryCatch(paymentsRepo.plan.get({ id }));
+      if (error) {
+        c.var.logger.error({ err: error, user: user.id, plan: id }, "payments.plan.get");
+        return c.json(
+          { message: "Something went wrong. Try again later." },
+          HTTP.InternalServerError,
+        );
+      }
 
-    return !res
-      ? c.json({ message: "Plan not found" }, HTTP.NotFound)
-      : c.json({ data: res, message: "Plan found" }, HTTP.OK);
-  })
+      if (!res) return c.json({ message: "Plan not found" }, HTTP.NotFound);
+
+      // inactive plans are admin-only (read:all) - checked here, not as route middleware,
+      // since active plans stay visible to anyone with just read:active; 404 rather than 403
+      // so a non-admin can't tell an inactive plan with this id exists at all
+      if (!res.active) {
+        let authorized = false;
+        // c is narrower here than requirePermissionMiddleware's own RequireSessionEnv, since
+        // it also carries PinoLoggerEnv's `logger` variable via this app's generic - safe at
+        // runtime (session is already guaranteed non-null by the chained middleware above),
+        // but not something Hono's own invariant Context typing can verify structurally
+        await requirePermissionMiddleware({ plan: ["read:all"] })(
+          c as unknown as Parameters<ReturnType<typeof requirePermissionMiddleware>>[0],
+          async () => {
+            authorized = true;
+          },
+        );
+        if (!authorized) return c.json({ message: "Plan not found" }, HTTP.NotFound);
+      }
+
+      return c.json({ data: res, message: "Plan found" }, HTTP.OK);
+    },
+  )
   .get("/plans/:id/access", idParamValidator, async (c) => {
     const { user } = c.get("session");
     const { id } = c.req.valid("param");

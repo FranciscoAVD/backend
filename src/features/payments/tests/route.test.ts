@@ -107,6 +107,23 @@ describe("auth gating", () => {
     expect(res.status).toBe(403);
   });
 
+  test("403s on GET /plans without plan:read:active", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request("/plans");
+    expect(res.status).toBe(403);
+  });
+
+  test("403s on GET /plans/:id without plan:read:active", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request(`/plans/${plan.id}`);
+    expect(res.status).toBe(403);
+  });
+
   test("403s on PATCH /plans/:id without plan:update", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();
@@ -126,6 +143,48 @@ describe("auth gating", () => {
 
     const res = await app.request("/audit-log");
     expect(res.status).toBe(403);
+  });
+});
+
+describe("GET /plans/:id", () => {
+  beforeEach(async () => {
+    await resetDb();
+    await resetRedis();
+  });
+
+  test("an active plan is visible with just read:active", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ active: true });
+    setSession({ id: userId, ...regularUser }, { plan: ["read:active"] });
+
+    const res = await app.request(`/plans/${plan.id}`);
+    expect(res.status).toBe(200);
+  });
+
+  test("an inactive plan 404s without read:all", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ active: false });
+    setSession({ id: userId, ...regularUser }, { plan: ["read:active"] });
+
+    const res = await app.request(`/plans/${plan.id}`);
+    expect(res.status).toBe(404);
+  });
+
+  test("an inactive plan is visible with read:all", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ active: false });
+    setSession({ id: userId, ...admin }, { plan: ["read:active", "read:all"] });
+
+    const res = await app.request(`/plans/${plan.id}`);
+    expect(res.status).toBe(200);
+  });
+
+  test("a nonexistent plan 404s regardless of read:all", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...admin }, { plan: ["read:active", "read:all"] });
+
+    const res = await app.request("/plans/999999");
+    expect(res.status).toBe(404);
   });
 });
 
