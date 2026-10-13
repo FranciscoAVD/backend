@@ -124,6 +124,30 @@ const app = new Hono<PinoLoggerEnv>()
 
     return c.json({ data: { active }, message: "Access checked" }, HTTP.OK);
   })
+  .get(
+    "/audit-log",
+    requirePermissionMiddleware({ auditLog: ["list"] }),
+    async (c) => {
+      const { user } = c.get("session");
+      const targetUserId = c.req.query("userId");
+
+      const [res, error] = await tryCatch(
+        targetUserId
+          ? paymentsRepo.auditLog.getByUser({ userId: targetUserId })
+          : paymentsRepo.auditLog.getAll(),
+      );
+
+      if (error) {
+        c.var.logger.error({ err: error, user: user.id }, "payments.auditLog.get");
+        return c.json(
+          { message: "Something went wrong. Try again later." },
+          HTTP.InternalServerError,
+        );
+      }
+
+      return c.json({ data: res, message: "Audit log found" }, HTTP.OK);
+    },
+  )
   .get("/purchases", async (c) => {
     const { user } = c.get("session");
     const [res, error] = await tryCatch(paymentsRepo.purchase.getAll({ userId: user.id }));

@@ -19,3 +19,17 @@ export async function getAuditLogByUser(
     .orderBy(desc(paymentAuditLogTable.createdAt));
   return res;
 }
+
+/**
+ * @description Select query for every audit entry, most recent first - for an admin
+ * reviewing the trail across all customers, not one in particular. Assumes validation.
+ * Operation must be wrapped in try-catch
+ * @returns Array of AuditLog entries.
+ */
+export async function getAllAuditLog(): Promise<Payment.AuditLog[]> {
+  const res = await db
+    .select()
+    .from(paymentAuditLogTable)
+    .orderBy(desc(paymentAuditLogTable.createdAt));
+  return res;
+}
