@@ -30,7 +30,7 @@ A `plan` is `recurring` (a subscription managed by better-auth's stripe plugin) 
 | POST | `/checkout` | caller | one-time plans only — `recurring` 422s |
 | GET | `/checkout/:sessionId` | caller | `open`/`processing`/`failed`/`expired`/`paid`/`refunded`/`disputed` |
 
-The webhook (`/api/auth/stripe/webhook` → `handleStripeEvent` in `lib/webhook.ts`) writes and syncs `purchase` rows; `bun run payments:reconcile [--days 14] [--dry-run]` backfills anything a missed webhook left behind. See `CONTROL_FLOW.md` for the full request/webhook/reconciler control flow, including the `plan.repeatable`/`durationDays`/`overlapping` races and the `payment_audit_log` trail they write to.
+The webhook (`/api/auth/stripe/webhook` → `handleStripeEvent` in `lib/webhook.ts`) writes and syncs `purchase` rows; `bun run payments:reconcile [--days 14] [--dry-run]` backfills anything a missed webhook left behind *and* corrects any `subscription` row left stale by an out-of-order webhook event. See `CONTROL_FLOW.md` for the full request/webhook/reconciler control flow, including the `plan.repeatable`/`durationDays`/`overlapping` races and the `payment_audit_log` trail they write to.
 
 **Running the reconciler on a schedule.** The `Dockerfile`'s `cron` stage is a separate image, built from the same source, whose only job is running `payments:reconcile` daily via busybox `crond` (see the `cron` stage's comments for why it runs as root, and why the crontab redirects to `/proc/1/fd/1-2`). Build and run it like:
 

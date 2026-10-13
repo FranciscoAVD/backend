@@ -1,7 +1,9 @@
 import { db } from "@d/connection";
 import { subscription as subscriptionTable } from "@d/schemas/auth-schema";
 import type { Payment } from "@f/payments/lib/types";
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
+
+export type Subscription = typeof subscriptionTable.$inferSelect;
 
 /**
  * @description Whether the user currently has an active or trialing subscription to the given
@@ -30,4 +32,20 @@ export async function hasActiveSubscription(
       ),
     );
   return res.length > 0;
+}
+
+/**
+ * @description Every subscription row not already in a terminal state (`canceled` or
+ * `incomplete_expired` - Stripe guarantees these never change again), for the reconciler to
+ * re-check against Stripe. Scoped this way, not by every subscription ever created, so call
+ * volume stays bounded by currently live-ish subscriber count rather than all-time history -
+ * most of which has already settled and will never need re-checking. Assumes validation.
+ * Operation must be wrapped in try-catch
+ * @returns Every subscription row that could still change.
+ */
+export async function getReconcilableSubscriptions(): Promise<Subscription[]> {
+  return db
+    .select()
+    .from(subscriptionTable)
+    .where(notInArray(subscriptionTable.status, ["canceled", "incomplete_expired"]));
 }

@@ -9,6 +9,8 @@ import { getPaymentProcessor } from "@f/payments/payment";
 import { confirmCheckout } from "@f/payments/lib/webhook";
 import { resolveChargeState, type PurchaseState } from "@f/payments/lib/charge-state";
 import { paymentsRepo } from "@f/payments/repo";
+import type { Subscription } from "@f/payments/use-cases/get-subscription";
+import type { SubscriptionCorrection } from "@f/payments/use-cases/update-subscription";
 import { logger } from "@/lib/logger";
 import tryCatch from "@vicstack/try-catch";
 
@@ -108,6 +110,113 @@ export async function run(
       continue;
     }
     if (result.inserted) summary.inserted++;
+    if (result.updated) summary.updated++;
+  }
+  return summary;
+}
+
+export type SubscriptionReconcileSummary = {
+  checked: number;
+  updated: number;
+  failed: number;
+};
+
+// mirrors exactly the field set + sources @better-auth/stripe's own webhook handlers
+// (onSubscriptionUpdated/onSubscriptionDeleted) write on a real update - periodStart/periodEnd
+// come from the first subscription item, not the subscription object itself, since Stripe moved
+// period fields to the item level
+function subscriptionFieldsFromStripe(sub: Stripe.Subscription): SubscriptionCorrection {
+  const item = sub.items.data[0];
+  return {
+    status: sub.status,
+    periodStart: item ? new Date(item.current_period_start * 1000) : null,
+    periodEnd: item ? new Date(item.current_period_end * 1000) : null,
+    trialStart: sub.trial_start ? new Date(sub.trial_start * 1000) : null,
+    trialEnd: sub.trial_end ? new Date(sub.trial_end * 1000) : null,
+    cancelAtPeriodEnd: sub.cancel_at_period_end,
+    cancelAt: sub.cancel_at ? new Date(sub.cancel_at * 1000) : null,
+    canceledAt: sub.canceled_at ? new Date(sub.canceled_at * 1000) : null,
+    endedAt: sub.ended_at ? new Date(sub.ended_at * 1000) : null,
+  };
+}
+
+const sameInstant = (a: Date | null, b: Date | null) =>
+  (a?.getTime() ?? null) === (b?.getTime() ?? null);
+
+// two Date instances for the same instant are never === , so dates need their own comparison
+function subscriptionFieldsDiffer(
+  stored: Subscription,
+  target: SubscriptionCorrection,
+): boolean {
+  return (
+    stored.status !== target.status ||
+    stored.cancelAtPeriodEnd !== target.cancelAtPeriodEnd ||
+    !sameInstant(stored.periodStart, target.periodStart ?? null) ||
+    !sameInstant(stored.periodEnd, target.periodEnd ?? null) ||
+    !sameInstant(stored.trialStart, target.trialStart ?? null) ||
+    !sameInstant(stored.trialEnd, target.trialEnd ?? null) ||
+    !sameInstant(stored.cancelAt, target.cancelAt ?? null) ||
+    !sameInstant(stored.canceledAt, target.canceledAt ?? null) ||
+    !sameInstant(stored.endedAt, target.endedAt ?? null)
+  );
+}
+
+/**
+ * @description Re-checks one subscription row against Stripe's current state, correcting it if
+ * anything differs - the backstop for an out-of-order or retried webhook event that overwrote a
+ * newer status. Never touches identity fields (plan, referenceId, stripeCustomerId,
+ * stripeSubscriptionId itself) - only what `updateSubscriptionFields` accepts. Operation must be
+ * wrapped in try-catch
+ */
+export async function reconcileSubscription(
+  row: Subscription,
+  dryRun: boolean,
+): Promise<{ updated: boolean }> {
+  if (!row.stripeSubscriptionId) return { updated: false };
+
+  const current = await getPaymentProcessor().subscriptions.retrieve(row.stripeSubscriptionId);
+  const target = subscriptionFieldsFromStripe(current);
+
+  if (!subscriptionFieldsDiffer(row, target)) return { updated: false };
+
+  logger.info(
+    { subscription: row.stripeSubscriptionId, from: row, to: target, dryRun },
+    "payments.reconcile.subscription_update",
+  );
+  if (!dryRun)
+    await paymentsRepo.subscription.updateFields(
+      { stripeSubscriptionId: row.stripeSubscriptionId },
+      target,
+    );
+  return { updated: true };
+}
+
+/**
+ * @description Second, independent reconciler pass: corrects subscription rows whose status has
+ * drifted from Stripe's own, one `subscriptions.retrieve` per row - scoped to rows not already in
+ * a terminal state (`getReconcilableSubscriptions`), so call volume is bounded by currently
+ * live-ish subscriber count re-checked once per scheduled run, not by webhook traffic the way a
+ * per-event Stripe call would be.
+ */
+export async function runSubscriptions(
+  dryRun: boolean,
+): Promise<SubscriptionReconcileSummary> {
+  const summary: SubscriptionReconcileSummary = { checked: 0, updated: 0, failed: 0 };
+  const rows = await paymentsRepo.subscription.getReconcilable();
+
+  for (const row of rows) {
+    if (!row.stripeSubscriptionId) continue;
+
+    summary.checked++;
+    const [result, error] = await tryCatch(reconcileSubscription(row, dryRun));
+    if (error) {
+      summary.failed++;
+      logger.error(
+        { err: error, subscription: row.stripeSubscriptionId },
+        "payments.reconcile.subscription",
+      );
+      continue;
+    }
     if (result.updated) summary.updated++;
   }
   return summary;

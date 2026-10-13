@@ -15,7 +15,11 @@ import {
   hasActivePurchase,
 } from "@f/payments/use-cases/get-purchases";
 import { updatePurchaseByPaymentIntent } from "@f/payments/use-cases/update-purchase";
-import { hasActiveSubscription } from "@f/payments/use-cases/get-subscription";
+import {
+  hasActiveSubscription,
+  getReconcilableSubscriptions,
+} from "@f/payments/use-cases/get-subscription";
+import { updateSubscriptionFields } from "@f/payments/use-cases/update-subscription";
 import {
   createCheckout,
   getCheckoutStatus,
@@ -56,6 +60,8 @@ export const paymentsRepo = {
   },
   subscription: {
     hasActive: hasActiveSubscription,
+    getReconcilable: getReconcilableSubscriptions,
+    updateFields: updateSubscriptionFields,
   },
   checkout: {
     create: createCheckout,

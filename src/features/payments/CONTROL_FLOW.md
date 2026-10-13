@@ -245,6 +245,51 @@ The default scan window is 14 days (derived from `PROCESSING_TTL_SEC`), not 7 -
 delayed payment methods (e.g. bank debits) can take that long to settle, and a
 late settlement whose webhook was lost needs to still fall inside the window.
 
+### `runSubscriptions`: correcting stale subscription rows
+
+A second, independent reconciler pass, triggered by `GET /plans/:id/access`
+now reading the `subscription` table directly (see below) - a table the
+`@better-auth/stripe` plugin writes straight from each webhook's payload,
+with no protection against an out-of-order or retried `customer.subscription.*`
+event overwriting a newer status. That used to be harmless (nothing read the
+table); now it decides access, so it needs its own backstop.
+
+Deliberately *not* a Stripe call inside `onEvent`: that would mean one API
+call per webhook event, and Stripe enforces hard rate limits a real app's
+webhook volume can realistically hit. Instead this stays a batched pass, same
+shape as the one-time-purchase reconciler above, just scoped differently -
+subscriptions have no creation-time window to scan (a status can change long
+after creation, unlike a Checkout Session's short confirmation window), so
+instead of `days`, it scopes by status: `getReconcilableSubscriptions` skips
+any row already `canceled` or `incomplete_expired`, since Stripe guarantees
+neither ever changes again. Call volume scales with *currently live-ish
+subscriber count*, re-checked once per scheduled run (daily, via the `cron`
+image) - not with webhook traffic.
+
+For each remaining row, `reconcileSubscription` does one
+`stripe.subscriptions.retrieve()`, diffs the result against the stored row,
+and - unless it's a dry run - corrects it via `updateSubscriptionFields`.
+Only the same mutable fields `@better-auth/stripe`'s own webhook handlers
+write get touched (`status`, `periodStart`, `periodEnd`, `trialStart`,
+`trialEnd`, `cancelAtPeriodEnd`, `cancelAt`, `canceledAt`, `endedAt`) -
+`plan`, `referenceId`, `stripeCustomerId` and `stripeSubscriptionId` itself
+are identity fields the plugin sets once at creation; they aren't what
+staleness puts at risk, and this reconciler has no business rewriting them.
+`periodStart`/`periodEnd` are read from `sub.items.data[0]`, not the
+subscription object's own top-level fields, matching exactly where the
+plugin itself reads them from (Stripe moved period fields to the item level).
+
+Not covered: a subscription that exists in Stripe but has no row at all.
+Unlike one-time purchases (which only ever exist once an async webhook
+confirms them), the plugin creates the row synchronously as part of its own
+checkout/upgrade flow, before any webhook fires - a genuinely missing row is
+a much rarer failure mode than a stale one, and isn't what this pass targets.
+
+`scripts/reconcile.ts` runs both passes every invocation and logs them under
+separate messages (`payments.reconcile.summary` for the existing one-time
+pass, `payments.reconcile.subscriptions_summary` for this one) so neither
+affects how the other is parsed; the exit code is 1 if *either* pass failed.
+
 ## Checking active access: `GET /plans/:id/access`
 
 The one route that answers "does the caller currently have access to this
