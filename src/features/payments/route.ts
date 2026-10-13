@@ -15,7 +15,7 @@ import { isCheckoutSessionId } from "@f/payments/lib/utils";
 import tryCatch from "@vicstack/try-catch";
 import HTTP from "@vicstack/http";
 
-import { jsonValidator } from "@/lib/validators";
+import { idParamValidator, jsonValidator } from "@/lib/validators";
 
 import { rateLimiter } from "@/lib/rate-limit";
 
@@ -60,6 +60,48 @@ const app = new Hono<PinoLoggerEnv>()
       );
     }
     return c.json({ data: res, message: "Plans found" }, HTTP.OK);
+  })
+  .get("/plans/:id/access", idParamValidator, async (c) => {
+    const { user } = c.get("session");
+    const { id } = c.req.valid("param");
+
+    const [plan, planError] = await tryCatch(paymentsRepo.plan.get({ id }));
+    if (planError) {
+      c.var.logger.error({ err: planError, user: user.id, plan: id }, "payments.plan.access");
+      return c.json(
+        { message: "Something went wrong. Try again later." },
+        HTTP.InternalServerError,
+      );
+    }
+
+    if (!plan) return c.json({ message: "Plan not found" }, HTTP.NotFound);
+
+    // subscriptions' access is governed by their Stripe subscription period, not a
+    // `purchase` row - hasActivePurchase would silently always answer false for one
+    if (plan.type !== "one_time")
+      return c.json(
+        { message: "Plan is not a one-time plan" },
+        HTTP.UnprocessableEntity,
+      );
+
+    const [active, activeError] = await tryCatch(
+      paymentsRepo.purchase.hasActive(
+        { userId: user.id, planId: plan.id },
+        { overlapping: plan.overlapping },
+      ),
+    );
+    if (activeError) {
+      c.var.logger.error(
+        { err: activeError, user: user.id, plan: plan.id },
+        "payments.plan.access",
+      );
+      return c.json(
+        { message: "Something went wrong. Try again later." },
+        HTTP.InternalServerError,
+      );
+    }
+
+    return c.json({ data: { active }, message: "Access checked" }, HTTP.OK);
   })
   .get("/purchases", async (c) => {
     const { user } = c.get("session");

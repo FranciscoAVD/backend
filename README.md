@@ -21,6 +21,7 @@ A `plan` is `recurring` (a subscription managed by better-auth's stripe plugin) 
 | | Route | Who | Notes |
 | --- | --- | --- | --- |
 | GET | `/plans` | any signed-in user | active plans only |
+| GET | `/plans/:id/access` | caller | one-time plans only — whether the caller currently has active (non-expired) access |
 | POST | `/plans` | admin (`plan:create`) | creates the Stripe product + price(s), then the DB row |
 | GET | `/purchases` | caller | their own one-time purchases |
 | POST | `/checkout` | caller | one-time plans only — `recurring` 422s |
