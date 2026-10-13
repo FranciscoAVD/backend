@@ -2,6 +2,10 @@ import { db } from "@d/connection";
 import { subscription as subscriptionTable } from "@d/schemas/auth-schema";
 import type { Payment } from "@f/payments/lib/types";
 import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
+import {
+  SUBSCRIPTION_ACCESS_STATUSES,
+  SUBSCRIPTION_TERMINAL_STATUSES,
+} from "@f/payments/lib/access-policy";
 
 export type Subscription = typeof subscriptionTable.$inferSelect;
 
@@ -28,7 +32,7 @@ export async function hasActiveSubscription(
       and(
         eq(subscriptionTable.referenceId, target.userId),
         sql`lower(${subscriptionTable.plan}) = lower(${plan.name})`,
-        inArray(subscriptionTable.status, ["active", "trialing"]),
+        inArray(subscriptionTable.status, SUBSCRIPTION_ACCESS_STATUSES),
       ),
     );
   return res.length > 0;
@@ -47,5 +51,5 @@ export async function getReconcilableSubscriptions(): Promise<Subscription[]> {
   return db
     .select()
     .from(subscriptionTable)
-    .where(notInArray(subscriptionTable.status, ["canceled", "incomplete_expired"]));
+    .where(notInArray(subscriptionTable.status, [...SUBSCRIPTION_TERMINAL_STATUSES]));
 }

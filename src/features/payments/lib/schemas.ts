@@ -5,6 +5,10 @@ import {
   createSelectSchema,
 } from "drizzle-zod";
 import { z } from "zod";
+import {
+  AUDIT_LOG_DEFAULT_LIMIT,
+  AUDIT_LOG_MAX_LIMIT,
+} from "@f/payments/lib/constants";
 
 export const insertPlanSchema = createInsertSchema(plan, {
   amount: (s) => s.positive(),
@@ -75,6 +79,13 @@ export const updatePurchaseSchema = createUpdateSchema(purchase).pick({
   amountRefunded: true,
 });
 export const selectPurchaseSchema = createSelectSchema(purchase);
+
+// GET /audit-log's query string - every value arrives as a string, hence the coercion
+export const auditLogQuerySchema = z.object({
+  userId: z.string().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(AUDIT_LOG_MAX_LIMIT).default(AUDIT_LOG_DEFAULT_LIMIT),
+  before: z.coerce.number().int().positive().optional(),
+});
 
 export const checkoutSchema = z.object({
   planId: z.number().int().positive(),

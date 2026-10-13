@@ -7,6 +7,7 @@ import {
   purchaseStatusFromDispute,
   encodeDurationDays,
   decodeDurationDays,
+  isPurchaseAccessActive,
 } from "@f/payments/lib/utils";
 
 describe("isCheckoutSessionId", () => {
@@ -107,4 +108,39 @@ describe("encodeDurationDays / decodeDurationDays", () => {
       expect(decodeDurationDays(value)).toBeUndefined();
     },
   );
+});
+
+describe("isPurchaseAccessActive", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const now = new Date("2026-06-01T00:00:00Z");
+  const at = (days: number) => new Date(now.getTime() + days * DAY);
+  const purchase = (startDays: number, durationDays: number | null) => ({
+    createdAt: at(startDays),
+    durationDays,
+    expiresAt: durationDays == null ? null : at(startDays + durationDays),
+  });
+
+  test("overlapping: any purchase still inside its own window grants access", () => {
+    expect(isPurchaseAccessActive([purchase(-40, 30), purchase(-5, 30)], { overlapping: true }, now)).toBe(true);
+    expect(isPurchaseAccessActive([purchase(-40, 30), purchase(-35, 30)], { overlapping: true }, now)).toBe(false);
+  });
+
+  test("non-overlapping: a later purchase extends from where the earlier one ends", () => {
+    // -40..-10, then chained -10..+20
+    expect(isPurchaseAccessActive([purchase(-40, 30), purchase(-35, 30)], { overlapping: false }, now)).toBe(true);
+  });
+
+  test("non-overlapping: a gap between purchases isn't backfilled", () => {
+    // -100..-70, gap, then -60..-30: lapsed
+    expect(isPurchaseAccessActive([purchase(-100, 30), purchase(-60, 30)], { overlapping: false }, now)).toBe(false);
+  });
+
+  test("a never-expiring purchase grants access either way", () => {
+    expect(isPurchaseAccessActive([purchase(-400, null)], { overlapping: true }, now)).toBe(true);
+    expect(isPurchaseAccessActive([purchase(-400, null)], { overlapping: false }, now)).toBe(true);
+  });
+
+  test("no purchases, no access", () => {
+    expect(isPurchaseAccessActive([], { overlapping: false }, now)).toBe(false);
+  });
 });

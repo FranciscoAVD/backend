@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Env as PinoLoggerEnv } from "hono-pino";
 import { validator } from "hono/validator";
+import { z } from "zod";
 
 import {
   sessionMiddleware,
@@ -10,11 +11,13 @@ import {
 } from "@f/auth/middleware";
 
 import {
+  auditLogQuerySchema,
   checkoutSchema,
   insertPlanSchema,
   updatePlanSchema,
 } from "@f/payments/lib/schemas";
 import { isCheckoutSessionId } from "@f/payments/lib/utils";
+import { RETIRED_PLANS_KEEP_ACCESS } from "@f/payments/lib/access-policy";
 
 import tryCatch from "@vicstack/try-catch";
 import HTTP from "@vicstack/http";
@@ -45,6 +48,16 @@ const sessionIdParamValidator = validator("param", (value, c) => {
       HTTP.BadRequest,
     );
   return { sessionId };
+});
+
+const auditLogQueryValidator = validator("query", (value, c) => {
+  const { success, data, error } = auditLogQuerySchema.safeParse(value);
+  if (!success)
+    return c.json(
+      { error: z.treeifyError(error).properties, message: "Invalid query" },
+      HTTP.BadRequest,
+    );
+  return data;
 });
 
 // chained in one expression, all the way to the export: RPC's inferred
@@ -164,19 +177,52 @@ const app = new Hono<PinoLoggerEnv>()
       );
     }
 
-    return c.json({ data: { active }, message: "Access checked" }, HTTP.OK);
+    // whether a retired plan still grants access to those who hold it is a policy choice
+    const holds = active && (plan.active || RETIRED_PLANS_KEEP_ACCESS);
+
+    // a retired plan is only revealed to someone who still holds it, or to an admin (read:all) -
+    // anyone else gets the same 404 as a plan that never existed, matching GET /plans/:id
+    if (!plan.active && !holds) {
+      let authorized = false;
+      await requirePermissionMiddleware({ plan: ["read:all"] })(
+        c as unknown as Parameters<ReturnType<typeof requirePermissionMiddleware>>[0],
+        async () => {
+          authorized = true;
+        },
+      );
+      if (!authorized) return c.json({ message: "Plan not found" }, HTTP.NotFound);
+    }
+
+    return c.json({ data: { active: holds }, message: "Access checked" }, HTTP.OK);
+  })
+  .get("/access", async (c) => {
+    const { user } = c.get("session");
+    const [res, error] = await tryCatch(
+      paymentsRepo.access.getActivePlans({ userId: user.id }),
+    );
+    if (error) {
+      c.var.logger.error({ err: error, user: user.id }, "payments.access.getActivePlans");
+      return c.json(
+        { message: "Something went wrong. Try again later." },
+        HTTP.InternalServerError,
+      );
+    }
+    return c.json({ data: res, message: "Active plans found" }, HTTP.OK);
   })
   .get(
     "/audit-log",
     requirePermissionMiddleware({ audit: ["list"] }),
+    auditLogQueryValidator,
     async (c) => {
       const { user } = c.get("session");
-      const targetUserId = c.req.query("userId");
+      const { userId: targetUserId, limit, before } = c.req.valid("query");
 
-      const [res, error] = await tryCatch(
+      // one row past the page size, to tell whether there's a next page without a count query
+      const pageOptions = { limit: limit + 1, before };
+      const [rows, error] = await tryCatch(
         targetUserId
-          ? paymentsRepo.audit.getByUser({ userId: targetUserId })
-          : paymentsRepo.audit.getAll(),
+          ? paymentsRepo.audit.getByUser({ userId: targetUserId }, pageOptions)
+          : paymentsRepo.audit.getAll(pageOptions),
       );
 
       if (error) {
@@ -187,7 +233,10 @@ const app = new Hono<PinoLoggerEnv>()
         );
       }
 
-      return c.json({ data: res, message: "Audit log found" }, HTTP.OK);
+      const data = rows.slice(0, limit);
+      // pass back as ?before= to get the next (older) page; null on the last page
+      const nextCursor = rows.length > limit ? (data.at(-1)?.id ?? null) : null;
+      return c.json({ data, nextCursor, message: "Audit log found" }, HTTP.OK);
     },
   )
   .get("/purchases", async (c) => {

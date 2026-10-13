@@ -390,3 +390,25 @@ describe("reservePendingCheckout / releaseReservation", () => {
     expect(await redis.get("checkout:active:u1:1")).toBe("cs_1");
   });
 });
+
+describe("transition atomicity", () => {
+  beforeEach(resetRedis);
+
+  test("concurrent events for one session never move its status backward", async () => {
+    // markFailed (rank 2) racing markProcessing (rank 1): whichever lands first, the result
+    // must be failed - as a separate read then write, both could read `open` and processing
+    // could write last
+    for (let i = 0; i < 50; i++) {
+      const sessionId = `cs_race_${i}`;
+      await savePendingCheckout(
+        sessionId,
+        { userId: "u1", planId: i, status: "open" },
+        PENDING_CHECKOUT_TTL_SEC,
+      );
+
+      await Promise.all([markFailed(sessionId), markProcessing(sessionId)]);
+
+      expect((await getPendingCheckout(sessionId))?.status).toBe("failed");
+    }
+  });
+});

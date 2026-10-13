@@ -152,6 +152,78 @@ describe("auth gating", () => {
   });
 });
 
+describe("GET /audit-log", () => {
+  beforeEach(async () => {
+    await resetDb();
+    await resetRedis();
+  });
+
+  async function seedEntries(userId: string, count: number) {
+    const plan = await seedPlan();
+    for (let i = 0; i < count; i++)
+      await db
+        .insert(paymentAuditLog)
+        .values({ type: "checkout_blocked_pending_checkout", userId, planId: plan.id });
+  }
+
+  type Page = { data: { id: number; userId: string | null }[]; nextCursor: number | null };
+
+  test("pages through every entry newest first, with no gaps or repeats", async () => {
+    const userId = await seedUser();
+    await seedEntries(userId, 5);
+    setSession({ id: userId, ...admin }, { audit: ["list"] });
+
+    const seen: number[] = [];
+    let cursor: number | null = null;
+    let pages = 0;
+    do {
+      const res = await app.request(`/audit-log?limit=2${cursor ? `&before=${cursor}` : ""}`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Page;
+      seen.push(...body.data.map((e) => e.id));
+      cursor = body.nextCursor;
+      pages++;
+    } while (cursor !== null);
+
+    expect(pages).toBe(3);
+    expect(seen).toHaveLength(5);
+    expect(seen).toEqual([...seen].sort((a, b) => b - a));
+    expect(new Set(seen).size).toBe(5);
+  });
+
+  test("no next cursor when everything fits on one page", async () => {
+    const userId = await seedUser();
+    await seedEntries(userId, 2);
+    setSession({ id: userId, ...admin }, { audit: ["list"] });
+
+    const body = (await (await app.request("/audit-log?limit=2")).json()) as Page;
+    expect(body.data).toHaveLength(2);
+    expect(body.nextCursor).toBeNull();
+  });
+
+  test("?userId= narrows to one customer", async () => {
+    const userA = await seedUser();
+    const userB = await seedUser();
+    await seedEntries(userA, 2);
+    await seedEntries(userB, 1);
+    setSession({ id: userA, ...admin }, { audit: ["list"] });
+
+    const body = (await (await app.request(`/audit-log?userId=${userB}`)).json()) as Page;
+    expect(body.data.map((e) => e.userId)).toEqual([userB]);
+  });
+
+  test.each(["limit=0", "limit=101", "limit=abc", "before=-1", "before=1.5"])(
+    "400s on an invalid query: %s",
+    async (query) => {
+      const userId = await seedUser();
+      setSession({ id: userId, ...admin }, { audit: ["list"] });
+
+      const res = await app.request(`/audit-log?${query}`);
+      expect(res.status).toBe(400);
+    },
+  );
+});
+
 describe("GET /plans", () => {
   beforeEach(async () => {
     await resetDb();
@@ -291,6 +363,98 @@ describe("GET /plans/:id/access", () => {
     const res = await app.request(`/plans/${plan.id}/access`);
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ data: { active: false } });
+  });
+});
+
+describe("GET /plans/:id/access on a retired plan", () => {
+  beforeEach(async () => {
+    await resetDb();
+    await resetRedis();
+  });
+
+  async function retiredPlanBoughtBy(userId: string | null) {
+    const plan = await seedPlan({ type: "one_time", durationDays: 30, active: false });
+    if (userId)
+      await addPurchase(
+        { userId },
+        {
+          planId: plan.id,
+          stripeCheckoutSessionId: "cs_retired",
+          stripePaymentIntentId: "pi_retired",
+          amountTotal: plan.amount,
+          currency: plan.currency,
+        },
+        { durationDays: plan.durationDays },
+        new Date(),
+      );
+    return plan;
+  }
+
+  test("someone who still holds it keeps access", async () => {
+    const userId = await seedUser();
+    const plan = await retiredPlanBoughtBy(userId);
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request(`/plans/${plan.id}/access`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ data: { active: true } });
+  });
+
+  test("anyone else gets a 404, as if it never existed", async () => {
+    const userId = await seedUser();
+    const plan = await retiredPlanBoughtBy(null);
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request(`/plans/${plan.id}/access`);
+    expect(res.status).toBe(404);
+  });
+
+  test("an admin (read:all) without it gets a plain answer, not a 404", async () => {
+    const userId = await seedUser();
+    const plan = await retiredPlanBoughtBy(null);
+    setSession({ id: userId, ...admin }, { plan: ["read:active", "read:all"] });
+
+    const res = await app.request(`/plans/${plan.id}/access`);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ data: { active: false } });
+  });
+});
+
+describe("GET /access", () => {
+  beforeEach(async () => {
+    await resetDb();
+    await resetRedis();
+  });
+
+  test("lists the caller's active plans across both types", async () => {
+    const userId = await seedUser();
+    const pass = await seedPlan({ type: "one_time", durationDays: 30 });
+    const sub = await seedPlan({ type: "recurring", interval: "month", durationDays: null });
+    await addPurchase(
+      { userId },
+      {
+        planId: pass.id,
+        stripeCheckoutSessionId: "cs_pass",
+        stripePaymentIntentId: "pi_pass",
+        amountTotal: pass.amount,
+        currency: pass.currency,
+      },
+      { durationDays: pass.durationDays },
+      new Date(),
+    );
+    await seedSubscription({ referenceId: userId, plan: sub.name, status: "active" });
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request("/access");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { id: number }[] };
+    expect(body.data.map((p) => p.id)).toEqual([pass.id, sub.id]);
+  });
+
+  test("401s without a session", async () => {
+    setSession(null);
+    const res = await app.request("/access");
+    expect(res.status).toBe(401);
   });
 });
 

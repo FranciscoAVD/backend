@@ -12,6 +12,8 @@ import { stripe } from "@better-auth/stripe";
 import { getPaymentProcessor } from "@f/payments/payment";
 import { paymentsRepo } from "@f/payments/repo";
 import { handleStripeEvent } from "@f/payments/lib/webhook";
+import { cancelSubscriptionsForDeletedUser } from "@f/payments/lib/user-deletion";
+import { blockRetiredPlanUpgrade } from "@f/payments/lib/plan-retirement";
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, {
@@ -36,6 +38,22 @@ export const auth = betterAuth({
   },
   emailAndPassword: {
     enabled: true,
+  },
+  databaseHooks: {
+    user: {
+      delete: {
+        // every deletion path (admin removeUser, self-service /delete-user) runs this; a throw
+        // aborts the deletion, so a user is never removed while Stripe is still billing them
+        before: async (user) => {
+          await cancelSubscriptionsForDeletedUser(user);
+        },
+      },
+    },
+  },
+  hooks: {
+    // the stripe plugin is handed retired plans too (so existing subscribers keep resolving);
+    // this is what stops anyone starting a new subscription to one
+    before: blockRetiredPlanUpgrade,
   },
   plugins: [
     stripe({

@@ -204,6 +204,23 @@ const STATUS_RANK: Record<PendingCheckout["status"], number> = {
   expired: 2,
 };
 
+// the rank check and the write happen in one step: as a separate read then write, two events
+// for the same session landing together could both read the old status and the lower-ranked one
+// could write last, moving the status backward. Returns the entry as it was before (to know whose
+// pointer to touch), or nil if there's no entry or the move would go backward.
+const TRANSITION = `
+local raw = redis.call("GET", KEYS[1])
+if not raw then return false end
+local rank = { ${Object.entries(STATUS_RANK)
+  .map(([status, rank]) => `${status} = ${rank}`)
+  .join(", ")} }
+local pending = cjson.decode(raw)
+if rank[ARGV[1]] < (rank[pending.status] or 0) then return false end
+pending.status = ARGV[1]
+redis.call("SET", KEYS[1], cjson.encode(pending), "EX", ARGV[2])
+return raw
+`;
+
 // what a transition does to the (user, plan) pointer: `extend` keeps it alive as long as the
 // session's own entry (still holding the slot), `clear` frees the slot (terminal status)
 type PointerAction = "extend" | "clear";
@@ -214,20 +231,20 @@ async function transition(
   ttlSec: number,
   pointer: PointerAction,
 ): Promise<boolean> {
-  const pending = await getPendingCheckout(sessionId);
-  if (!pending) return false;
-  if (STATUS_RANK[status] < STATUS_RANK[pending.status]) return false;
-
   // writes the status directly, unlike savePendingCheckout, which would also repoint the
   // (user, plan) pointer at this session - a retried transition for an old, superseded
   // session must never drag the pointer back off a newer session that's since taken it over
   // (extendPointer/clearPointerIfMatches both leave a newer session's pointer alone)
-  await redis.set(
+  const previous = await redis.send("EVAL", [
+    TRANSITION,
+    "1",
     key(sessionId),
-    JSON.stringify({ ...pending, status }),
-    "EX",
-    ttlSec,
-  );
+    status,
+    String(ttlSec),
+  ]);
+  if (typeof previous !== "string") return false;
+  const pending = JSON.parse(previous) as PendingCheckout;
+
   if (pointer === "extend")
     await extendPointer(pending.userId, pending.planId, sessionId, ttlSec);
   else await clearPointerIfMatches(pending.userId, pending.planId, sessionId);

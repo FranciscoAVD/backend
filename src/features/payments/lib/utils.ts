@@ -5,6 +5,7 @@ import {
   CHECKOUT_SESSION_ID_PREFIX,
 } from "@f/payments/lib/constants";
 import type { Payment } from "@f/payments/lib/types";
+import { PARTIAL_REFUND_REVOKES_ACCESS } from "@f/payments/lib/access-policy";
 
 export type AllowedEvent = Extract<
   Stripe.Event,
@@ -54,7 +55,8 @@ export function isForeignKeyViolation(error: unknown, column: string): boolean {
 }
 
 /**
- * @description Purchase refund state for a charge. Partial refunds keep the purchase paid.
+ * @description Purchase refund state for a charge. Whether a partial refund keeps the purchase
+ * `paid` is `PARTIAL_REFUND_REVOKES_ACCESS`'s call (by default it does).
  * Shared by the webhook and the reconciler so both map Stripe state the same way.
  */
 export function purchaseUpdateFromCharge(
@@ -62,7 +64,10 @@ export function purchaseUpdateFromCharge(
 ): Pick<Payment.Purchase, "amountRefunded" | "status"> {
   return {
     amountRefunded: charge.amount_refunded,
-    status: charge.refunded ? "refunded" : "paid",
+    status:
+      charge.refunded || (PARTIAL_REFUND_REVOKES_ACCESS && charge.amount_refunded > 0)
+        ? "refunded"
+        : "paid",
   };
 }
 
@@ -111,4 +116,49 @@ export function decodeDurationDays(
   if (value === NO_EXPIRY) return { durationDays: null };
   if (value === undefined || !/^[1-9]\d*$/.test(value)) return undefined;
   return { durationDays: Number(value) };
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * @description Whether a user's access-granting purchases of one plan give them access at `now`.
+ * Storage never chains purchases - each row's expiresAt comes from its own createdAt + the plan's
+ * durationDays at purchase time - so `overlapping` only changes how they're read: `true` treats
+ * any one unexpired purchase as enough; `false` chains purchases end-to-end in order (gaps
+ * included, so a lapse before the next purchase isn't backfilled), recomputing each purchase's
+ * end as `(chain-adjusted start) + its own durationDays` rather than trusting its
+ * independently-computed, unchained `expiresAt` - a later purchase bought before an earlier one
+ * lapses must extend access from where the earlier one ends, not shorten it to its own naive
+ * window. Pure, so the single-plan check and the all-plans lookup share one definition.
+ * @param purchases the purchases to evaluate, all of one plan, already filtered to
+ * access-granting statuses and sorted by createdAt ascending
+ * @param plan object of the plan's overlapping setting, enforced by Pick<Payment.Plan, "overlapping">
+ * @param now the moment to evaluate access at
+ * @returns Whether those purchases grant access at `now`.
+ */
+export function isPurchaseAccessActive(
+  purchases: Pick<Payment.Purchase, "createdAt" | "expiresAt" | "durationDays">[],
+  plan: Pick<Payment.Plan, "overlapping">,
+  now: Date,
+): boolean {
+  if (plan.overlapping)
+    return purchases.some((p) => p.expiresAt === null || p.expiresAt > now);
+
+  let chainEnd: Date | null = null;
+  for (const p of purchases) {
+    const start: Date = chainEnd && chainEnd > p.createdAt ? chainEnd : p.createdAt;
+    if (p.durationDays == null) {
+      // no duration snapshot: either a genuinely perpetual purchase (expiresAt also
+      // null), or a pre-migration row written before this column existed - either way,
+      // trust its own expiresAt rather than treating a null duration as "never expires"
+      if (p.expiresAt === null) return true;
+      if (now >= start && now < p.expiresAt) return true;
+      chainEnd = p.expiresAt;
+      continue;
+    }
+    const end: Date = new Date(start.getTime() + p.durationDays * DAY_MS);
+    if (now >= start && now < end) return true;
+    chainEnd = end;
+  }
+  return false;
 }

@@ -2,7 +2,7 @@ import { db } from "@d/connection";
 import { plan as planTable } from "@d/schemas/payment-schema";
 import type { Payment } from "@f/payments/lib/types";
 import type { StripePlan } from "@better-auth/stripe";
-import { eq, and, or, sql } from "drizzle-orm";
+import { eq, or, sql } from "drizzle-orm";
 
 /**
  * @description Select query for all active plans. Operation must be wrapped in try-catch
@@ -78,15 +78,18 @@ export async function getPlanByPriceId(
 }
 
 /**
- * @description Active recurring plans in the shape better-auth's stripe plugin expects.
- * Passed as the plugin's `subscription.plans`, which it resolves on every subscription call.
+ * @description Every recurring plan, retired (`active: false`) ones included, in the shape
+ * better-auth's stripe plugin expects. Passed as the plugin's `subscription.plans`, which it
+ * resolves on every subscription call. Retired plans stay in the list so the plugin still
+ * recognizes the plan of a subscription that already exists; new subscriptions to them are
+ * blocked by `blockRetiredPlanUpgrade` instead (see `lib/plan-retirement.ts` for why).
  * @returns Array of StripePlans.
  */
 export async function getSubscriptionPlans(): Promise<StripePlan[]> {
   const res = await db
     .select()
     .from(planTable)
-    .where(and(eq(planTable.active, true), eq(planTable.type, "recurring")));
+    .where(eq(planTable.type, "recurring"));
   return res.map((plan) => ({
     name: plan.name,
     priceId: plan.stripePriceId,

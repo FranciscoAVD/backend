@@ -93,7 +93,9 @@ export const purchase = pgTable(
       .defaultNow()
       .$onUpdate(() => new Date()),
   },
-  (t) => [index("purchase_user_idx").on(t.userId)],
+  // (user_id, plan_id) serves the per-plan lookups (access checks, the repeat-purchase guard)
+  // and, as its leading column, every user_id-only lookup the old single-column index did
+  (t) => [index("purchase_user_plan_idx").on(t.userId, t.planId)],
 );
 
 // a persistent, queryable trail of the race conditions around `plan.repeatable` - the two

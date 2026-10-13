@@ -53,7 +53,7 @@ describe("getPlans", () => {
 describe("getSubscriptionPlans", () => {
   beforeEach(resetDb);
 
-  test("returns only active recurring plans, mapped to the stripe plugin's shape", async () => {
+  test("returns every recurring plan, retired ones included, mapped to the stripe plugin's shape", async () => {
     await seedPlan({
       name: "Monthly",
       type: "recurring",
@@ -69,10 +69,11 @@ describe("getSubscriptionPlans", () => {
       active: false,
     });
 
+    // retired plans stay in the list so existing subscribers keep resolving; new
+    // subscriptions to them are blocked by blockRetiredPlanUpgrade instead
     const res = await getSubscriptionPlans();
-    expect(res).toHaveLength(1);
-    expect(res[0]).toMatchObject({
-      name: "Monthly",
+    expect(res.map((p) => p.name).sort()).toEqual(["Inactive Recurring", "Monthly"]);
+    expect(res.find((p) => p.name === "Monthly")).toMatchObject({
       freeTrial: { days: 14 },
     });
   });

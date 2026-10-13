@@ -334,9 +334,16 @@ affects how the other is parsed; the exit code is 1 if *either* pass failed.
 
 ## Checking active access: `GET /plans/:id/access`
 
-The one route that answers "does the caller currently have access to this
+The route that answers "does the caller currently have access to this
 plan" (404 if the plan doesn't exist). Which of the two feature's two systems
-it checks depends on `plan.type`, mirroring the same split as checkout above:
+it checks depends on `plan.type`, mirroring the same split as checkout above.
+`GET /access` answers the broader question - every plan the caller has access
+to - with the same rules (see "Every active plan" below).
+
+A retired (`active: false`) plan is only revealed to someone who still holds
+it (when `RETIRED_PLANS_KEEP_ACCESS` is on, the default) or to an admin with
+`plan:read:all`; anyone else gets the same 404 as a plan that never existed,
+matching `GET /plans/:id`.
 
 ```mermaid
 flowchart TD
@@ -346,8 +353,13 @@ flowchart TD
     PlanFound -- yes --> Type{"plan.type?"}
     Type -- one_time --> HasActivePurchase["hasActivePurchase(userId, planId, plan.overlapping)"]
     Type -- recurring --> HasActiveSubscription["hasActiveSubscription(userId, plan.name)"]
-    HasActivePurchase --> Return["200 { active }"]
-    HasActiveSubscription --> Return
+    HasActivePurchase --> Holds["holds = active &&\n(plan.active || RETIRED_PLANS_KEEP_ACCESS)"]
+    HasActiveSubscription --> Holds
+    Holds --> Hidden{"plan retired\nand not held?"}
+    Hidden -- no --> Return["200 { active: holds }"]
+    Hidden -- yes --> Admin{"caller has\nplan:read:all?"}
+    Admin -- yes --> Return
+    Admin -- no --> NotFound2["404 Plan not found"]
 ```
 
 ### `one_time`: `hasActivePurchase`
@@ -397,7 +409,7 @@ plugin's `/subscription/list` endpoint: this feature only needs a boolean, not
 the limits/priceId enrichment that endpoint adds, and reading the table
 avoids reconstructing a session-bearing request just to call it. Matches
 `sub.plan` against `plan.name` case-insensitively, the same way the plugin's
-own plan lookup does, and treats `active`/`trialing` as the active statuses -
+own plan lookup does, and treats `SUBSCRIPTION_ACCESS_STATUSES` (`active`/`trialing`) as the active statuses -
 mirroring `isActiveOrTrialing`, the check the plugin itself uses to decide
 whether a user is already subscribed (e.g. to block a duplicate upgrade) -
 rather than also checking `periodEnd`, which the plugin doesn't check either.
@@ -408,8 +420,8 @@ multi-day retry schedule for that failed payment runs out. That matches the
 plugin's own definition of "subscribed" (reused here for consistency rather
 than inventing a second one), but plenty of products choose to grant a grace
 period through `past_due` instead. If that's wanted, it's a product decision
-to make explicitly here - add `"past_due"` to the `inArray` status check -
-not something that should happen by accident.
+to make explicitly - add `"past_due"` to `SUBSCRIPTION_ACCESS_STATUSES` in
+`lib/access-policy.ts` - not something that should happen by accident.
 
 ```mermaid
 flowchart TD
@@ -430,7 +442,89 @@ above). All three writes are best-effort: a failure is logged as a warning and
 never blocks the response or webhook outcome it's attached to. `GET
 /audit-log` (admin, `audit:list`) exposes it - every entry, most recent
 first, or one customer's via `?userId=`, backed by
-`paymentsRepo.audit.getAll`/`getByUser` respectively.
+`paymentsRepo.audit.getAll`/`getByUser` respectively. It's paginated by
+keyset: `?limit=` (default 50, max 100) and `?before=<id>`, where the response's
+`nextCursor` is the `before` for the next, older page (`null` on the last one).
+Keyset rather than offset so a page boundary doesn't shift while new entries
+keep arriving; ordered by `id`, which is unique and assigned in insertion order.
+
+## Every active plan: `GET /access`
+
+`paymentsRepo.access.getActivePlans` returns every plan the user has access to
+right now, across both types, each with its `limits` - for an app that gates
+features by what a user holds rather than by one specific plan id. It applies
+exactly the same rules as the single-plan checks above: one-time plans via
+`isPurchaseAccessActive` (the same pure function `hasActivePurchase` uses, so
+`overlapping` chaining can't drift between the two), recurring plans via the
+`subscription` table matched by name. Two queries total, however many plans the
+user holds.
+
+It deliberately stops at listing. Combining several plans' `limits` into one
+answer (highest wins? add up? any-true?) depends entirely on what those limits
+mean, so that's left to the app.
+
+## Access policy: `lib/access-policy.ts`
+
+Every product decision about who has access lives in this one file as a named,
+documented constant, rather than inside the queries that read it:
+
+| Setting | Default | Change it to |
+| --- | --- | --- |
+| `SUBSCRIPTION_ACCESS_STATUSES` | `active`, `trialing` | add `past_due` for a grace period during Stripe's retries |
+| `PURCHASE_ACCESS_STATUSES` | `paid` | add `disputed` to keep access until a dispute is lost |
+| `PURCHASE_BLOCKING_STATUSES` | `paid`, `disputed` | what stops a non-repeatable plan being bought again |
+| `PARTIAL_REFUND_REVOKES_ACCESS` | `false` | `true` to end access on any refund |
+| `RETIRED_PLANS_KEEP_ACCESS` | `true` | `false` to end access when a plan is deactivated |
+| `CANCEL_ON_USER_DELETE` | cancel now, no proration | `prorate: true` to credit unused time |
+
+`SUBSCRIPTION_TERMINAL_STATUSES` sits alongside them but isn't a choice - it's
+Stripe's own list of statuses that never change again.
+
+## Retiring a plan
+
+Deactivating a plan (`PATCH /plans/:id { active: false }`) stops new purchases
+and keeps existing ones working:
+
+- **One-time:** `POST /checkout` already 404s an inactive plan. Existing
+  purchases keep their access per `RETIRED_PLANS_KEEP_ACCESS`.
+- **Recurring:** `getSubscriptionPlans` hands the stripe plugin *every*
+  recurring plan, retired ones included, and `blockRetiredPlanUpgrade`
+  (`lib/plan-retirement.ts`, wired as better-auth's `hooks.before`) refuses
+  `/subscription/upgrade` to a retired plan with the same
+  `SUBSCRIPTION_PLAN_NOT_FOUND` answer the plugin gives an unknown plan. The
+  plugin uses one plan list for two jobs - what can be subscribed to, and
+  which plan an existing subscription is on - and dropping a retired plan from
+  it broke the second: its subscribers came back from `/subscription/list`
+  with no `limits`, and for a multi-item subscription the plugin's
+  `customer.subscription.updated` handler stopped syncing the row at all. The
+  hook also blocks switching an existing subscription of a retired plan
+  between monthly and annual (same endpoint) - retiring means no new
+  commitments. Cancel, restore and the billing portal don't consult the plan
+  list and keep working either way.
+
+Changing a price for existing subscribers isn't covered: create a new plan,
+retire the old one, and existing subscribers stay on the old price until they
+change plan.
+
+## Deleting a user
+
+`cancelSubscriptionsForDeletedUser` (`lib/user-deletion.ts`) is wired to
+better-auth's `databaseHooks.user.delete.before`, which every deletion path
+goes through - the admin plugin's `removeUser` and the self-service
+`/delete-user` alike. Neither `@better-auth/stripe` nor anything else here
+cancelled a deleted user's subscriptions before this, so a deleted user kept
+being billed (the plugin only has a hook for deleting organizations, which
+this app doesn't use).
+
+It lists the customer's subscriptions from Stripe rather than reading the
+`subscription` table, so a subscription with a missing or stale row is still
+caught, and cancels every one not already in a terminal status, on
+`CANCEL_ON_USER_DELETE`'s terms. It fails closed: if a cancellation fails, it
+throws, better-auth aborts the deletion, and the user stays - never deleted
+while still billed. Retrying is safe, since already-cancelled subscriptions
+are skipped. The Stripe customer itself is kept, for the same reason `purchase`
+rows outlive their user: its payment history is still needed for refunds and
+disputes.
 
 ## Where `repeatable`, `durationDays` and `overlapping` come from
 
