@@ -364,21 +364,27 @@ flowchart TD
 
 ### `one_time`: `hasActivePurchase`
 
-Storage is always independent rows - each purchase's own `durationDays` is
-snapshotted at purchase time, never chained with any other purchase's - so
-`plan.overlapping` only changes how they're *read*: `overlapping: false`
-recomputes each purchase's end as `(chain-adjusted start) + its own
-durationDays`, rather than trusting its independently-computed `expiresAt`, so
-a later purchase bought before an earlier one lapses correctly extends access
-instead of shortening it. A row with no `durationDays` snapshot at all falls
-back to its own `expiresAt` instead of being treated as perpetual - that
-distinguishes a genuinely never-expiring purchase (`expiresAt` also `null`)
-from a pre-migration row that predates this column and was never backfilled.
+Fetches the user's purchases of the plan with an access-granting status
+(`PURCHASE_ACCESS_STATUSES`), then hands them to `isPurchaseAccessActive`
+(`lib/utils.ts`) - a pure function shared with `GET /access`'s
+`getActivePlans`, so the two can never read `overlapping` chaining
+differently. Storage is always independent rows - each purchase's own
+`durationDays` is snapshotted at purchase time, never chained with any other
+purchase's - so `plan.overlapping` only changes how they're *read*:
+`overlapping: false` recomputes each purchase's end as `(chain-adjusted
+start) + its own durationDays`, rather than trusting its
+independently-computed `expiresAt`, so a later purchase bought before an
+earlier one lapses correctly extends access instead of shortening it. A row
+with no `durationDays` snapshot at all falls back to its own `expiresAt`
+instead of being treated as perpetual - that distinguishes a genuinely
+never-expiring purchase (`expiresAt` also `null`) from a pre-migration row
+that predates this column and was never backfilled.
 
 ```mermaid
 flowchart TD
-    Start(["hasActivePurchase(userId, planId, plan.overlapping)"]) --> Fetch["SELECT paid purchases for (userId, planId)\nORDER BY createdAt ASC"]
-    Fetch --> Overlap{"plan.overlapping?"}
+    Start(["hasActivePurchase(userId, planId, plan.overlapping)"]) --> Fetch["SELECT access-granting purchases\nfor (userId, planId), ORDER BY createdAt ASC"]
+    Fetch --> IsPurchaseAccessActive["isPurchaseAccessActive(purchases, plan, now)"]
+    IsPurchaseAccessActive --> Overlap{"plan.overlapping?"}
 
     Overlap -- true --> AnyActive{"any purchase has\nexpiresAt IS NULL\nor expiresAt > now?"}
     AnyActive -- yes --> True1["true"]
