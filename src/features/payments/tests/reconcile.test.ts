@@ -202,6 +202,25 @@ describe("run", () => {
     expect(purchase?.userId).toBeNull();
   });
 
+  test("a $0 session (no_payment_required, no payment intent) is inserted like any other", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    fakeSessions = [
+      fakeSession({
+        id: "cs_free",
+        payment_status: "no_payment_required",
+        payment_intent: null,
+        metadata: { userId, planId: String(plan.id) },
+      }),
+    ];
+
+    expect(await run(7, false)).toEqual({ scanned: 1, inserted: 1, updated: 0, failed: 0 });
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase?.stripePaymentIntentId).toBeNull();
+    // and a second run leaves it alone
+    expect(await run(7, false)).toEqual({ scanned: 1, inserted: 0, updated: 0, failed: 0 });
+  });
+
   test("ignores subscription-mode and still-unpaid sessions", async () => {
     fakeSessions = [
       fakeSession({ id: "cs_sub", mode: "subscription" }),

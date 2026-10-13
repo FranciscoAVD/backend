@@ -284,6 +284,34 @@ describe("confirmCheckout", () => {
   });
 });
 
+describe("a $0 checkout (e.g. a 100% coupon)", () => {
+  test("completes as no_payment_required and is recorded with no payment intent", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+
+    await handleStripeEvent(
+      event(
+        "checkout.session.completed",
+        session({
+          id: "cs_free",
+          payment_status: "no_payment_required",
+          payment_intent: null,
+          amount_total: 0,
+          metadata: { userId, planId: String(plan.id) },
+        }),
+      ),
+    );
+
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase).toMatchObject({
+      stripeCheckoutSessionId: "cs_free",
+      stripePaymentIntentId: null,
+      amountTotal: 0,
+      status: "paid",
+    });
+  });
+});
+
 describe("handleStripeEvent", () => {
   test("ignores an event type outside ALLOWED_EVENTS", async () => {
     const userId = await seedUser();

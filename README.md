@@ -36,7 +36,7 @@ The webhook (`/api/auth/stripe/webhook` → `handleStripeEvent` in `lib/webhook.
 
 **Product decisions** — whether `past_due` keeps access, whether a partial refund or an open dispute ends it, whether a retired plan's holders keep it, and how a deleted user's subscriptions are cancelled — are named constants in `lib/access-policy.ts`, with the defaults and alternatives documented there and in `CONTROL_FLOW.md`. Change them there rather than in the queries that read them.
 
-**Adding Stripe params** (promo codes, tax, a different line-item quantity, ...) to the one-time checkout: implement `getCheckoutSessionParams` in `lib/checkout-extensions.ts` — a no-op by default, mirroring `@better-auth/stripe`'s own `subscription.getCheckoutSessionParams` option for the subscription flow. See that file and `CONTROL_FLOW.md` for exactly which fields always win over what it returns.
+**Adding Stripe params** (promo codes, tax, different line items, ...) to the one-time checkout: implement `getCheckoutSessionParams` in `lib/checkout-extensions.ts` — a no-op by default, mirroring `@better-auth/stripe`'s own `subscription.getCheckoutSessionParams` option for the subscription flow. See that file and `CONTROL_FLOW.md` for exactly which fields always win over what it returns, and note that changing `line_items` changes what's charged, not what's granted: one checkout is one purchase with one access window, whatever the quantity.
 
 **Running the reconciler on a schedule.** The `Dockerfile`'s `cron` stage is a separate image, built from the same source, whose only job is running `payments:reconcile` daily via busybox `crond` (see the `cron` stage's comments for why it runs as root, and why the crontab redirects to `/proc/1/fd/1-2`). Build and run it like:
 

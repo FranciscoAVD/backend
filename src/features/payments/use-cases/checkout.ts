@@ -55,7 +55,9 @@ export async function createCheckout(
     line_items: extraLineItems ?? [{ price: plan.stripePriceId, quantity: 1 }],
     client_reference_id: user.userId,
     metadata,
-    payment_intent_data: { ...extraPID, metadata },
+    // the payment intent carries the session's metadata plus any keys the extension set only on
+    // the intent; the core keys still win on both
+    payment_intent_data: { ...extraPID, metadata: { ...extraPID?.metadata, ...metadata } },
     success_url: `${env.CLIENT_URL}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${env.CLIENT_URL}/checkout/cancel`,
     expires_at: Math.floor(Date.now() / 1000) + PENDING_CHECKOUT_TTL_SEC,

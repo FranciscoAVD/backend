@@ -34,6 +34,19 @@ import {
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import { getPendingCheckout } from "@f/payments/lib/pending-checkout";
 
+// The session's metadata and the payment intent's, from the last Stripe call. Asserted
+// separately with toEqual, not through one toMatchObject on the whole call: Bun's toMatchObject
+// only compares an object the first time it meets it, so when the code passes the *same* object
+// as both, a wrong payment-intent half passes unchecked.
+type CreateCall = {
+  metadata: Record<string, string>;
+  payment_intent_data: { metadata: Record<string, string> } & Record<string, unknown>;
+};
+const lastMetadata = () => {
+  const call = sessionCreateCalls.at(-1) as CreateCall;
+  return { session: call.metadata, intent: call.payment_intent_data.metadata };
+};
+
 describe("createCheckout", () => {
   beforeEach(async () => {
     await resetDb();
@@ -77,10 +90,7 @@ describe("createCheckout", () => {
     );
 
     const metadata = { userId: "u1", planId: String(plan.id), durationDays: "30" };
-    expect(sessionCreateCalls[0]).toMatchObject({
-      metadata,
-      payment_intent_data: { metadata },
-    });
+    expect(lastMetadata()).toEqual({ session: metadata, intent: metadata });
   });
 
   test("snapshots a never-expiring plan as an explicit marker, not a missing key", async () => {
@@ -105,7 +115,7 @@ describe("createCheckout", () => {
     });
   });
 
-  test("a line_items override replaces the default quantity", async () => {
+  test("a line_items override replaces the default line item", async () => {
     extensionParams = { line_items: [{ price: "price_other", quantity: 3 }] };
     const plan = await seedPlan({ stripePriceId: "price_abc" });
 
@@ -131,7 +141,31 @@ describe("createCheckout", () => {
       planId: String(plan.id),
       durationDays: "30",
     };
-    expect(sessionCreateCalls[0]).toMatchObject({ metadata, payment_intent_data: { metadata } });
+    expect(lastMetadata()).toEqual({ session: metadata, intent: metadata });
+  });
+
+  test("keys set only on payment_intent_data.metadata reach the payment intent, alongside the session's", async () => {
+    extensionParams = {
+      metadata: { campaign: "spring-sale" },
+      payment_intent_data: {
+        metadata: { ledgerRef: "L-42", userId: "someone-else" },
+        statement_descriptor_suffix: "SPRING",
+      },
+    };
+    const plan = await seedPlan({ durationDays: 30 });
+
+    await createCheckout({ userId: "u1", stripeCustomerId: "cus_abc" }, plan);
+
+    const core = { userId: "u1", planId: String(plan.id), durationDays: "30" };
+    expect(lastMetadata()).toEqual({
+      // the intent-only key stays off the session itself
+      session: { campaign: "spring-sale", ...core },
+      intent: { ledgerRef: "L-42", campaign: "spring-sale", ...core },
+    });
+    // other payment_intent_data params pass through
+    expect((sessionCreateCalls[0] as CreateCall).payment_intent_data.statement_descriptor_suffix).toBe(
+      "SPRING",
+    );
   });
 
   test("the extension can't override mode, customer or expires_at", async () => {

@@ -74,8 +74,12 @@ second customer (though it doesn't fully dedupe two truly simultaneous requests
 `createCheckout` calls `getCheckoutSessionParams({ user, plan })` before
 building the Stripe request - an extension point for promo codes
 (`discounts`/`allow_promotion_codes`), tax (`automatic_tax`/`tax_id_collection`),
-a different `line_items` quantity, or anything else
-`stripe.checkout.sessions.create` accepts that this app doesn't set itself.
+different `line_items`, or most other params
+`stripe.checkout.sessions.create` accepts that this app doesn't set itself. A
+few conflict with what this flow always sets and make Stripe reject the
+session: `customer_email`/`customer_creation` (this flow always passes
+`customer`) and `ui_mode: "embedded"` (which takes `return_url`, not
+`success_url`/`cancel_url`).
 Mirrors `@better-auth/stripe`'s own `subscription.getCheckoutSessionParams`
 option for the subscription flow (verified in
 `node_modules/@better-auth/stripe/dist/index.mjs`) - same idea, for this
@@ -92,12 +96,17 @@ Stripe still accepts the session but Redis has already forgotten it). The
 `userId`/`planId`/`durationDays` keys of `metadata` and
 `payment_intent_data.metadata` also always win (merged rather than replaced
 wholesale, so an app can still tag a session with its own additional keys
-alongside them) - `confirmCheckout` and the reconciler depend on those three
-to resolve a session back to a purchase at all. `line_items` is
+alongside them; the payment intent gets the session's `metadata` plus any
+keys set only on `payment_intent_data.metadata`) - `confirmCheckout` and the
+reconciler depend on those three to resolve a session back to a purchase at
+all. `line_items` is
 deliberately **not** protected, unlike the subscription plugin (which has
 its own seat/multi-item logic to guard) - a returned `line_items` fully
-replaces the `[{ price, quantity: 1 }]` default, since nothing else here
-depends on it. That's the mechanism for a different quantity.
+replaces the `[{ price, quantity: 1 }]` default, e.g. to charge a different
+price or add items. It doesn't change what's granted: one completed checkout
+is one purchase of the plan with one access window, whatever the quantity. A
+"3 months" sale as quantity 3 of a 30-day plan would charge 3x and grant 30
+days - use a 90-day plan, or a repeatable plan bought three times.
 
 `GET /checkout/:sessionId` (`getCheckoutStatus`) answers the client's polling: it
 reads the `purchase` row if one exists yet (`paid`/`refunded`/`disputed`), otherwise
@@ -628,11 +637,15 @@ Two unrelated things both get called "trial" here - don't confuse them:
   by checking the user's subscription history before creating another. None
   of this feature's code is involved.
 
-A genuinely *free*, one-time (non-subscription) trial isn't supported and
-doesn't need to be: `insertPlanSchema` requires `amount` to be positive, and
-Stripe Checkout in `payment` mode can't settle a $0 total without a coupon -
-every realistic "free trial" need is the subscription-trial shape above,
-which better-auth already owns end-to-end.
+A genuinely *free*, one-time (non-subscription) plan can't be created
+directly - `insertPlanSchema` requires `amount` to be positive. A $0 checkout
+is still possible through `getCheckoutSessionParams`, by applying a 100%
+coupon (`discounts`), and the flow handles it: the session completes with
+`payment_status: "no_payment_required"` and no payment intent, the webhook
+records the purchase (`amountTotal: 0`, `stripePaymentIntentId: null`), and
+the reconciler treats it like any other completed session. For a free *trial*
+specifically, though, the subscription-trial shape above is usually the right
+fit, and better-auth already owns it end-to-end.
 
 ## Known noise / tech debt (not fixed here)
 
