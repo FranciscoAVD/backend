@@ -311,6 +311,14 @@ plan's lifecycle is governed by its Stripe subscription period instead, and
 | `durationDays` | days of access one purchase grants from its own `createdAt`; `null` = never expires | `addPurchase`, which snapshots it onto `purchase.durationDays` and derives `purchase.expiresAt` from it |
 | `overlapping` | when a user has multiple paid purchases of the plan, can their access windows run concurrently (`true`) or must a later one chain on after an earlier one expires (`false`) | `hasActivePurchase` |
 
+All three (plus `limits`, `active`, `trialDays`) are editable via `PATCH /plans/:id` -
+pricing/identity fields (`name`, `type`, `amount`, `interval`, the Stripe ids) aren't,
+since they're either baked into an already-created Stripe Price or relied on as a
+lookup key elsewhere (`name`, by `getSubscriptionPlans`). An edit to `durationDays`
+only affects purchases made *after* it - `addPurchase` snapshots the plan's
+`durationDays` onto the purchase row at purchase time, so it never rewrites history
+for purchases already made.
+
 ## Known noise / tech debt (not fixed here)
 
 - **Spurious plugin log on every one-time purchase** - see "Stripe webhook

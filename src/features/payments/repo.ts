@@ -5,6 +5,7 @@ import {
   getPlans,
   getSubscriptionPlans,
 } from "@f/payments/use-cases/get-plans";
+import { updatePlan } from "@f/payments/use-cases/update-plan";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import {
   getAllPurchases,
@@ -37,6 +38,7 @@ export const paymentsRepo = {
     getByName: getPlanByName,
     getAll: getPlans,
     getSubscriptions: getSubscriptionPlans,
+    update: updatePlan,
   },
   purchase: {
     add: addPurchase,
