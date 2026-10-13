@@ -146,6 +146,38 @@ describe("auth gating", () => {
   });
 });
 
+describe("GET /plans", () => {
+  beforeEach(async () => {
+    await resetDb();
+    await resetRedis();
+  });
+
+  test("returns only active plans with just read:active", async () => {
+    const userId = await seedUser();
+    await seedPlan({ active: true });
+    await seedPlan({ active: false });
+    setSession({ id: userId, ...regularUser }, { plan: ["read:active"] });
+
+    const res = await app.request("/plans");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { active: boolean }[] };
+    expect(body.data.every((plan) => plan.active)).toBe(true);
+    expect(body.data).toHaveLength(1);
+  });
+
+  test("returns active and inactive plans with read:all too", async () => {
+    const userId = await seedUser();
+    await seedPlan({ active: true });
+    await seedPlan({ active: false });
+    setSession({ id: userId, ...admin }, { plan: ["read:active", "read:all"] });
+
+    const res = await app.request("/plans");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { active: boolean }[] };
+    expect(body.data).toHaveLength(2);
+  });
+});
+
 describe("GET /plans/:id", () => {
   beforeEach(async () => {
     await resetDb();

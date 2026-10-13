@@ -3,6 +3,8 @@ import {
   getPlan,
   getPlanByName,
   getPlans,
+  getAllPlansIncludingInactive,
+  getPlanByPriceId,
   getSubscriptionPlans,
 } from "@f/payments/use-cases/get-plans";
 import { updatePlan } from "@f/payments/use-cases/update-plan";
@@ -46,6 +48,8 @@ export const paymentsRepo = {
     get: getPlan,
     getByName: getPlanByName,
     getAll: getPlans,
+    getAllIncludingInactive: getAllPlansIncludingInactive,
+    getByPriceId: getPlanByPriceId,
     getSubscriptions: getSubscriptionPlans,
     update: updatePlan,
   },

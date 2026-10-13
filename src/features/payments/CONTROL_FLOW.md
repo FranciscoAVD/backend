@@ -262,22 +262,46 @@ subscriptions have no creation-time window to scan (a status can change long
 after creation, unlike a Checkout Session's short confirmation window), so
 instead of `days`, it scopes by status: `getReconcilableSubscriptions` skips
 any row already `canceled` or `incomplete_expired`, since Stripe guarantees
-neither ever changes again. Call volume scales with *currently live-ish
-subscriber count*, re-checked once per scheduled run (daily, via the `cron`
-image) - not with webhook traffic.
+neither ever changes again.
 
-For each remaining row, `reconcileSubscription` does one
-`stripe.subscriptions.retrieve()`, diffs the result against the stored row,
-and - unless it's a dry run - corrects it via `updateSubscriptionFields`.
-Only the same mutable fields `@better-auth/stripe`'s own webhook handlers
-write get touched (`status`, `periodStart`, `periodEnd`, `trialStart`,
-`trialEnd`, `cancelAtPeriodEnd`, `cancelAt`, `canceledAt`, `endedAt`) -
-`plan`, `referenceId`, `stripeCustomerId` and `stripeSubscriptionId` itself
-are identity fields the plugin sets once at creation; they aren't what
-staleness puts at risk, and this reconciler has no business rewriting them.
-`periodStart`/`periodEnd` are read from `sub.items.data[0]`, not the
-subscription object's own top-level fields, matching exactly where the
-plugin itself reads them from (Stripe moved period fields to the item level).
+`runSubscriptions` bulk-lists every subscription from Stripe
+(`stripe.subscriptions.list()`, auto-paginated, no status filter) in one
+pass, rather than retrieving each reconcilable row one by one - call volume
+scales with *total subscriptions on the account divided by 100*, not with
+how many rows need checking, which stays comfortably within rate-limit
+budget even as subscriber count grows. Each listed subscription is matched
+back to a reconcilable row by `stripeSubscriptionId`; unmatched rows are
+handled after the loop (see below).
+
+For each matched row, `reconcileSubscription` diffs the listed subscription
+against the stored row and - unless it's a dry run - corrects it via
+`updateSubscriptionFields`. The same mutable fields `@better-auth/stripe`'s
+own webhook handlers write get touched: `status`, `periodStart`,
+`periodEnd`, `trialStart`, `trialEnd`, `cancelAtPeriodEnd`, `cancelAt`,
+`canceledAt`, `endedAt`, and - **not** an identity field, despite an earlier
+version of this doc claiming otherwise - `plan`. The plugin re-resolves
+`plan` from the subscription's current price on every
+`customer.subscription.updated` (`resolvePlanItem` in its source), so a lost
+or out-of-order webhook for a plan *change* (Basic -> Pro) is exactly the
+kind of staleness this reconciler exists to catch; `getPlanByPriceId`
+mirrors that same price-matching lookup
+(`stripePriceId`/`annualDiscountPriceId`), and `plan` is only corrected when
+a configured plan actually matches the current price - left untouched
+otherwise, mirroring the plugin's own "no match -> no update" behavior,
+rather than guessing or nulling it out. `referenceId`, `stripeCustomerId`
+and `stripeSubscriptionId` itself remain the only genuine identity fields,
+set once at creation and never rewritten here. `periodStart`/`periodEnd` are
+read from `sub.items.data[0]`, not the subscription object's own top-level
+fields, matching exactly where the plugin itself reads them from (Stripe
+moved period fields to the item level) - same simplification applies to the
+price lookup (first item only), which only matters for multi-item/seat
+subscriptions this app doesn't use.
+
+A reconcilable row never matched against the list - a wrong or orphaned
+`stripeSubscriptionId`, not a normal occurrence - is counted as `failed`
+under its own message (`payments.reconcile.subscription_not_found`), the
+same visibility a failed per-row lookup would have given; switching to
+bulk-listing must not make a genuinely broken row go silently unnoticed.
 
 Not covered: a subscription that exists in Stripe but has no row at all.
 Unlike one-time purchases (which only ever exist once an async webhook

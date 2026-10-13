@@ -58,7 +58,23 @@ const app = new Hono<PinoLoggerEnv>()
     requirePermissionMiddleware({ plan: ["read:active"] }),
     async (c) => {
       const { user } = c.get("session");
-      const [res, error] = await tryCatch(paymentsRepo.plan.getAll());
+
+      // read:all additionally includes inactive plans - same inline check as GET /plans/:id,
+      // since it's a second, optional permission layered on top of read:active, not a reason to
+      // gate the whole route (that would also block active-plan listing for non-admins)
+      let includeInactive = false;
+      await requirePermissionMiddleware({ plan: ["read:all"] })(
+        c as unknown as Parameters<ReturnType<typeof requirePermissionMiddleware>>[0],
+        async () => {
+          includeInactive = true;
+        },
+      );
+
+      const [res, error] = await tryCatch(
+        includeInactive
+          ? paymentsRepo.plan.getAllIncludingInactive()
+          : paymentsRepo.plan.getAll(),
+      );
       if (error) {
         c.var.logger.error({ err: error, user: user.id }, "payments.plan.getAll");
         return c.json(

@@ -151,6 +151,7 @@ function subscriptionFieldsDiffer(
   return (
     stored.status !== target.status ||
     stored.cancelAtPeriodEnd !== target.cancelAtPeriodEnd ||
+    (target.plan != null && stored.plan !== target.plan) ||
     !sameInstant(stored.periodStart, target.periodStart ?? null) ||
     !sameInstant(stored.periodEnd, target.periodEnd ?? null) ||
     !sameInstant(stored.trialStart, target.trialStart ?? null) ||
@@ -162,41 +163,52 @@ function subscriptionFieldsDiffer(
 }
 
 /**
- * @description Re-checks one subscription row against Stripe's current state, correcting it if
- * anything differs - the backstop for an out-of-order or retried webhook event that overwrote a
- * newer status. Never touches identity fields (plan, referenceId, stripeCustomerId,
- * stripeSubscriptionId itself) - only what `updateSubscriptionFields` accepts. Operation must be
- * wrapped in try-catch
+ * @description Re-checks one subscription row against an already-fetched Stripe subscription,
+ * correcting it if anything differs - the backstop for an out-of-order or retried webhook event
+ * that overwrote a newer status. Also re-resolves `plan` from the subscription's current price
+ * (`getPlanByPriceId`), the same way `@better-auth/stripe`'s own `resolvePlanItem` does - `plan`
+ * isn't an identity field, the plugin rewrites it on every `customer.subscription.updated` too, so
+ * a lost plan-change webhook (e.g. Basic -> Pro) is exactly the kind of staleness this guards
+ * against. Left untouched if no configured plan currently prices at that ID, rather than guessing
+ * or nulling it out - mirrors the plugin's own "no match -> no plan update" behavior. Never
+ * touches `referenceId`/`stripeCustomerId`/`stripeSubscriptionId` itself - those are the only
+ * genuine identity fields here. Operation must be wrapped in try-catch
  */
 export async function reconcileSubscription(
   row: Subscription,
+  current: Stripe.Subscription,
   dryRun: boolean,
 ): Promise<{ updated: boolean }> {
-  if (!row.stripeSubscriptionId) return { updated: false };
-
-  const current = await getPaymentProcessor().subscriptions.retrieve(row.stripeSubscriptionId);
   const target = subscriptionFieldsFromStripe(current);
+
+  const priceId = current.items.data[0]?.price.id;
+  if (priceId) {
+    const plan = await paymentsRepo.plan.getByPriceId(priceId);
+    if (plan) target.plan = plan.name.toLowerCase();
+  }
 
   if (!subscriptionFieldsDiffer(row, target)) return { updated: false };
 
   logger.info(
-    { subscription: row.stripeSubscriptionId, from: row, to: target, dryRun },
+    { subscription: current.id, from: row, to: target, dryRun },
     "payments.reconcile.subscription_update",
   );
   if (!dryRun)
-    await paymentsRepo.subscription.updateFields(
-      { stripeSubscriptionId: row.stripeSubscriptionId },
-      target,
-    );
+    await paymentsRepo.subscription.updateFields({ stripeSubscriptionId: current.id }, target);
   return { updated: true };
 }
 
 /**
- * @description Second, independent reconciler pass: corrects subscription rows whose status has
- * drifted from Stripe's own, one `subscriptions.retrieve` per row - scoped to rows not already in
- * a terminal state (`getReconcilableSubscriptions`), so call volume is bounded by currently
- * live-ish subscriber count re-checked once per scheduled run, not by webhook traffic the way a
- * per-event Stripe call would be.
+ * @description Second, independent reconciler pass: corrects subscription rows whose status,
+ * period or plan has drifted from Stripe's own. Bulk-lists every subscription from Stripe
+ * (`subscriptions.list`, paginated) rather than retrieving one by one - call volume scales with
+ * total subscriptions divided by 100, not with how many rows need checking, which stays
+ * rate-limit-safe even as subscriber count grows. Only acts on rows not already in a terminal
+ * state (`getReconcilableSubscriptions` - Stripe guarantees those never change again), matched
+ * against the list by `stripeSubscriptionId`. A reconcilable row never found in the list - a
+ * wrong/orphaned Stripe subscription ID, not a normal occurrence - is counted as `failed` rather
+ * than silently skipped, so a genuinely broken row stays as visible as it would be with a direct
+ * per-row lookup.
  */
 export async function runSubscriptions(
   dryRun: boolean,
@@ -204,20 +216,37 @@ export async function runSubscriptions(
   const summary: SubscriptionReconcileSummary = { checked: 0, updated: 0, failed: 0 };
   const rows = await paymentsRepo.subscription.getReconcilable();
 
+  const byStripeId = new Map<string, Subscription>();
   for (const row of rows) {
-    if (!row.stripeSubscriptionId) continue;
+    if (row.stripeSubscriptionId) byStripeId.set(row.stripeSubscriptionId, row);
+  }
+
+  const matched = new Set<string>();
+  const subscriptions = getPaymentProcessor().subscriptions.list({ limit: 100 });
+  for await (const current of subscriptions) {
+    const row = byStripeId.get(current.id);
+    if (!row) continue;
+    matched.add(current.id);
 
     summary.checked++;
-    const [result, error] = await tryCatch(reconcileSubscription(row, dryRun));
+    const [result, error] = await tryCatch(reconcileSubscription(row, current, dryRun));
     if (error) {
       summary.failed++;
-      logger.error(
-        { err: error, subscription: row.stripeSubscriptionId },
-        "payments.reconcile.subscription",
-      );
+      logger.error({ err: error, subscription: current.id }, "payments.reconcile.subscription");
       continue;
     }
     if (result.updated) summary.updated++;
   }
+
+  for (const stripeSubscriptionId of byStripeId.keys()) {
+    if (matched.has(stripeSubscriptionId)) continue;
+    summary.checked++;
+    summary.failed++;
+    logger.error(
+      { subscription: stripeSubscriptionId },
+      "payments.reconcile.subscription_not_found",
+    );
+  }
+
   return summary;
 }

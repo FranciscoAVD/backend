@@ -2,7 +2,7 @@ import { db } from "@d/connection";
 import { plan as planTable } from "@d/schemas/payment-schema";
 import type { Payment } from "@f/payments/lib/types";
 import type { StripePlan } from "@better-auth/stripe";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, or, sql } from "drizzle-orm";
 
 /**
  * @description Select query for all active plans. Operation must be wrapped in try-catch
@@ -14,6 +14,15 @@ export async function getPlans(): Promise<Payment.Plan[]> {
     .from(planTable)
     .where(eq(planTable.active, true));
   return res;
+}
+
+/**
+ * @description Select query for every plan regardless of `active` - admin-only
+ * (`plan:read:all`) at the route layer; this function itself has no notion of permissions.
+ * @returns Array of Plans.
+ */
+export async function getAllPlansIncludingInactive(): Promise<Payment.Plan[]> {
+  return db.select().from(planTable);
 }
 
 /**
@@ -41,6 +50,30 @@ export async function getPlanByName(
     .select()
     .from(planTable)
     .where(sql`lower(${planTable.name}) = lower(${plan.name})`);
+  return res[0] ?? null;
+}
+
+/**
+ * @description Select query for the recurring plan whose current price matches the given Stripe
+ * price ID - mirrors `@better-auth/stripe`'s own `resolvePlanItem`, which matches a subscription's
+ * current price against `priceId`/`annualDiscountPriceId` the same way, so a subscription's plan
+ * can be re-derived the same way the plugin itself would. Assumes validation. Operation must be
+ * wrapped in try-catch
+ * @param priceId the Stripe price ID to match, from a subscription's current item
+ * @returns Plan object or null. If null, no configured plan currently prices at that ID.
+ */
+export async function getPlanByPriceId(
+  priceId: string,
+): Promise<Payment.Plan | null> {
+  const res = await db
+    .select()
+    .from(planTable)
+    .where(
+      or(
+        eq(planTable.stripePriceId, priceId),
+        eq(planTable.annualDiscountPriceId, priceId),
+      ),
+    );
   return res[0] ?? null;
 }
 

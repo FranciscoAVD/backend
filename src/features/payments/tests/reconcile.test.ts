@@ -7,8 +7,7 @@ import { resetDb, seedUser, seedPlan, seedSubscription } from "@/test-helpers/db
 import { resetRedis } from "@/test-helpers/redis";
 
 let fakeSessions: Partial<Stripe.Checkout.Session>[] = [];
-let fakeSubscriptionsById: Record<string, Partial<Stripe.Subscription>> = {};
-let subscriptionRetrieveCalls: string[] = [];
+let fakeSubscriptions: Partial<Stripe.Subscription>[] = [];
 
 // no free local "real Stripe" to run against — the SDK surface run()/reconcile() actually call
 // is faked here via bun:test's mock.module
@@ -16,14 +15,7 @@ mock.module("@f/payments/payment", () => ({
   getPaymentProcessor: () => ({
     checkout: { sessions: { list: () => fakeSessions } },
     disputes: { list: async () => ({ data: [] }) },
-    subscriptions: {
-      retrieve: async (id: string) => {
-        subscriptionRetrieveCalls.push(id);
-        const sub = fakeSubscriptionsById[id];
-        if (!sub) throw new Error(`no fake subscription for ${id}`);
-        return sub;
-      },
-    },
+    subscriptions: { list: () => fakeSubscriptions },
   }),
 }));
 
@@ -31,12 +23,9 @@ import { run, runSubscriptions } from "@f/payments/lib/reconcile";
 import { getAllPurchases } from "@f/payments/use-cases/get-purchases";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 
-const fakeSubscription = (
-  overrides: Partial<Stripe.Subscription> & {
-    items?: { data: [{ current_period_start: number; current_period_end: number }] };
-  } = {},
-): Stripe.Subscription =>
+const fakeSubscription = (overrides: Record<string, unknown> = {}): Stripe.Subscription =>
   ({
+    id: "sub_1",
     status: "active",
     trial_start: null,
     trial_end: null,
@@ -44,7 +33,7 @@ const fakeSubscription = (
     cancel_at: null,
     canceled_at: null,
     ended_at: null,
-    items: { data: [{ current_period_start: 0, current_period_end: 0 }] },
+    items: { data: [{ current_period_start: 0, current_period_end: 0, price: { id: "price_default" } }] },
     ...overrides,
   }) as unknown as Stripe.Subscription;
 
@@ -65,8 +54,7 @@ beforeEach(async () => {
   await resetDb();
   await resetRedis();
   fakeSessions = [];
-  fakeSubscriptionsById = {};
-  subscriptionRetrieveCalls = [];
+  fakeSubscriptions = [];
 });
 
 describe("run", () => {
@@ -184,15 +172,18 @@ describe("runSubscriptions", () => {
     const userId = await seedUser();
     await seedSubscription({
       referenceId: userId,
-      plan: "Pro",
+      plan: "pro",
       stripeSubscriptionId: "sub_1",
       status: "active",
     });
     const canceledAt = new Date("2026-01-01T00:00:00Z");
-    fakeSubscriptionsById["sub_1"] = fakeSubscription({
-      status: "canceled",
-      canceled_at: Math.floor(canceledAt.getTime() / 1000),
-    });
+    fakeSubscriptions = [
+      fakeSubscription({
+        id: "sub_1",
+        status: "canceled",
+        canceled_at: Math.floor(canceledAt.getTime() / 1000),
+      }),
+    ];
 
     const summary = await runSubscriptions(false);
 
@@ -211,44 +202,52 @@ describe("runSubscriptions", () => {
     // specifically about an exact match producing no update, not about period values
     await seedSubscription({
       referenceId: userId,
-      plan: "Pro",
+      plan: "pro",
       stripeSubscriptionId: "sub_1",
       status: "active",
       cancelAtPeriodEnd: false,
       periodStart: new Date(0),
       periodEnd: new Date(0),
     });
-    fakeSubscriptionsById["sub_1"] = fakeSubscription({ status: "active" });
+    fakeSubscriptions = [fakeSubscription({ id: "sub_1", status: "active" })];
 
     const summary = await runSubscriptions(false);
 
     expect(summary).toEqual({ checked: 1, updated: 0, failed: 0 });
   });
 
-  test("never calls Stripe for a row already in a terminal status", async () => {
+  test("never acts on a row already in a terminal status, even if the list disagrees", async () => {
     const userId = await seedUser();
     await seedSubscription({
       referenceId: userId,
-      plan: "Pro",
+      plan: "pro",
       stripeSubscriptionId: "sub_canceled",
       status: "canceled",
     });
+    // Stripe claims active, contradicting the stored terminal status - still ignored, since
+    // Stripe itself guarantees canceled/incomplete_expired never change back
+    fakeSubscriptions = [fakeSubscription({ id: "sub_canceled", status: "active" })];
 
     const summary = await runSubscriptions(false);
 
     expect(summary).toEqual({ checked: 0, updated: 0, failed: 0 });
-    expect(subscriptionRetrieveCalls).toEqual([]);
+    const [row] = await db
+      .select()
+      .from(subscriptionTable)
+      .where(eq(subscriptionTable.stripeSubscriptionId, "sub_canceled"));
+    expect(row?.status).toBe("canceled");
   });
 
-  test("a retrieve failure counts as failed, not updated", async () => {
+  test("a reconcilable row missing from the list counts as failed, not silently skipped", async () => {
     const userId = await seedUser();
     await seedSubscription({
       referenceId: userId,
-      plan: "Pro",
+      plan: "pro",
       stripeSubscriptionId: "sub_missing",
       status: "active",
     });
-    // no fakeSubscriptionsById entry - the fake throws, mirroring a real Stripe error
+    // fakeSubscriptions stays empty - Stripe's list never returns this one, e.g. a wrong/
+    // orphaned stripeSubscriptionId
 
     const summary = await runSubscriptions(false);
 
@@ -259,11 +258,11 @@ describe("runSubscriptions", () => {
     const userId = await seedUser();
     await seedSubscription({
       referenceId: userId,
-      plan: "Pro",
+      plan: "pro",
       stripeSubscriptionId: "sub_1",
       status: "active",
     });
-    fakeSubscriptionsById["sub_1"] = fakeSubscription({ status: "canceled" });
+    fakeSubscriptions = [fakeSubscription({ id: "sub_1", status: "canceled" })];
 
     const summary = await runSubscriptions(true);
 
@@ -273,5 +272,110 @@ describe("runSubscriptions", () => {
       .from(subscriptionTable)
       .where(eq(subscriptionTable.stripeSubscriptionId, "sub_1"));
     expect(row?.status).toBe("active");
+  });
+
+  test("corrects plan when it disagrees with the subscription's current price", async () => {
+    const userId = await seedUser();
+    await seedPlan({
+      type: "recurring",
+      interval: "month",
+      name: "Basic",
+      stripePriceId: "price_basic",
+    });
+    await seedPlan({
+      type: "recurring",
+      interval: "month",
+      name: "Pro",
+      stripePriceId: "price_pro",
+    });
+    await seedSubscription({
+      referenceId: userId,
+      plan: "basic",
+      stripeSubscriptionId: "sub_1",
+      status: "active",
+      periodStart: new Date(0),
+      periodEnd: new Date(0),
+    });
+    fakeSubscriptions = [
+      fakeSubscription({
+        id: "sub_1",
+        status: "active",
+        items: { data: [{ current_period_start: 0, current_period_end: 0, price: { id: "price_pro" } }] },
+      }),
+    ];
+
+    const summary = await runSubscriptions(false);
+
+    expect(summary).toEqual({ checked: 1, updated: 1, failed: 0 });
+    const [row] = await db
+      .select()
+      .from(subscriptionTable)
+      .where(eq(subscriptionTable.stripeSubscriptionId, "sub_1"));
+    expect(row?.plan).toBe("pro");
+  });
+
+  test("a plan-only mismatch still counts as updated even when status/dates match", async () => {
+    const userId = await seedUser();
+    await seedPlan({
+      type: "recurring",
+      interval: "month",
+      name: "Pro",
+      stripePriceId: "price_pro",
+    });
+    await seedSubscription({
+      referenceId: userId,
+      plan: "basic", // no "Basic" plan seeded - only plan disagrees, nothing else
+      stripeSubscriptionId: "sub_1",
+      status: "active",
+      cancelAtPeriodEnd: false,
+      periodStart: new Date(0),
+      periodEnd: new Date(0),
+    });
+    fakeSubscriptions = [
+      fakeSubscription({
+        id: "sub_1",
+        status: "active",
+        items: { data: [{ current_period_start: 0, current_period_end: 0, price: { id: "price_pro" } }] },
+      }),
+    ];
+
+    const summary = await runSubscriptions(false);
+
+    expect(summary).toEqual({ checked: 1, updated: 1, failed: 0 });
+    const [row] = await db
+      .select()
+      .from(subscriptionTable)
+      .where(eq(subscriptionTable.stripeSubscriptionId, "sub_1"));
+    expect(row?.plan).toBe("pro");
+  });
+
+  test("leaves plan untouched when no configured plan matches the current price", async () => {
+    const userId = await seedUser();
+    await seedSubscription({
+      referenceId: userId,
+      plan: "basic",
+      stripeSubscriptionId: "sub_1",
+      status: "active",
+      cancelAtPeriodEnd: false,
+      periodStart: new Date(0),
+      periodEnd: new Date(0),
+    });
+    fakeSubscriptions = [
+      fakeSubscription({
+        id: "sub_1",
+        status: "active",
+        items: { data: [{ current_period_start: 0, current_period_end: 0, price: { id: "price_unknown" } }] },
+      }),
+    ];
+
+    const summary = await runSubscriptions(false);
+
+    // nothing else differs, and plan can't be confidently resolved - no update at all
+    expect(summary).toEqual({ checked: 1, updated: 0, failed: 0 });
+    const [row] = await db
+      .select()
+      .from(subscriptionTable)
+      .where(eq(subscriptionTable.stripeSubscriptionId, "sub_1"));
+    expect(row?.plan).toBe("basic");
   });
 });

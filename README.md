@@ -20,7 +20,7 @@ A `plan` is `recurring` (a subscription managed by better-auth's stripe plugin) 
 
 | | Route | Who | Notes |
 | --- | --- | --- | --- |
-| GET | `/plans` | `plan:read:active` | active plans only |
+| GET | `/plans` | `plan:read:active`, `plan:read:all` for inactive ones too | active plans only, unless the caller also has `read:all` |
 | GET | `/plans/:id` | `plan:read:active`, or `plan:read:all` for an inactive one | 404s an inactive plan for anyone without `read:all` - not 403, so its existence isn't revealed |
 | GET | `/plans/:id/access` | caller | whether the caller currently has active access — a `purchase` row for one-time plans, an active/trialing `subscription` row for recurring ones |
 | POST | `/plans` | admin (`plan:create`) | creates the Stripe product + price(s), then the DB row |
