@@ -24,3 +24,25 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # the `bun` user is built into the official image
 USER bun
 ENTRYPOINT ["bun", "run", "start"]
+
+# A second image from the same build, for a separate deployment that just runs
+# payments:reconcile on a schedule - a backstop for Stripe webhooks that never
+# arrived (see payments/CONTROL_FLOW.md's "The reconciler" section). Build with
+# `docker build --target cron -t <name> .`; run it with the same env vars
+# (DB_URL/REDIS_URL/STRIPE_SECRET_KEY/...) as the main app, pointed at production.
+FROM release AS cron
+
+# busybox crond manages crontabs per-user from /etc/crontabs/<user> and must run
+# as root to do so - this image's only job is this one scheduled command, so the
+# extra privilege inside this single-purpose container is an accepted tradeoff
+USER root
+
+COPY docker/reconcile-cron.sh /app/reconcile-cron.sh
+RUN chmod +x /app/reconcile-cron.sh \
+  # daily at 03:00 - the reconciler's own 14-day scan window easily tolerates a
+  # missed run or two, so there's no need to run more often than that; redirecting
+  # to /proc/1/fd/1-2 is what makes the job's output show up in `docker logs`,
+  # since crond itself logs to syslog/stderr, not stdout, by default
+  && echo "0 3 * * * /app/reconcile-cron.sh >> /proc/1/fd/1 2>> /proc/1/fd/2" > /etc/crontabs/root
+
+ENTRYPOINT ["crond", "-f", "-l", "2"]

@@ -32,6 +32,15 @@ A `plan` is `recurring` (a subscription managed by better-auth's stripe plugin) 
 
 The webhook (`/api/auth/stripe/webhook` → `handleStripeEvent` in `lib/webhook.ts`) writes and syncs `purchase` rows; `bun run payments:reconcile [--days 14] [--dry-run]` backfills anything a missed webhook left behind. See `CONTROL_FLOW.md` for the full request/webhook/reconciler control flow, including the `plan.repeatable`/`durationDays`/`overlapping` races and the `payment_audit_log` trail they write to.
 
+**Running the reconciler on a schedule.** The `Dockerfile`'s `cron` stage is a separate image, built from the same source, whose only job is running `payments:reconcile` daily via busybox `crond` (see the `cron` stage's comments for why it runs as root, and why the crontab redirects to `/proc/1/fd/1-2`). Build and run it like:
+
+```sh
+docker build --target cron -t backend-reconcile-cron .
+docker run -d --restart unless-stopped --env-file .env backend-reconcile-cron
+```
+
+Give it the same env vars as the main app (`DB_URL`/`DB_*`, `REDIS_URL`, `STRIPE_SECRET_KEY`, ...), pointed at production - not the main app's own container or the `postgres`/`redis` services in `compose.yaml`, which are local-dev-only. To change the schedule, edit the `0 3 * * *` line in the Dockerfile and rebuild - there's no env var for it.
+
 **Only need one of the two flows?**
 - *Drop subscriptions:* remove (or `enabled: false`) `auth.ts`'s `subscription` option — the only thing gating it. Don't create `recurring` plans.
 - *Drop one-time purchases:* delete the following, and don't create `one_time` plans.
