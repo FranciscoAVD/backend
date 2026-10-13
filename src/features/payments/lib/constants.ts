@@ -17,3 +17,7 @@ export const CHECKOUT_SESSION_ID_PREFIX = "cs_";
 /** GET /audit-log page size when none is asked for, and the most it allows. */
 export const AUDIT_LOG_DEFAULT_LIMIT = 50;
 export const AUDIT_LOG_MAX_LIMIT = 100;
+
+/** GET /purchases/all page size when none is asked for, and the most it allows. */
+export const PURCHASES_DEFAULT_LIMIT = 50;
+export const PURCHASES_MAX_LIMIT = 100;

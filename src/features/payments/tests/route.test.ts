@@ -224,6 +224,98 @@ describe("GET /audit-log", () => {
   );
 });
 
+describe("GET /purchases/all", () => {
+  beforeEach(async () => {
+    await resetDb();
+    await resetRedis();
+  });
+
+  let purchaseCounter = 0;
+  async function seedPurchases(userId: string, count: number) {
+    const plan = await seedPlan();
+    for (let i = 0; i < count; i++) {
+      const id = ++purchaseCounter;
+      await addPurchase(
+        { userId },
+        {
+          planId: plan.id,
+          stripeCheckoutSessionId: `cs_all_${id}`,
+          stripePaymentIntentId: `pi_all_${id}`,
+          amountTotal: plan.amount,
+          currency: plan.currency,
+        },
+        { durationDays: plan.durationDays },
+        new Date(),
+      );
+    }
+  }
+
+  type Page = { data: { id: number; userId: string | null }[]; nextCursor: number | null };
+
+  test("pages through every purchase newest first, with no gaps or repeats", async () => {
+    const userId = await seedUser();
+    await seedPurchases(userId, 5);
+    setSession({ id: userId, ...admin }, { purchase: ["read:all"] });
+
+    const seen: number[] = [];
+    let cursor: number | null = null;
+    let pages = 0;
+    do {
+      const res = await app.request(`/purchases/all?limit=2${cursor ? `&before=${cursor}` : ""}`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as Page;
+      seen.push(...body.data.map((e) => e.id));
+      cursor = body.nextCursor;
+      pages++;
+    } while (cursor !== null);
+
+    expect(pages).toBe(3);
+    expect(seen).toHaveLength(5);
+    expect(seen).toEqual([...seen].sort((a, b) => b - a));
+    expect(new Set(seen).size).toBe(5);
+  });
+
+  test("no next cursor when everything fits on one page", async () => {
+    const userId = await seedUser();
+    await seedPurchases(userId, 2);
+    setSession({ id: userId, ...admin }, { purchase: ["read:all"] });
+
+    const body = (await (await app.request("/purchases/all?limit=2")).json()) as Page;
+    expect(body.data).toHaveLength(2);
+    expect(body.nextCursor).toBeNull();
+  });
+
+  test("?userId= narrows to one customer", async () => {
+    const userA = await seedUser();
+    const userB = await seedUser();
+    await seedPurchases(userA, 2);
+    await seedPurchases(userB, 1);
+    setSession({ id: userA, ...admin }, { purchase: ["read:all"] });
+
+    const body = (await (await app.request(`/purchases/all?userId=${userB}`)).json()) as Page;
+    expect(body.data.map((e) => e.userId)).toEqual([userB]);
+  });
+
+  test.each(["limit=0", "limit=101", "limit=abc", "before=-1", "before=1.5"])(
+    "400s on an invalid query: %s",
+    async (query) => {
+      const userId = await seedUser();
+      setSession({ id: userId, ...admin }, { purchase: ["read:all"] });
+
+      const res = await app.request(`/purchases/all?${query}`);
+      expect(res.status).toBe(400);
+    },
+  );
+
+  test("403s without purchase:read:all", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request("/purchases/all");
+    expect(res.status).toBe(403);
+  });
+});
+
 describe("GET /plans", () => {
   beforeEach(async () => {
     await resetDb();

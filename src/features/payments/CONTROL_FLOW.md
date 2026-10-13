@@ -454,6 +454,22 @@ keyset: `?limit=` (default 50, max 100) and `?before=<id>`, where the response's
 Keyset rather than offset so a page boundary doesn't shift while new entries
 keep arriving; ordered by `id`, which is unique and assigned in insertion order.
 
+## Purchases across every user: `GET /purchases/all`
+
+The admin counterpart to `GET /purchases` (which only ever returns the
+caller's own, unpaginated - that stays as-is). Same keyset-pagination
+mechanism as `GET /audit-log` above, just applied to `purchase` rows instead
+of `payment_audit_log` ones - its own `?limit=`/`?before=`/`nextCursor`,
+gated by its own permission (`purchase:read:all`, admin-only - there's no
+"read:active" tier here the way `plan` has, since "see your own" is already
+covered by `GET /purchases` needing no permission at all), and its own page-
+size constants (`PURCHASES_DEFAULT_LIMIT`/`MAX_LIMIT` in `lib/constants.ts`)
+rather than reusing the audit log's, since the two are different resources
+that might reasonably want different limits later. Backed by
+`paymentsRepo.purchase.getAllAdmin`/`getByUserAdmin`
+(`use-cases/get-purchases.ts`), narrowed to one customer via `?userId=` the
+same way the audit log is.
+
 ## Every active plan: `GET /access`
 
 `paymentsRepo.access.getActivePlans` returns every plan the user has access to

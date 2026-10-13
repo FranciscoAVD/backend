@@ -8,6 +8,8 @@ import { z } from "zod";
 import {
   AUDIT_LOG_DEFAULT_LIMIT,
   AUDIT_LOG_MAX_LIMIT,
+  PURCHASES_DEFAULT_LIMIT,
+  PURCHASES_MAX_LIMIT,
 } from "@f/payments/lib/constants";
 
 export const insertPlanSchema = createInsertSchema(plan, {
@@ -84,6 +86,14 @@ export const selectPurchaseSchema = createSelectSchema(purchase);
 export const auditLogQuerySchema = z.object({
   userId: z.string().min(1).optional(),
   limit: z.coerce.number().int().min(1).max(AUDIT_LOG_MAX_LIMIT).default(AUDIT_LOG_DEFAULT_LIMIT),
+  before: z.coerce.number().int().positive().optional(),
+});
+
+// GET /purchases/all's query string - same shape as auditLogQuerySchema, kept separate since
+// these are different resources that may reasonably want different limits later
+export const purchasesQuerySchema = z.object({
+  userId: z.string().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(PURCHASES_MAX_LIMIT).default(PURCHASES_DEFAULT_LIMIT),
   before: z.coerce.number().int().positive().optional(),
 });
 

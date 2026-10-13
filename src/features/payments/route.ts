@@ -12,6 +12,7 @@ import {
 
 import {
   auditLogQuerySchema,
+  purchasesQuerySchema,
   checkoutSchema,
   insertPlanSchema,
   updatePlanSchema,
@@ -52,6 +53,16 @@ const sessionIdParamValidator = validator("param", (value, c) => {
 
 const auditLogQueryValidator = validator("query", (value, c) => {
   const { success, data, error } = auditLogQuerySchema.safeParse(value);
+  if (!success)
+    return c.json(
+      { error: z.treeifyError(error).properties, message: "Invalid query" },
+      HTTP.BadRequest,
+    );
+  return data;
+});
+
+const purchasesQueryValidator = validator("query", (value, c) => {
+  const { success, data, error } = purchasesQuerySchema.safeParse(value);
   if (!success)
     return c.json(
       { error: z.treeifyError(error).properties, message: "Invalid query" },
@@ -254,6 +265,36 @@ const app = new Hono<PinoLoggerEnv>()
       HTTP.OK,
     );
   })
+  .get(
+    "/purchases/all",
+    requirePermissionMiddleware({ purchase: ["read:all"] }),
+    purchasesQueryValidator,
+    async (c) => {
+      const { user } = c.get("session");
+      const { userId: targetUserId, limit, before } = c.req.valid("query");
+
+      // one row past the page size, to tell whether there's a next page without a count query
+      const pageOptions = { limit: limit + 1, before };
+      const [rows, error] = await tryCatch(
+        targetUserId
+          ? paymentsRepo.purchase.getByUserAdmin({ userId: targetUserId }, pageOptions)
+          : paymentsRepo.purchase.getAllAdmin(pageOptions),
+      );
+
+      if (error) {
+        c.var.logger.error({ err: error, user: user.id }, "payments.purchase.getAllAdmin");
+        return c.json(
+          { message: "Something went wrong. Try again later." },
+          HTTP.InternalServerError,
+        );
+      }
+
+      const data = rows.slice(0, limit);
+      // pass back as ?before= to get the next (older) page; null on the last page
+      const nextCursor = rows.length > limit ? (data.at(-1)?.id ?? null) : null;
+      return c.json({ data, nextCursor, message: "Purchases found" }, HTTP.OK);
+    },
+  )
   .get("/checkout/:sessionId", sessionIdParamValidator, async (c) => {
     const { user } = c.get("session");
     const { sessionId } = c.req.valid("param");

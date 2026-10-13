@@ -2,11 +2,15 @@ import { db } from "@d/connection";
 import { purchase as purchaseTable } from "@d/schemas/payment-schema";
 import type { Payment } from "@f/payments/lib/types";
 import { isPurchaseAccessActive } from "@f/payments/lib/utils";
-import { eq, and, ne, asc, inArray } from "drizzle-orm";
+import { eq, and, ne, asc, desc, lt, inArray } from "drizzle-orm";
 import {
   PURCHASE_ACCESS_STATUSES,
   PURCHASE_BLOCKING_STATUSES,
 } from "@f/payments/lib/access-policy";
+import {
+  PURCHASES_DEFAULT_LIMIT,
+  PURCHASES_MAX_LIMIT,
+} from "@f/payments/lib/constants";
 
 /**
  * @description Select query for all purchases with a matching user ID. Assumes validation. Operation must be wrapped in try-catch
@@ -22,6 +26,62 @@ export async function getAllPurchases(
     .from(purchaseTable)
     .where(eq(purchaseTable.userId, purchase.userId));
   return res;
+}
+
+/**
+ * One page of GET /purchases/all, newest first. `before` is the id of the last entry on the
+ * previous page (keyset pagination: stable while new purchases keep arriving, unlike an offset) -
+ * same approach as `get-audit-log.ts`'s `AuditLogPage`, kept as its own type since these are
+ * different resources that may reasonably want different limits later.
+ */
+export type PurchasePage = { limit?: number; before?: Payment.Purchase["id"] };
+
+// ids are generated in insertion order, so ordering by id is ordering by recency - and unlike
+// createdAt it's unique, which keyset pagination needs to never skip or repeat a row
+const page = ({ limit = PURCHASES_DEFAULT_LIMIT, before }: PurchasePage) => ({
+  limit: Math.min(Math.max(limit, 1), PURCHASES_MAX_LIMIT + 1),
+  before: before === undefined ? undefined : lt(purchaseTable.id, before),
+});
+
+/**
+ * @description Select query for one page of every purchase, most recent first - for an admin
+ * reviewing purchases across every customer, not one in particular. Assumes validation.
+ * Operation must be wrapped in try-catch
+ * @param pageOptions optional page size and cursor, see PurchasePage (the size is capped at
+ * PURCHASES_MAX_LIMIT + 1, so a caller can ask for one extra row to tell whether a next page exists)
+ * @returns Array of Purchases.
+ */
+export async function getAllPurchasesAdmin(
+  pageOptions: PurchasePage = {},
+): Promise<Payment.Purchase[]> {
+  const { limit, before } = page(pageOptions);
+  return db
+    .select()
+    .from(purchaseTable)
+    .where(before)
+    .orderBy(desc(purchaseTable.id))
+    .limit(limit);
+}
+
+/**
+ * @description Select query for one page of a given user's purchases, most recent first - the
+ * admin-facing, paginated counterpart to `getAllPurchases` (which returns everything, unpaginated,
+ * for the caller's own `GET /purchases`). Assumes validation. Operation must be wrapped in try-catch
+ * @param target object of the user ID to look up
+ * @param pageOptions optional page size and cursor, see PurchasePage and getAllPurchasesAdmin
+ * @returns Array of Purchases.
+ */
+export async function getPurchasesByUserAdmin(
+  target: { userId: string },
+  pageOptions: PurchasePage = {},
+): Promise<Payment.Purchase[]> {
+  const { limit, before } = page(pageOptions);
+  return db
+    .select()
+    .from(purchaseTable)
+    .where(and(eq(purchaseTable.userId, target.userId), before))
+    .orderBy(desc(purchaseTable.id))
+    .limit(limit);
 }
 
 /**
