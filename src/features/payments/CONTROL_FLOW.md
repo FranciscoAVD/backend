@@ -360,6 +360,15 @@ mirroring `isActiveOrTrialing`, the check the plugin itself uses to decide
 whether a user is already subscribed (e.g. to block a duplicate upgrade) -
 rather than also checking `periodEnd`, which the plugin doesn't check either.
 
+A consequence worth being deliberate about: `past_due` isn't in that set, so
+access is lost the moment a renewal payment fails, not after Stripe's
+multi-day retry schedule for that failed payment runs out. That matches the
+plugin's own definition of "subscribed" (reused here for consistency rather
+than inventing a second one), but plenty of products choose to grant a grace
+period through `past_due` instead. If that's wanted, it's a product decision
+to make explicitly here - add `"past_due"` to the `inArray` status check -
+not something that should happen by accident.
+
 ```mermaid
 flowchart TD
     Start(["hasActiveSubscription(userId, plan.name)"]) --> Fetch["SELECT subscription\nWHERE referenceId = userId\nAND lower(plan) = lower(plan.name)\nAND status IN (active, trialing)"]
