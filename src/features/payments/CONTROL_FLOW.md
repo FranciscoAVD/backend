@@ -354,7 +354,10 @@ since they're either baked into an already-created Stripe Price or relied on as 
 lookup key elsewhere (`name`, by `getSubscriptionPlans`). An edit to `durationDays`
 only affects purchases made *after* it - `addPurchase` snapshots the plan's
 `durationDays` onto the purchase row at purchase time, so it never rewrites history
-for purchases already made.
+for purchases already made. Flipping `repeatable` from `false` to `true` is rejected
+(409) while any user still has a blocking purchase of the plan
+(`paymentsRepo.purchase.hasAnyBlocking`) - otherwise it would silently reopen a
+once-only/trial plan to every past purchaser, not just whoever's buying it next.
 
 ## The trial pattern
 
@@ -362,12 +365,15 @@ Two unrelated things both get called "trial" here - don't confuse them:
 
 - **One-time paid trial** (e.g. $1 for 7 days): a `one_time` plan with
   `repeatable: false` and `durationDays` set. This is *this feature's own*
-  gating, not a separate mechanism - `getBlockingPurchaseByPlan` blocks a
-  second purchase while one is still `paid`/`disputed`, and once
-  `hasActivePurchase` says the `durationDays` window has elapsed, the guard
-  no longer finds a blocking purchase and a new one becomes buyable again.
-  That's intended: the trial is meant to end and be gone, not linger as a
-  dead end that blocks a real purchase forever.
+  gating, not a separate mechanism - but the two halves are independent, not
+  chained: `getBlockingPurchaseByPlan` blocks a second purchase purely on
+  purchase *status* (`paid`/`disputed`), with no regard for `durationDays` or
+  `expiresAt` at all, while `hasActivePurchase` (access) and `durationDays`
+  (how long one purchase's access lasts) are a separate axis entirely. So a
+  non-repeatable trial is "once ever per account, until refunded" - buying it
+  does *not* become possible again once the trial's own access window lapses.
+  That's the point: a trial is meant to be spent once and not retried
+  indefinitely as it keeps expiring.
 - **Subscription trial** (e.g. 14 days of Pro, then it bills): `trialDays`
   on a `recurring` plan, handled entirely by `@better-auth/stripe` - it
   grants the trial, auto-bills when it ends, and only grants one per account

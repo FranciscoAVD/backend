@@ -6,6 +6,7 @@ import {
   getAllPurchases,
   getPurchaseBySession,
   getBlockingPurchaseByPlan,
+  hasAnyBlockingPurchase,
   hasActivePurchase,
 } from "@f/payments/use-cases/get-purchases";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
@@ -177,6 +178,81 @@ describe("getBlockingPurchaseByPlan", () => {
 
     const res = await getBlockingPurchaseByPlan({ userId, planId: plan.id });
     expect(res).toBeNull();
+  });
+});
+
+describe("hasAnyBlockingPurchase", () => {
+  beforeEach(resetDb);
+
+  test("true when any user has a paid purchase of the plan", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    await addPurchase(
+      { userId },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_1",
+        stripePaymentIntentId: "pi_1",
+        amountTotal: plan.amount,
+        currency: plan.currency,
+      },
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
+
+    expect(await hasAnyBlockingPurchase({ planId: plan.id })).toBe(true);
+  });
+
+  test("true for a disputed purchase held by a different user than the caller would be", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    const purchase = await addPurchase(
+      { userId },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_1",
+        stripePaymentIntentId: "pi_1",
+        amountTotal: plan.amount,
+        currency: plan.currency,
+      },
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
+    await db
+      .update(purchaseTable)
+      .set({ status: "disputed" })
+      .where(eq(purchaseTable.id, purchase!.id));
+
+    expect(await hasAnyBlockingPurchase({ planId: plan.id })).toBe(true);
+  });
+
+  test("false once the only purchase of the plan has been refunded", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    const purchase = await addPurchase(
+      { userId },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_1",
+        stripePaymentIntentId: "pi_1",
+        amountTotal: plan.amount,
+        currency: plan.currency,
+      },
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
+    await db
+      .update(purchaseTable)
+      .set({ status: "refunded" })
+      .where(eq(purchaseTable.id, purchase!.id));
+
+    expect(await hasAnyBlockingPurchase({ planId: plan.id })).toBe(false);
+  });
+
+  test("false when the plan has no purchases at all", async () => {
+    const plan = await seedPlan();
+
+    expect(await hasAnyBlockingPurchase({ planId: plan.id })).toBe(false);
   });
 });
 

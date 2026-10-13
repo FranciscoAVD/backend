@@ -78,6 +78,31 @@ export async function getBlockingPurchaseByPlan(
 }
 
 /**
+ * @description Whether *any* user has a purchase of the given plan that would block a repeat
+ * buy - the same `paid`/`disputed` check as `getBlockingPurchaseByPlan`, but across every user
+ * rather than one, so `PATCH /plans/:id` can tell whether flipping `repeatable` from `false` to
+ * `true` would reopen the plan to someone who was previously locked out of buying it again.
+ * Assumes validation. Operation must be wrapped in try-catch
+ * @param plan object of the plan ID, enforced by Pick<Payment.Purchase, "planId">
+ * @returns Whether a blocking purchase of this plan exists for any user.
+ */
+export async function hasAnyBlockingPurchase(
+  plan: Pick<Payment.Purchase, "planId">,
+): Promise<boolean> {
+  const res = await db
+    .select({ id: purchaseTable.id })
+    .from(purchaseTable)
+    .where(
+      and(
+        eq(purchaseTable.planId, plan.planId),
+        inArray(purchaseTable.status, ["paid", "disputed"]),
+      ),
+    )
+    .limit(1);
+  return res.length > 0;
+}
+
+/**
  * @description Whether the user currently has active (non-expired) access to the given plan. Storage
  * never chains purchases - each row's expiresAt comes from its own createdAt + the plan's durationDays
  * at purchase time - so `overlapping` only changes how they're read: `true` treats any one unexpired

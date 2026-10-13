@@ -11,6 +11,7 @@ import {
   getAllPurchases,
   getPurchaseBySession,
   getBlockingPurchaseByPlan,
+  hasAnyBlockingPurchase,
   hasActivePurchase,
 } from "@f/payments/use-cases/get-purchases";
 import { updatePurchaseByPaymentIntent } from "@f/payments/use-cases/update-purchase";
@@ -49,6 +50,7 @@ export const paymentsRepo = {
     getAll: getAllPurchases,
     getBySession: getPurchaseBySession,
     getBlockingByPlan: getBlockingPurchaseByPlan,
+    hasAnyBlocking: hasAnyBlockingPurchase,
     hasActive: hasActivePurchase,
     updateByPaymentIntent: updatePurchaseByPaymentIntent,
   },

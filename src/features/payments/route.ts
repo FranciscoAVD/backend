@@ -259,6 +259,46 @@ const app = new Hono<PinoLoggerEnv>()
       const { id } = c.req.valid("param");
       const { data } = c.req.valid("json");
 
+      if (data.repeatable === true) {
+        const [plan, planError] = await tryCatch(paymentsRepo.plan.get({ id }));
+        if (planError) {
+          c.var.logger.error({ err: planError, user: user.id, plan: id }, "payments.plan.update");
+          return c.json(
+            { message: "Something went wrong. Try again later." },
+            HTTP.InternalServerError,
+          );
+        }
+
+        if (!plan) return c.json({ message: "Plan not found" }, HTTP.NotFound);
+
+        // flipping false -> true would silently reopen repeat purchases for every user a
+        // blocking purchase already locked out of buying this plan again
+        if (plan.type === "one_time" && !plan.repeatable) {
+          const [blocked, blockedError] = await tryCatch(
+            paymentsRepo.purchase.hasAnyBlocking({ planId: id }),
+          );
+          if (blockedError) {
+            c.var.logger.error(
+              { err: blockedError, user: user.id, plan: id },
+              "payments.plan.update",
+            );
+            return c.json(
+              { message: "Something went wrong. Try again later." },
+              HTTP.InternalServerError,
+            );
+          }
+
+          if (blocked)
+            return c.json(
+              {
+                message:
+                  "Can't make this plan repeatable - it already has a purchase that would be reopened to repeat buys",
+              },
+              HTTP.Conflict,
+            );
+        }
+      }
+
       const [res, error] = await tryCatch(paymentsRepo.plan.update({ id }, data));
 
       if (error) {
