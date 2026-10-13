@@ -37,6 +37,33 @@ mock.module("@f/auth/middleware", () => ({
     },
 }));
 
+// Fakes Stripe for POST /checkout's happy path (checkout.sessions.create only - every test
+// seeds the user with a stripeCustomerId already set, so ensureStripeCustomer's own
+// customers.create branch, per use-cases/ensure-customer.ts, never runs). Mirrors the fake
+// checkout.test.ts already uses for the same Stripe call. Unlike the auth mock above, this
+// one needs no dynamic-import treatment: every caller of getPaymentProcessor() calls it
+// fresh at request time, not eagerly at module-evaluation time.
+let sessionCreateCalls: Record<string, unknown>[] = [];
+mock.module("@f/payments/payment", () => ({
+  getPaymentProcessor: () => ({
+    checkout: {
+      sessions: {
+        create: async (args: Record<string, unknown>) => {
+          sessionCreateCalls.push(args);
+          return { id: "cs_test_fake", url: "https://checkout.stripe.com/fake" };
+        },
+      },
+    },
+  }),
+}));
+
+import { db } from "@d/connection";
+import { paymentAuditLog } from "@d/schemas/payment-schema";
+import {
+  savePendingCheckout,
+  getPendingCheckout,
+  PENDING_CHECKOUT_TTL_SEC,
+} from "@f/payments/lib/pending-checkout";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 // dynamic, not static - route.ts calls .use(sessionMiddleware) at module-evaluation
 // time, capturing the function by value into Hono's middleware chain immediately.
@@ -270,5 +297,148 @@ describe("PATCH /plans/:id", () => {
       body: JSON.stringify({ repeatable: true }),
     });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("POST /checkout", () => {
+  beforeEach(async () => {
+    await resetDb();
+    await resetRedis();
+    sessionCreateCalls = [];
+  });
+
+  test("404s for a nonexistent plan", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request("/checkout", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ planId: 999999 }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  test("404s for an inactive plan", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", active: false });
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request("/checkout", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ planId: plan.id }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  test("422s for a recurring plan - those go through better-auth's upgrade endpoint", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "recurring", interval: "month", durationDays: null });
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request("/checkout", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ planId: plan.id }),
+    });
+    expect(res.status).toBe(422);
+    expect(sessionCreateCalls).toHaveLength(0);
+  });
+
+  test("409s on a non-repeatable plan already purchased, and writes an audit log entry", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: false });
+    await addPurchase(
+      { userId },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_existing",
+        stripePaymentIntentId: "pi_existing",
+        amountTotal: plan.amount,
+        currency: plan.currency,
+      },
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request("/checkout", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ planId: plan.id }),
+    });
+    expect(res.status).toBe(409);
+    expect(sessionCreateCalls).toHaveLength(0);
+
+    const auditRows = await db.select().from(paymentAuditLog);
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0]?.type).toBe("checkout_blocked_existing_purchase");
+    expect(auditRows[0]?.userId).toBe(userId);
+  });
+
+  test("409s on a non-repeatable plan with a checkout already pending", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: false });
+    await savePendingCheckout(
+      "cs_pending",
+      { userId, planId: plan.id, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request("/checkout", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ planId: plan.id }),
+    });
+    expect(res.status).toBe(409);
+    expect(sessionCreateCalls).toHaveLength(0);
+  });
+
+  test("repeatable plan: happy path bypasses the repeat-purchase guard entirely", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: true });
+    await addPurchase(
+      { userId },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_prior",
+        stripePaymentIntentId: "pi_prior",
+        amountTotal: plan.amount,
+        currency: plan.currency,
+      },
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request("/checkout", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ planId: plan.id }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      data: { sessionId: "cs_test_fake", url: "https://checkout.stripe.com/fake" },
+    });
+    expect(sessionCreateCalls).toHaveLength(1);
+  });
+
+  test("non-repeatable plan, no prior purchase or pending checkout: happy path saves it as pending", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: false });
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request("/checkout", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ planId: plan.id }),
+    });
+    expect(res.status).toBe(200);
+    expect(sessionCreateCalls).toHaveLength(1);
+
+    const pending = await getPendingCheckout("cs_test_fake");
+    expect(pending).toMatchObject({ userId, planId: plan.id, status: "open" });
   });
 });
