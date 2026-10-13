@@ -259,7 +259,7 @@ const app = new Hono<PinoLoggerEnv>()
       const { id } = c.req.valid("param");
       const { data } = c.req.valid("json");
 
-      if (data.repeatable === true) {
+      if (data.repeatable === true || data.durationDays != null || data.trialDays != null) {
         const [plan, planError] = await tryCatch(paymentsRepo.plan.get({ id }));
         if (planError) {
           c.var.logger.error({ err: planError, user: user.id, plan: id }, "payments.plan.update");
@@ -271,9 +271,24 @@ const app = new Hono<PinoLoggerEnv>()
 
         if (!plan) return c.json({ message: "Plan not found" }, HTTP.NotFound);
 
+        // mirrors insertPlanSchema's own type/field refinements, which only run at creation -
+        // null is allowed either way (clearing a field is harmless); only a value set on the
+        // wrong plan type is rejected
+        if (data.durationDays != null && plan.type !== "one_time")
+          return c.json(
+            { message: "durationDays only applies to one-time plans" },
+            HTTP.UnprocessableEntity,
+          );
+
+        if (data.trialDays != null && plan.type !== "recurring")
+          return c.json(
+            { message: "trialDays only applies to recurring plans" },
+            HTTP.UnprocessableEntity,
+          );
+
         // flipping false -> true would silently reopen repeat purchases for every user a
         // blocking purchase already locked out of buying this plan again
-        if (plan.type === "one_time" && !plan.repeatable) {
+        if (data.repeatable === true && plan.type === "one_time" && !plan.repeatable) {
           const [blocked, blockedError] = await tryCatch(
             paymentsRepo.purchase.hasAnyBlocking({ planId: id }),
           );

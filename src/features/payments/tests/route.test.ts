@@ -223,6 +223,32 @@ describe("PATCH /plans/:id", () => {
     await resetRedis();
   });
 
+  test("422s setting durationDays on a recurring plan", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ type: "recurring", interval: "month", durationDays: null });
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+
+    const res = await app.request(`/plans/${plan.id}`, {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify({ durationDays: 30 }),
+    });
+    expect(res.status).toBe(422);
+  });
+
+  test("422s setting trialDays on a one_time plan", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ type: "one_time" });
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+
+    const res = await app.request(`/plans/${plan.id}`, {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify({ trialDays: 14 }),
+    });
+    expect(res.status).toBe(422);
+  });
+
   test("409s flipping repeatable false -> true while a blocking purchase exists", async () => {
     const userId = await seedUser();
     const otherUserId = await seedUser();

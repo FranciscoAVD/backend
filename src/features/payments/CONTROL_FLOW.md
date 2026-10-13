@@ -358,6 +358,11 @@ for purchases already made. Flipping `repeatable` from `false` to `true` is reje
 (409) while any user still has a blocking purchase of the plan
 (`paymentsRepo.purchase.hasAnyBlocking`) - otherwise it would silently reopen a
 once-only/trial plan to every past purchaser, not just whoever's buying it next.
+Setting `durationDays` on a plan whose `type` isn't `one_time`, or `trialDays` on
+one whose `type` isn't `recurring`, is also rejected (422) - the same type/field
+pairing `insertPlanSchema` already enforces at creation time, now enforced on
+every edit too (fetched from the DB in the route handler itself, since `type`
+isn't a patchable field the update payload could be checked against directly).
 
 ## The trial pattern
 

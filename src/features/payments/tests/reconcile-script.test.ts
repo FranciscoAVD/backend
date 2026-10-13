@@ -8,7 +8,15 @@ import { describe, expect, test } from "bun:test";
 async function runScript(...args: string[]) {
   const proc = Bun.spawn(
     ["bun", "run", "src/features/payments/scripts/reconcile.ts", ...args],
-    { stdout: "pipe", stderr: "pipe" },
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+      // the assertion below needs the script's error-level log line to actually print -
+      // Bun.spawn otherwise inherits process.env, so a developer's own .env (e.g.
+      // LOG_LEVEL=fatal) would silently swallow it and fail this test for reasons that
+      // have nothing to do with the script's own behavior
+      env: { ...process.env, LOG_LEVEL: "info" },
+    },
   );
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
