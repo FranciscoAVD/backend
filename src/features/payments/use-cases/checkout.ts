@@ -5,10 +5,14 @@ import {
   PENDING_CHECKOUT_TTL_SEC,
   getPendingCheckout,
   savePendingCheckout,
+  removePendingCheckout,
+  CheckoutSlotLostError,
 } from "@f/payments/lib/pending-checkout";
 import { encodeDurationDays, encodeOverlapping } from "@f/payments/lib/utils";
 import { getCheckoutSessionParams } from "@f/payments/lib/checkout-extensions";
 import { getPurchaseBySession } from "@f/payments/use-cases/get-purchases";
+import { logger } from "@/lib/logger";
+import tryCatch from "@vicstack/try-catch";
 
 // userId here is always the live, authenticated caller's id, unlike a purchase
 // row's own (nullable) userId once that user is deleted
@@ -36,6 +40,7 @@ type CheckoutUser = {
 export async function createCheckout(
   user: CheckoutUser,
   plan: Payment.Plan,
+  options: { reservation?: string } = {},
 ): Promise<{ sessionId: string; url: string | null }> {
   const extra = (await getCheckoutSessionParams({ user, plan })) ?? {};
   const { metadata: extraMetadata, payment_intent_data: extraPID, line_items: extraLineItems, ...rest } = extra;
@@ -64,11 +69,23 @@ export async function createCheckout(
     expires_at: Math.floor(Date.now() / 1000) + PENDING_CHECKOUT_TTL_SEC,
   });
 
-  await savePendingCheckout(
+  const saved = await savePendingCheckout(
     session.id,
     { userId: user.userId, planId: plan.id, status: "open", url: session.url ?? undefined },
     PENDING_CHECKOUT_TTL_SEC,
+    options.reservation,
   );
+
+  if (!saved) {
+    // the reservation lapsed while Stripe was answering and another checkout holds the slot now.
+    // This session's URL never leaves this function, so nobody can pay it; expiring it is tidiness
+    const [, expireError] = await tryCatch(
+      getPaymentProcessor().checkout.sessions.expire(session.id),
+    );
+    if (expireError)
+      logger.warn({ err: expireError, session: session.id }, "payments.checkout.expire_lost");
+    throw new CheckoutSlotLostError();
+  }
 
   return { sessionId: session.id, url: session.url };
 }
@@ -93,14 +110,28 @@ export async function getCheckoutStatus(
   return null;
 }
 
+/**
+ * @description Expires a one-time Checkout Session this app created and drops its pending entry,
+ * so it can't be paid. For a session the caller is about to withhold (e.g. the user's deletion
+ * started while it was being created). Operation must be wrapped in try-catch
+ * @param sessionId the Checkout Session to expire
+ */
+export async function expireCheckout(sessionId: string): Promise<void> {
+  await getPaymentProcessor().checkout.sessions.expire(sessionId);
+  await removePendingCheckout(sessionId);
+}
+
 // re-exported so the webhook handler (not a use-case itself, but a consumer of this feature's
 // checkout flow like route.ts is) can reach these through paymentsRepo too, instead of importing
 // lib/pending-checkout.ts directly
+export { isUserDeleting } from "@f/payments/lib/deletion-guard";
 export {
   getPendingCheckout,
   getResumableCheckout,
   reservePendingCheckout,
   releaseReservation,
+  acquireCreateLock,
+  releaseCreateLock,
   markProcessing,
   markFailed,
   markExpired,

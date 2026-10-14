@@ -31,6 +31,7 @@ import { idParamValidator, jsonValidator } from "@/lib/validators";
 import { rateLimiter } from "@/lib/rate-limit";
 
 import { paymentsRepo } from "@f/payments/repo";
+import { CheckoutSlotLostError } from "@f/payments/lib/pending-checkout";
 
 const writeRateLimit = rateLimiter<RequireSessionEnv>({
   keyPrefix: "payments-write",
@@ -499,6 +500,15 @@ const app = new Hono<PinoLoggerEnv>()
     async (c) => {
       const { user } = c.get("session");
       const { data } = c.req.valid("json");
+      const serverError = () =>
+        c.json({ message: "Something went wrong. Try again later." }, HTTP.InternalServerError);
+      const slotTaken = () =>
+        c.json(
+          { message: "You already have a checkout in progress for this plan" },
+          HTTP.Conflict,
+        );
+      const beingDeleted = () =>
+        c.json({ message: "This account is being deleted" }, HTTP.Conflict);
 
       const [plan, planError] = await tryCatch(paymentsRepo.plan.get({ id: data.planId }));
 
@@ -507,10 +517,7 @@ const app = new Hono<PinoLoggerEnv>()
           { err: planError, user: user.id, plan: data.planId },
           "payments.checkout.create",
         );
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
-        );
+        return serverError();
       }
 
       if (!plan || !plan.active)
@@ -523,20 +530,57 @@ const app = new Hono<PinoLoggerEnv>()
           HTTP.UnprocessableEntity,
         );
 
-      // the (user, plan) slot this request claimed, for a non-repeatable plan - released below if
-      // anything fails before savePendingCheckout replaces it with the real session id
-      let reservation: string | null = null;
-      const releaseReservation = async () => {
-        if (!reservation) return;
-        const [, releaseError] = await tryCatch(
-          paymentsRepo.checkout.releaseReservation(user.id, plan.id, reservation),
+      // fail fast once the user's deletion has started (see lib/deletion-guard.ts); the re-check
+      // after the session exists, further down, is what closes the race
+      const [deleting, deletingError] = await tryCatch(
+        paymentsRepo.checkout.isUserDeleting(user.id),
+      );
+      if (deletingError) {
+        c.var.logger.error(
+          { err: deletingError, user: user.id },
+          "payments.checkout.deletion_guard",
         );
-        // best-effort: an unreleased reservation frees itself after RESERVATION_TTL_SEC
+        return serverError();
+      }
+      if (deleting) return beingDeleted();
+
+      // what this request holds while it talks to Stripe, freed in `release` if it has to be: for
+      // a non-repeatable plan, the (user, plan) slot itself (released only on failure -
+      // savePendingCheckout replaces it with the session on success); for a repeatable plan, a
+      // lock that just keeps concurrent creations for the same (user, plan) to one (always freed)
+      let reservation: string | null = null;
+      let createLock: string | null = null;
+      const release = async () => {
+        const [, releaseError] = await tryCatch(
+          (async () => {
+            if (reservation)
+              await paymentsRepo.checkout.releaseReservation(user.id, plan.id, reservation);
+            if (createLock)
+              await paymentsRepo.checkout.releaseCreateLock(user.id, plan.id, createLock);
+          })(),
+        );
+        // best-effort: an unreleased reservation or lock frees itself after RESERVATION_TTL_SEC
         if (releaseError)
           c.var.logger.warn(
             { err: releaseError, user: user.id, plan: plan.id },
             "payments.checkout.release_reservation",
           );
+      };
+
+      // the user's still-open session for this plan, if any - sent back instead of creating a
+      // second one (see getResumableCheckout)
+      const resume = async () => {
+        const [resumable, resumeError] = await tryCatch(
+          paymentsRepo.checkout.getResumable(user.id, plan.id),
+        );
+        if (resumeError)
+          c.var.logger.warn(
+            { err: resumeError, user: user.id, plan: plan.id },
+            "payments.checkout.resume",
+          );
+        return resumable
+          ? c.json({ data: resumable, message: "Checkout resumed" }, HTTP.OK)
+          : null;
       };
 
       // whether the user already owns this non-repeatable plan, answering 409 (or 500) if so
@@ -553,10 +597,7 @@ const app = new Hono<PinoLoggerEnv>()
             { err: existingError, user: user.id, plan: plan.id },
             "payments.checkout.create",
           );
-          return c.json(
-            { message: "Something went wrong. Try again later." },
-            HTTP.InternalServerError,
-          );
+          return serverError();
         }
 
         if (!existing) return null;
@@ -596,10 +637,7 @@ const app = new Hono<PinoLoggerEnv>()
             { err: pendingError, user: user.id, plan: plan.id },
             "payments.checkout.create",
           );
-          return c.json(
-            { message: "Something went wrong. Try again later." },
-            HTTP.InternalServerError,
-          );
+          return serverError();
         }
 
         if (!token) {
@@ -608,19 +646,8 @@ const app = new Hono<PinoLoggerEnv>()
           // (up to 24h) - it's still one checkout for the (user, plan) slot, so nothing about the
           // non-repeatable guard is weakened. A processing (already paid) session or an in-flight
           // reservation isn't resumable and still 409s below.
-          const [resumable, resumeError] = await tryCatch(
-            paymentsRepo.checkout.getResumable(user.id, plan.id),
-          );
-          if (resumeError)
-            c.var.logger.warn(
-              { err: resumeError, user: user.id, plan: plan.id },
-              "payments.checkout.resume",
-            );
-          if (resumable)
-            return c.json(
-              { data: resumable, message: "Checkout resumed" },
-              HTTP.OK,
-            );
+          const resumed = await resume();
+          if (resumed) return resumed;
 
           const [, auditError] = await tryCatch(
             paymentsRepo.audit.add({
@@ -634,10 +661,7 @@ const app = new Hono<PinoLoggerEnv>()
               { err: auditError, user: user.id, plan: plan.id },
               "payments.audit.write_failed",
             );
-          return c.json(
-            { message: "You already have a checkout in progress for this plan" },
-            HTTP.Conflict,
-          );
+          return slotTaken();
         }
         reservation = token;
 
@@ -648,9 +672,27 @@ const app = new Hono<PinoLoggerEnv>()
         // purchase is already visible
         const blockedAfterReserve = await blockIfOwned();
         if (blockedAfterReserve) {
-          await releaseReservation();
+          await release();
           return blockedAfterReserve;
         }
+      } else {
+        // a repeatable plan can be bought again, but an open, unpaid session for it is reused
+        // rather than piling up new ones - each costs Stripe API calls the webhook handler shares
+        const resumed = await resume();
+        if (resumed) return resumed;
+
+        const [token, lockError] = await tryCatch(
+          paymentsRepo.checkout.acquireCreateLock(user.id, plan.id),
+        );
+        if (lockError) {
+          c.var.logger.error(
+            { err: lockError, user: user.id, plan: plan.id },
+            "payments.checkout.create",
+          );
+          return serverError();
+        }
+        if (!token) return slotTaken();
+        createLock = token;
       }
 
       const [stripeCustomerId, customerError] = await tryCatch(
@@ -666,18 +708,26 @@ const app = new Hono<PinoLoggerEnv>()
           { err: customerError, user: user.id },
           "payments.customer.ensure",
         );
-        await releaseReservation();
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
-        );
+        await release();
+        return serverError();
       }
 
       const [res, error] = await tryCatch(
-        paymentsRepo.checkout.create({ userId: user.id, stripeCustomerId }, plan),
+        paymentsRepo.checkout.create(
+          { userId: user.id, stripeCustomerId },
+          plan,
+          { reservation: reservation ?? undefined },
+        ),
       );
 
       if (error) {
+        // the reservation lapsed while Stripe answered and another checkout took the slot -
+        // createCheckout already withheld (and expired) this one
+        if (error instanceof CheckoutSlotLostError) {
+          c.var.logger.warn({ user: user.id, plan: plan.id }, "payments.checkout.slot_lost");
+          await release();
+          return slotTaken();
+        }
         c.var.logger.error(
           { err: error, user: user.id, plan: plan.id },
           "payments.checkout.create",
@@ -685,11 +735,35 @@ const app = new Hono<PinoLoggerEnv>()
         // only releases if the pointer still holds this request's reservation: if the Stripe
         // session was created but saving it to Redis failed, the reservation is all that's left
         // guarding the slot, and releasing it is no worse than the pre-reservation behavior
-        await releaseReservation();
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
+        await release();
+        return serverError();
+      }
+      // a non-repeatable reservation now holds the session itself; only the create lock is freed
+      reservation = null;
+      await release();
+
+      // the deletion flag again, now the session exists: a deletion that started after the check
+      // above may have listed the user's open sessions before this one existed, so it's this
+      // request's job to expire it (see lib/deletion-guard.ts)
+      const [deletingNow, recheckError] = await tryCatch(
+        paymentsRepo.checkout.isUserDeleting(user.id),
+      );
+      // a Redis failure here almost certainly failed the deletion hook's own flag write too, which
+      // aborts the deletion - so the checkout goes through rather than failing a normal purchase
+      if (recheckError)
+        c.var.logger.warn(
+          { err: recheckError, user: user.id },
+          "payments.checkout.deletion_guard",
         );
+      if (deletingNow) {
+        const [, expireError] = await tryCatch(paymentsRepo.checkout.expire(res.sessionId));
+        // its URL is withheld either way, so nobody can pay it
+        if (expireError)
+          c.var.logger.error(
+            { err: expireError, user: user.id, session: res.sessionId },
+            "payments.checkout.deletion_guard.expire",
+          );
+        return beingDeleted();
       }
 
       return c.json(

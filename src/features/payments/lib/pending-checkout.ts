@@ -27,9 +27,10 @@ export const PROCESSING_TTL_SEC = 60 * 60 * 24 * 14;
 const TERMINAL_TTL_SEC = 60 * 60;
 /**
  * How long a `POST /checkout` reservation holds the (user, plan) slot before a real session id
- * replaces it. Generous on purpose: it has to outlast `ensureStripeCustomer` plus
- * `checkout.sessions.create`, including the Stripe SDK's own timeout and retries. If the request
- * dies mid-way, the slot frees itself after this long.
+ * replaces it. Sized to outlast `ensureStripeCustomer` plus `checkout.sessions.create` at the
+ * Stripe client's worst case (`STRIPE_TIMEOUT_MS` x (1 + `STRIPE_MAX_NETWORK_RETRIES`) per call,
+ * see lib/constants.ts) - but correctness doesn't depend on it: `savePendingCheckout` only replaces a
+ * reservation it still holds. If the request dies mid-way, the slot frees itself after this long.
  */
 export const RESERVATION_TTL_SEC = 60 * 5;
 const RESERVATION_PREFIX = "reserving:";
@@ -114,13 +115,46 @@ async function isActivePointer(value: string): Promise<boolean> {
   return pending?.status === "open" || pending?.status === "processing";
 }
 
+// writes the entry and points the (user, plan) slot at it, but only if the slot still holds the
+// caller's reservation - one step, so nothing can take the slot between the check and the write
+const SAVE_IF_RESERVED = `
+if redis.call("GET", KEYS[1]) ~= ARGV[1] then return 0 end
+redis.call("SET", KEYS[2], ARGV[3], "EX", ARGV[4])
+redis.call("SET", KEYS[1], ARGV[2], "EX", ARGV[4])
+return 1
+`;
+
+/**
+ * @description Stores a new checkout's pending entry and points its (user, plan) slot at it.
+ * @param reservation the token from `reservePendingCheckout`, for a slot-guarded (non-repeatable)
+ * checkout: the save then only happens if the slot still holds it. A reservation can lapse
+ * (`RESERVATION_TTL_SEC`) while Stripe is slow, and another request can claim the freed slot -
+ * a plain write would then clobber that request's pointer and leave two payable sessions for a
+ * plan the user may only buy once. Without one, the slot is overwritten unconditionally.
+ * @returns false if the reservation was given and no longer held the slot (nothing was written).
+ */
 export async function savePendingCheckout(
   sessionId: string,
   data: PendingCheckout,
   ttlSec: number,
-): Promise<void> {
-  await redis.set(key(sessionId), JSON.stringify(data), "EX", ttlSec);
-  await setPointer(data.userId, data.planId, sessionId, ttlSec);
+  reservation?: string,
+): Promise<boolean> {
+  if (reservation === undefined) {
+    await redis.set(key(sessionId), JSON.stringify(data), "EX", ttlSec);
+    await setPointer(data.userId, data.planId, sessionId, ttlSec);
+    return true;
+  }
+  const saved = await redis.send("EVAL", [
+    SAVE_IF_RESERVED,
+    "2",
+    pointerKey(data.userId, data.planId),
+    key(sessionId),
+    reservation,
+    sessionId,
+    JSON.stringify(data),
+    String(ttlSec),
+  ]);
+  return saved === 1;
 }
 
 export async function getPendingCheckout(
@@ -217,6 +251,42 @@ export async function releaseReservation(
   await delIfEquals(pointerKey(userId, planId), token);
 }
 
+const createLockKey = (userId: string, planId: number) =>
+  `checkout:creating:${userId}:${planId}`;
+
+/**
+ * @description Claims the right to create a checkout for a *repeatable* plan, so one (user, plan)
+ * only ever has one creation in flight. A repeatable plan has no reservation (buying it again is
+ * allowed, and a settling `processing` purchase mustn't block the next one), so without this a
+ * burst of concurrent `POST /checkout` calls would each create a Stripe session - every account
+ * spending the Stripe API rate limit that the webhook handler shares. Sequential calls already
+ * reuse the open session (`getResumableCheckout`); this covers the concurrent ones.
+ * @returns A token for `releaseCreateLock`, or null if another creation holds the lock.
+ */
+export async function acquireCreateLock(
+  userId: string,
+  planId: number,
+): Promise<string | null> {
+  const token = crypto.randomUUID();
+  const claimed = await redis.send("SET", [
+    createLockKey(userId, planId),
+    token,
+    "NX",
+    "EX",
+    String(RESERVATION_TTL_SEC),
+  ]);
+  return claimed === "OK" ? token : null;
+}
+
+/** @description Frees `acquireCreateLock`'s lock, if it still holds this token. */
+export async function releaseCreateLock(
+  userId: string,
+  planId: number,
+  token: string,
+): Promise<void> {
+  await delIfEquals(createLockKey(userId, planId), token);
+}
+
 // open -> processing -> {failed, expired}; failed/expired share a rank so neither can
 // flip into the other. Stripe's retries/out-of-order delivery mean a later event for
 // the same session can carry an earlier status - that must never move the status backward.
@@ -308,4 +378,15 @@ export async function removePendingCheckout(sessionId: string): Promise<void> {
   await redis.del(key(sessionId));
   if (pending)
     await clearPointerIfMatches(pending.userId, pending.planId, sessionId);
+}
+
+/**
+ * Thrown by `createCheckout` when its reservation no longer held the (user, plan) slot by the time
+ * the session existed - another checkout for the same plan holds it instead.
+ */
+export class CheckoutSlotLostError extends Error {
+  constructor() {
+    super("Checkout reservation lapsed; another checkout holds the slot");
+    this.name = "CheckoutSlotLostError";
+  }
 }

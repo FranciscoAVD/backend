@@ -43,6 +43,26 @@ one session per (user, plan), so the guard isn't weakened. A `processing`
 session (already paid, settling) or an in-flight reservation (no session yet)
 still answers 409, as does a pending entry written before urls were stored.
 
+A repeatable plan has no reservation (buying it again is the point, and a
+settling `processing` purchase mustn't block the next one), but it still reuses
+the user's open session for that plan, and a short `checkout:creating:userId:planId`
+lock (`acquireCreateLock`) keeps concurrent requests for the same (user, plan) to
+a single Stripe call - the rest answer 409. Without both, every request created a
+new Checkout Session, so any number of sign-ups could spend the account's shared
+Stripe API rate limit, starving the webhook handler's own Stripe calls.
+
+The reservation is a TTL, so it can lapse while Stripe is slow - and another
+request can then claim the freed slot. `savePendingCheckout` is therefore a
+compare-and-set against the reservation token: if the slot no longer holds it,
+nothing is written, the new session is expired and withheld, and the request
+answers 409. The Stripe client's timeout and retries (`STRIPE_TIMEOUT_MS`,
+`STRIPE_MAX_NETWORK_RETRIES` in `lib/constants.ts`) are set so two calls fit
+inside the TTL anyway; a test pins that budget.
+
+Finally, the handler checks the user-deletion flag (`lib/deletion-guard.ts`)
+twice: before doing anything, and again once the session exists, expiring and
+withholding it if the user's deletion started in between. See "Deleting a user".
+
 ```mermaid
 flowchart TD
     Start(["POST /checkout { planId }"]) --> LookupPlan["paymentsRepo.plan.get(planId)"]
@@ -51,9 +71,16 @@ flowchart TD
     PlanExists -- no --> NotFound["404 Plan not found"]
     PlanExists -- yes --> IsOneTime{"plan.type === one_time?"}
     IsOneTime -- no --> Unprocessable["422 Plan is not a one-time plan"]
-    IsOneTime -- yes --> Repeatable{"plan.repeatable?"}
+    IsOneTime -- yes --> Deleting{"user's deletion\nunder way?"}
+    Deleting -->|redis error| Err500g["500"]
+    Deleting -- yes --> Conflict3["409 This account is being deleted"]
+    Deleting -- no --> Repeatable{"plan.repeatable?"}
 
-    Repeatable -- yes --> EnsureCustomer
+    Repeatable -- yes --> ResumeRep{"this user's open session\nfor this plan?"}
+    ResumeRep -- yes --> Resume200b["200 Checkout resumed"]
+    ResumeRep -- no --> Lock["acquireCreateLock(userId, planId)\n(SET NX, TTL 5 min, freed after the call)"]
+    Lock -- "held elsewhere" --> Conflict4["409 checkout in progress"]
+    Lock -- acquired --> EnsureCustomer
     Repeatable -- no --> CheckOwned["paymentsRepo.purchase.getBlockingByPlan(userId, planId)\n(paid or disputed - only refunded frees the slot)"]
     CheckOwned -->|db error| Err500b["500"]
     CheckOwned --> AlreadyOwns{"a blocking purchase\nalready exists?"}
@@ -74,9 +101,12 @@ flowchart TD
     EnsureCustomer --> CreateSession
 
     CreateSession["createCheckout:\nstripe.checkout.sessions.create\n(mode: payment, customer: stripeCustomerId,\nmetadata: userId, planId, durationDays snapshot)"] -->|stripe error| Err500d["500\n(releases the reservation)"]
-    CreateSession --> SavePending["savePendingCheckout\n(Redis key checkout:sessionId + a\ncheckout:active:userId:planId pointer,\nreplacing the reservation;\nstatus: open, the session url, TTL 24h)"]
+    CreateSession --> SavePending["savePendingCheckout\n(Redis key checkout:sessionId + a\ncheckout:active:userId:planId pointer,\nreplacing the reservation - only if the\nslot still holds it;\nstatus: open, the session url, TTL 24h)"]
     SavePending -->|redis error| Err500f["500\n(harmless - the Stripe session\nstill expires on its own)"]
-    SavePending --> Return200["200 { sessionId, url }"]
+    SavePending -- "reservation lapsed,\nslot taken" --> Lost["expire the new session,\n409 checkout in progress"]
+    SavePending --> Recheck2{"user's deletion started\nmeanwhile?"}
+    Recheck2 -- yes --> Withhold["expire the session,\n409 This account is being deleted"]
+    Recheck2 -- no --> Return200["200 { sessionId, url }"]
     Return200 --> Redirect(["client redirects user to\nthe Stripe-hosted url"])
 ```
 
@@ -666,8 +696,8 @@ and keeps existing ones working:
 - **One-time:** `POST /checkout` already 404s an inactive plan. Existing
   purchases keep their access per `RETIRED_PLANS_KEEP_ACCESS`.
 - **Recurring:** `getSubscriptionPlans` hands the stripe plugin *every*
-  recurring plan, retired ones included, and `blockRetiredPlanUpgrade`
-  (`lib/plan-retirement.ts`, wired as better-auth's `hooks.before`) refuses
+  recurring plan, retired ones included, and `rejectRetiredPlanUpgrade`
+  (`lib/plan-retirement.ts`, run from better-auth's `hooks.before` via `lib/auth-hooks.ts`) refuses
   `/subscription/upgrade` to a retired plan with the same
   `SUBSCRIPTION_PLAN_NOT_FOUND` answer the plugin gives an unknown plan. The
   plugin uses one plan list for two jobs - what can be subscribed to, and
@@ -702,6 +732,16 @@ billing a user who no longer exists. It runs first so no new subscription can
 appear after the cancellation pass has listed them, and fails closed the same
 way (a session the user completed at that very moment fails the expiry, and a
 retry then finds it no longer open).
+
+Both passes run behind a deleting flag (`lib/deletion-guard.ts`), raised before
+the expiry pass lists anything. The user's session stays valid until the row is
+gone, so without it a `POST /checkout` or `/subscription/upgrade` landing between
+the expiry pass and the delete would create a session nothing expires. Every
+checkout path checks the flag before creating a session and again after (one-time
+checkouts in `route.ts`, subscription ones in `paymentsAfterHook`): a session
+created before the flag went up is seen by the expiry pass; one whose after-check
+sees the flag is expired by its own request and its URL withheld. The flag comes
+down only if the deletion is aborted.
 
 It lists the customer's subscriptions from Stripe rather than reading the
 `subscription` table, so a subscription with a missing or stale row is still
@@ -786,11 +826,3 @@ fit, and better-auth already owns it end-to-end.
   `@better-auth/stripe`'s declared peer range stops at `^22` (and separately,
   its peer on `better-auth` itself is `^1.7.7` while this repo runs `1.7.4`).
   Nothing is currently broken; revisit if an actual incompatibility surfaces.
-- **`reservePendingCheckout`'s TTL-based lock has a narrow theoretical gap** -
-  `RESERVATION_TTL_SEC` (5 min) is generous enough to outlast
-  `ensureStripeCustomer` + `checkout.sessions.create` under any normal
-  network condition, but it's still a TTL, not a true lock: if the request
-  somehow took longer than that, a second request could claim the slot
-  before `savePendingCheckout` overwrites the reservation with the real
-  session id, and both would reach Stripe. Accepted as effectively
-  unreachable in practice rather than engineered around.

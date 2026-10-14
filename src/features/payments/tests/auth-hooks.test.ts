@@ -5,6 +5,7 @@ import { user as userTable } from "@d/schemas/auth-schema";
 import { resetDb, seedUser, seedPlan } from "@/test-helpers/db";
 import { resetRedis } from "@/test-helpers/redis";
 import { env } from "@/env";
+import { isUserDeleting, markUserDeleting } from "@f/payments/lib/deletion-guard";
 
 // Exercises the payments hooks through better-auth itself (its real internal adapter and HTTP
 // handler), not by calling them directly - what matters is that auth.ts actually wires them in.
@@ -20,6 +21,9 @@ let fakeCheckoutSessions: { id: string; customer: string; status: string }[] = [
 let expireCalls: string[] = [];
 let expireFails = false;
 let customerCreateFails = false;
+let customerUpdateCalls: { id: string; params: unknown }[] = [];
+// runs inside checkout.sessions.create, to interleave something with a subscription checkout
+let onCheckoutCreate: ((id: string) => Promise<void>) | null = null;
 
 // Stripe's list() result is both awaitable (one page: `{ data }`) and async-iterable (every
 // page) - this app iterates it, the stripe plugin awaits it
@@ -39,7 +43,10 @@ mock.module("@f/payments/payment", () => ({
         return { id: `cus_${crypto.randomUUID()}` };
       },
       retrieve: async (id: string) => ({ id, email: null, deleted: false }),
-      update: async () => ({}),
+      update: async (id: string, params: unknown) => {
+        customerUpdateCalls.push({ id, params });
+        return {};
+      },
       search: async () => ({ data: [] }),
       list: () => listOf([]),
     },
@@ -65,11 +72,15 @@ mock.module("@f/payments/payment", () => ({
         expire: async (id: string) => {
           if (expireFails) throw new Error("Stripe is down");
           expireCalls.push(id);
+          for (const s of fakeCheckoutSessions) if (s.id === id) s.status = "expired";
           return { id, status: "expired" };
         },
-        create: async () => {
+        create: async (params: { customer?: string }) => {
           checkoutCreateCalls++;
-          return { id: "cs_sub_fake", url: "https://checkout.stripe.com/sub" };
+          const id = `cs_sub_${checkoutCreateCalls}`;
+          fakeCheckoutSessions.push({ id, customer: params.customer ?? "", status: "open" });
+          await onCheckoutCreate?.(id);
+          return { id, url: "https://checkout.stripe.com/sub" };
         },
       },
     },
@@ -90,6 +101,8 @@ beforeEach(async () => {
   fakeCheckoutSessions = [];
   expireCalls = [];
   expireFails = false;
+  customerUpdateCalls = [];
+  onCheckoutCreate = null;
 });
 
 const userExists = async (id: string) =>
@@ -281,5 +294,155 @@ describe("a Stripe customer created at checkout reaches the cached session", () 
     expect(customerCreateCalls).toBe(1);
     const [row] = await db.select().from(userTable).where(eq(userTable.id, session!.user.id));
     expect(row?.stripeCustomerId).toBe(customerId);
+  });
+});
+
+describe("stripeCustomerId can't be set from a request", () => {
+  const post = (path: string, body: unknown, cookie?: string) =>
+    auth.handler(
+      new Request(`${env.BETTER_AUTH_URL}/api/auth${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: env.CLIENT_URL,
+          ...(cookie ? { cookie } : {}),
+        },
+        body: JSON.stringify(body),
+      }),
+    );
+  const rowByEmail = async (email: string) =>
+    (await db.select().from(userTable).where(eq(userTable.email, email)))[0];
+
+  test("sign-up with it is refused, and no user is created", async () => {
+    const email = `u-${crypto.randomUUID()}@example.com`;
+    const res = await post("/sign-up/email", {
+      email,
+      password: "correct-horse-battery",
+      name: "Test",
+      stripeCustomerId: "cus_victim",
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ code: "FIELD_NOT_ALLOWED" });
+    expect(await rowByEmail(email)).toBeUndefined();
+  });
+
+  test("update-user with it is refused, leaving the customer and Stripe untouched", async () => {
+    const email = `u-${crypto.randomUUID()}@example.com`;
+    const signUp = await post("/sign-up/email", {
+      email,
+      password: "correct-horse-battery",
+      name: "Test",
+    });
+    const cookie = signUp.headers.get("set-cookie") ?? "";
+    const own = (await rowByEmail(email))?.stripeCustomerId;
+    expect(own).toBeString();
+    customerUpdateCalls = [];
+
+    const res = await post("/update-user", { stripeCustomerId: "cus_victim" }, cookie);
+
+    expect(res.status).toBe(400);
+    expect((await rowByEmail(email))?.stripeCustomerId).toBe(own);
+    expect(customerUpdateCalls).toEqual([]);
+  });
+
+  test("null or empty is refused too - it would detach the user from their customer", async () => {
+    const email = `u-${crypto.randomUUID()}@example.com`;
+    const signUp = await post("/sign-up/email", {
+      email,
+      password: "correct-horse-battery",
+      name: "Test",
+    });
+    const cookie = signUp.headers.get("set-cookie") ?? "";
+
+    for (const value of [null, ""]) {
+      const res = await post("/update-user", { stripeCustomerId: value }, cookie);
+      expect(res.status).toBe(400);
+    }
+  });
+
+  test("ordinary profile updates still work", async () => {
+    const email = `u-${crypto.randomUUID()}@example.com`;
+    const signUp = await post("/sign-up/email", {
+      email,
+      password: "correct-horse-battery",
+      name: "Test",
+    });
+    const cookie = signUp.headers.get("set-cookie") ?? "";
+
+    const res = await post("/update-user", { name: "Renamed" }, cookie);
+
+    expect(res.status).toBe(200);
+    expect((await rowByEmail(email))?.name).toBe("Renamed");
+  });
+});
+
+describe("no subscription checkout survives a user's deletion", () => {
+  async function signIn() {
+    const email = `u-${crypto.randomUUID()}@example.com`;
+    const res = await auth.api.signUpEmail({
+      body: { email, password: "correct-horse-battery", name: "Test" },
+      asResponse: true,
+    });
+    const cookie = res.headers.get("set-cookie") ?? "";
+    const session = await auth.api.getSession({ headers: new Headers({ cookie }) });
+    return { cookie, userId: session!.user.id };
+  }
+
+  const upgrade = (cookie: string) =>
+    auth.handler(
+      new Request(`${env.BETTER_AUTH_URL}/api/auth/subscription/upgrade`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie, origin: env.CLIENT_URL },
+        body: JSON.stringify({
+          plan: "current",
+          successUrl: `${env.CLIENT_URL}/ok`,
+          cancelUrl: `${env.CLIENT_URL}/cancel`,
+        }),
+      }),
+    );
+
+  beforeEach(async () => {
+    await seedPlan({ name: "Current", type: "recurring", interval: "month", active: true });
+  });
+
+  test("a deletion already under way refuses a new subscription checkout before Stripe", async () => {
+    const { cookie, userId } = await signIn();
+    await markUserDeleting(userId);
+
+    const res = await upgrade(cookie);
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "ACCOUNT_BEING_DELETED" });
+    expect(checkoutCreateCalls).toBe(0);
+  });
+
+  test("a deletion that starts while the checkout is being created expires it", async () => {
+    const { cookie, userId } = await signIn();
+    // the deletion hook raises its flag after this request's before-check passed, while
+    // Stripe is still creating the session
+    onCheckoutCreate = async () => markUserDeleting(userId);
+
+    const res = await upgrade(cookie);
+
+    expect(res.status).toBe(409);
+    expect(checkoutCreateCalls).toBe(1);
+    expect(expireCalls).toEqual(["cs_sub_1"]);
+    expect(fakeCheckoutSessions.filter((s) => s.status === "open")).toEqual([]);
+  });
+
+  test("an aborted deletion lowers the flag again; a completed one leaves it up", async () => {
+    const aborted = await seedUser({ stripeCustomerId: "cus_abort" });
+    fakeSubscriptions = [{ id: "sub_active", status: "active" }];
+    cancelFails = true;
+    await expect(
+      (async () => (await auth.$context).internalAdapter.deleteUser(aborted))(),
+    ).rejects.toThrow();
+    expect(await isUserDeleting(aborted)).toBe(false);
+
+    cancelFails = false;
+    const deleted = await seedUser({ stripeCustomerId: "cus_gone" });
+    await (await auth.$context).internalAdapter.deleteUser(deleted);
+    expect(await isUserDeleting(deleted)).toBe(true);
   });
 });

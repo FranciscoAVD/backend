@@ -1,9 +1,9 @@
-import { APIError, createAuthMiddleware } from "better-auth/api";
+import { APIError } from "better-auth/api";
 import { paymentsRepo } from "@f/payments/repo";
 
 /**
- * @description Stops new subscriptions to a retired (`active: false`) recurring plan. Wired as
- * better-auth's global `hooks.before` in `auth.ts`.
+ * @description Stops new subscriptions to a retired (`active: false`) recurring plan. Run from
+ * `paymentsBeforeHook` (`lib/auth-hooks.ts`), better-auth's global `hooks.before` in `auth.ts`.
  *
  * Why this exists instead of just leaving retired plans out of the plugin's plan list: the plugin
  * uses that one list for two different jobs - deciding what can be subscribed to, and recognizing
@@ -11,14 +11,18 @@ import { paymentsRepo } from "@f/payments/repo";
  * second job for everyone still subscribed: `/subscription/list` returns them with no `limits` or
  * `priceId`, and for a multi-item subscription the plugin's `customer.subscription.updated`
  * handler stops syncing the row at all. So `getSubscriptionPlans` passes every recurring plan,
- * retired ones included, and this hook takes over the first job.
+ * retired ones included, and this check takes over the first job.
  *
  * It answers exactly like the plugin does for an unknown plan, so a retired plan looks the same as
  * one that never existed. It also blocks switching an existing subscription of that plan between
  * monthly and annual, which goes through the same endpoint - retiring a plan means no new
  * commitments to it.
+ * @throws APIError (400) when the request would start or switch to a retired plan
  */
-export const blockRetiredPlanUpgrade = createAuthMiddleware(async (ctx) => {
+export async function rejectRetiredPlanUpgrade(ctx: {
+  path?: string;
+  body?: unknown;
+}): Promise<void> {
   if (ctx.path !== "/subscription/upgrade") return;
   const name = (ctx.body as { plan?: unknown } | undefined)?.plan;
   // anything malformed is left to the plugin's own body validation
@@ -30,4 +34,4 @@ export const blockRetiredPlanUpgrade = createAuthMiddleware(async (ctx) => {
       message: "Subscription plan not found",
       code: "SUBSCRIPTION_PLAN_NOT_FOUND",
     });
-});
+}

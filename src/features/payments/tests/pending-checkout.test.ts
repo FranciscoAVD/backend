@@ -466,3 +466,43 @@ describe("getResumableCheckout", () => {
     expect(await getResumableCheckout("u1", 1)).toBeNull();
   });
 });
+
+describe("savePendingCheckout with a reservation", () => {
+  beforeEach(resetRedis);
+  const pointer = "checkout:active:u1:1";
+  const data = { userId: "u1", planId: 1, status: "open" as const };
+
+  test("replaces the reservation it still holds with the session", async () => {
+    const token = await reservePendingCheckout("u1", 1);
+
+    expect(await savePendingCheckout("cs_1", data, PENDING_CHECKOUT_TTL_SEC, token!)).toBe(true);
+    expect(await redis.get(pointer)).toBe("cs_1");
+    expect(await getPendingCheckout("cs_1")).toEqual(data);
+  });
+
+  test("writes nothing once the reservation lapsed and someone else took the slot", async () => {
+    const token = await reservePendingCheckout("u1", 1);
+    await redis.del(pointer);
+    const other = await reservePendingCheckout("u1", 1);
+
+    expect(await savePendingCheckout("cs_1", data, PENDING_CHECKOUT_TTL_SEC, token!)).toBe(false);
+    expect(await redis.get(pointer)).toBe(other!);
+    expect(await getPendingCheckout("cs_1")).toBeNull();
+  });
+
+  test("writes nothing once the reservation lapsed, even with the slot left free", async () => {
+    const token = await reservePendingCheckout("u1", 1);
+    await redis.del(pointer);
+
+    expect(await savePendingCheckout("cs_1", data, PENDING_CHECKOUT_TTL_SEC, token!)).toBe(false);
+    expect(await redis.get(pointer)).toBeNull();
+  });
+
+  test("outlasts two Stripe calls at the client's worst case", async () => {
+    const { STRIPE_TIMEOUT_MS, STRIPE_MAX_NETWORK_RETRIES } = await import(
+      "@f/payments/lib/constants"
+    );
+    const worstCaseMs = 2 * STRIPE_TIMEOUT_MS * (1 + STRIPE_MAX_NETWORK_RETRIES);
+    expect(RESERVATION_TTL_SEC * 1000).toBeGreaterThan(worstCaseMs);
+  });
+});

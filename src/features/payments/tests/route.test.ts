@@ -48,6 +48,8 @@ let sessionCreateCalls: Record<string, unknown>[] = [];
 // guard and the Stripe call, as a real network round-trip would; a failure exercises cleanup
 let sessionCreateDelayMs = 0;
 let sessionCreateFails = false;
+// runs inside checkout.sessions.create, to interleave another request's work with this one's
+let onSessionCreate: (() => Promise<void>) | null = null;
 // PATCH /plans/:id's retire/reactivate mirroring onto the plan's Stripe prices
 let priceUpdateCalls: { id: string; active: boolean }[] = [];
 let priceUpdateFails = false;
@@ -77,6 +79,7 @@ mock.module("@f/payments/payment", () => ({
           sessionCreateCalls.push(args);
           if (sessionCreateDelayMs) await Bun.sleep(sessionCreateDelayMs);
           if (sessionCreateFails) throw new Error("Stripe is down");
+          await onSessionCreate?.();
           return { id: "cs_test_fake", url: "https://checkout.stripe.com/fake" };
         },
       },
@@ -94,6 +97,8 @@ import {
 } from "@f/payments/lib/pending-checkout";
 import { paymentsRepo } from "@f/payments/repo";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
+import { redis } from "@/lib/redis";
+import { markUserDeleting } from "@f/payments/lib/deletion-guard";
 // dynamic, not static - route.ts calls .use(sessionMiddleware) at module-evaluation
 // time, capturing the function by value into Hono's middleware chain immediately.
 // A static import is hoisted above the mock.module call above regardless of its
@@ -827,6 +832,9 @@ describe("POST /checkout", () => {
     sessionCreateCalls = [];
     sessionCreateDelayMs = 0;
     sessionCreateFails = false;
+    onSessionCreate = null;
+    expiredSessions = [];
+    expireFails = false;
   });
 
   test("404s for a nonexistent plan", async () => {
@@ -1124,5 +1132,136 @@ describe("POST /checkout", () => {
 
     sessionCreateFails = false;
     expect((await request()).status).toBe(200);
+  });
+});
+
+describe("POST /checkout: reservations, deletion and repeatable plans", () => {
+  beforeEach(async () => {
+    await resetDb();
+    await resetRedis();
+    sessionCreateCalls = [];
+    sessionCreateDelayMs = 0;
+    sessionCreateFails = false;
+    onSessionCreate = null;
+    expiredSessions = [];
+    expireFails = false;
+  });
+
+  const checkout = (planId: number) =>
+    app.request("/checkout", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ planId }),
+    });
+
+  test("a reservation that lapsed while Stripe answered doesn't clobber the slot's new holder", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: false });
+    setSession({ id: userId, ...regularUser });
+    const pointer = `checkout:active:${userId}:${plan.id}`;
+    const { reservePendingCheckout } = await import("@f/payments/lib/pending-checkout");
+    let otherReservation: string | null = null;
+    // this request's reservation expires mid-call, and another request claims the slot
+    onSessionCreate = async () => {
+      await redis.del(pointer);
+      otherReservation = await reservePendingCheckout(userId, plan.id);
+    };
+
+    const res = await checkout(plan.id);
+
+    expect(res.status).toBe(409);
+    expect(otherReservation).not.toBeNull();
+    // the other request still holds the slot, and this request's session was withheld and expired
+    expect(await redis.get(pointer)).toBe(otherReservation!);
+    expect(await getPendingCheckout("cs_test_fake")).toBeNull();
+    expect(expiredSessions).toEqual(["cs_test_fake"]);
+  });
+
+  test("refuses a checkout once the user's deletion has started, before reaching Stripe", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: true });
+    setSession({ id: userId, ...regularUser });
+    await markUserDeleting(userId);
+
+    const res = await checkout(plan.id);
+
+    expect(res.status).toBe(409);
+    expect(sessionCreateCalls).toHaveLength(0);
+  });
+
+  test("a deletion that starts while the session is being created expires it", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: false });
+    setSession({ id: userId, ...regularUser });
+    onSessionCreate = async () => markUserDeleting(userId);
+
+    const res = await checkout(plan.id);
+
+    expect(res.status).toBe(409);
+    expect(JSON.stringify(await res.json())).not.toContain("checkout.stripe.com");
+    expect(expiredSessions).toEqual(["cs_test_fake"]);
+    expect(await getPendingCheckout("cs_test_fake")).toBeNull();
+  });
+
+  test("repeatable plan: a second request reuses the open session instead of creating another", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: true });
+    setSession({ id: userId, ...regularUser });
+
+    const first = await checkout(plan.id);
+    const second = await checkout(plan.id);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(await second.json()).toMatchObject({
+      data: { sessionId: "cs_test_fake" },
+      message: "Checkout resumed",
+    });
+    expect(sessionCreateCalls).toHaveLength(1);
+  });
+
+  test("repeatable plan: concurrent requests reach Stripe once", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: true });
+    setSession({ id: userId, ...regularUser });
+    sessionCreateDelayMs = 50;
+
+    const statuses = await Promise.all(
+      Array.from({ length: 5 }, async () => (await checkout(plan.id)).status),
+    );
+
+    expect(statuses.filter((status) => status === 200)).toHaveLength(1);
+    expect(statuses.filter((status) => status === 409)).toHaveLength(4);
+    expect(sessionCreateCalls).toHaveLength(1);
+    // and the lock is freed: the next request resumes the session
+    expect((await checkout(plan.id)).status).toBe(200);
+    expect(sessionCreateCalls).toHaveLength(1);
+  });
+
+  test("repeatable plan: a settling (processing) purchase doesn't block buying it again", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: true });
+    await savePendingCheckout(
+      "cs_settling",
+      { userId, planId: plan.id, status: "processing", url: "https://checkout.stripe.com/s" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+    setSession({ id: userId, ...regularUser });
+
+    const res = await checkout(plan.id);
+
+    expect(res.status).toBe(200);
+    expect(sessionCreateCalls).toHaveLength(1);
+  });
+
+  test("repeatable plan: a failed Stripe call frees the lock for a retry", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: true });
+    setSession({ id: userId, ...regularUser });
+    sessionCreateFails = true;
+
+    expect((await checkout(plan.id)).status).toBe(500);
+    sessionCreateFails = false;
+    expect((await checkout(plan.id)).status).toBe(200);
   });
 });

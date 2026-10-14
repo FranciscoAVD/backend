@@ -82,7 +82,7 @@ export async function getPlanByPriceId(
  * better-auth's stripe plugin expects. Passed as the plugin's `subscription.plans`, which it
  * resolves on every subscription call. Retired plans stay in the list so the plugin still
  * recognizes the plan of a subscription that already exists; new subscriptions to them are
- * blocked by `blockRetiredPlanUpgrade` instead (see `lib/plan-retirement.ts` for why).
+ * blocked by `rejectRetiredPlanUpgrade` instead (see `lib/plan-retirement.ts` for why).
  * @returns Array of StripePlans.
  */
 export async function getSubscriptionPlans(): Promise<StripePlan[]> {

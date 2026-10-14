@@ -16,7 +16,9 @@ import {
   cancelSubscriptionsForDeletedUser,
   expireCheckoutsForDeletedUser,
 } from "@f/payments/lib/user-deletion";
-import { blockRetiredPlanUpgrade } from "@f/payments/lib/plan-retirement";
+import { paymentsBeforeHook, paymentsAfterHook } from "@f/payments/lib/auth-hooks";
+import { markUserDeleting, clearUserDeleting } from "@f/payments/lib/deletion-guard";
+import tryCatch from "@vicstack/try-catch";
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, {
@@ -61,18 +63,31 @@ export const auth = betterAuth({
         // every deletion path (admin removeUser, self-service /delete-user) runs this; a throw
         // aborts the deletion, so a user is never removed while Stripe is still billing them -
         // or while a checkout they left open could still be paid. Checkouts first, so none can
-        // start a subscription after the cancellation pass has listed them
+        // start a subscription after the cancellation pass has listed them. The deleting flag goes
+        // up before either pass, so a checkout started while this runs is expired too (see
+        // payments/lib/deletion-guard.ts); it comes down again only if the deletion is aborted
         before: async (user) => {
-          await expireCheckoutsForDeletedUser(user);
-          await cancelSubscriptionsForDeletedUser(user);
+          await markUserDeleting(user.id);
+          try {
+            await expireCheckoutsForDeletedUser(user);
+            await cancelSubscriptionsForDeletedUser(user);
+          } catch (error) {
+            const [, clearError] = await tryCatch(clearUserDeleting(user.id));
+            if (clearError)
+              logger.warn({ err: clearError, user: user.id }, "payments.deletion_guard.clear");
+            throw error;
+          }
         },
       },
     },
   },
   hooks: {
-    // the stripe plugin is handed retired plans too (so existing subscribers keep resolving);
-    // this is what stops anyone starting a new subscription to one
-    before: blockRetiredPlanUpgrade,
+    // rejects server-only user fields (stripeCustomerId) on sign-up/update-user, stops new
+    // subscriptions to retired plans (the stripe plugin is handed those too, so existing
+    // subscribers keep resolving), and blocks subscription checkouts during account deletion
+    before: paymentsBeforeHook,
+    // re-checks the deletion flag once a subscription checkout exists (see deletion-guard.ts)
+    after: paymentsAfterHook,
   },
   plugins: [
     stripe({

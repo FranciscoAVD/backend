@@ -70,7 +70,7 @@ describe("getSubscriptionPlans", () => {
     });
 
     // retired plans stay in the list so existing subscribers keep resolving; new
-    // subscriptions to them are blocked by blockRetiredPlanUpgrade instead
+    // subscriptions to them are blocked by rejectRetiredPlanUpgrade instead
     const res = await getSubscriptionPlans();
     expect(res.map((p) => p.name).sort()).toEqual(["Inactive Recurring", "Monthly"]);
     expect(res.find((p) => p.name === "Monthly")).toMatchObject({

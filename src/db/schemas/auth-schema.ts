@@ -20,7 +20,10 @@ export const user = pgTable("user", {
   updatedAt: timestamp("updated_at")
     .$onUpdate(() => new Date())
     .notNull(),
-  stripeCustomerId: text("stripe_customer_id"),
+  // unique: the stripe plugin resolves webhook events back to a user by this column (findOne), so
+  // two users sharing one customer would get each other's subscriptions. Keep this if the schema
+  // is ever regenerated with the better-auth CLI, which doesn't know about it
+  stripeCustomerId: text("stripe_customer_id").unique(),
   role: text("role"),
   banned: boolean("banned").default(false),
   banReason: text("ban_reason"),
