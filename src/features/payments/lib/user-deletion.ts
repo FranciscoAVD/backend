@@ -63,3 +63,43 @@ export async function cancelSubscriptionsForDeletedUser(
     );
   return cancelled;
 }
+
+/**
+ * @description Expires every open Checkout Session a user has, before the user is deleted - both this
+ * feature's one-time checkouts and the stripe plugin's subscription ones. Otherwise a tab left open
+ * at deletion time could still be paid: a one-time purchase would be recorded with no owner, and a
+ * subscription checkout would start billing a user who no longer exists. Runs before
+ * `cancelSubscriptionsForDeletedUser`, so no new subscription can appear after that lists them.
+ *
+ * Fails closed, the same as cancellation: if an expiry fails (including a session the user completed
+ * at that very moment), this throws and better-auth aborts the deletion. Retrying is safe - an
+ * already-expired or completed session is no longer listed as open.
+ * @param user the user row about to be deleted
+ * @returns the ids of the sessions it expired.
+ */
+export async function expireCheckoutsForDeletedUser(user: DeletedUser): Promise<string[]> {
+  if (!user.stripeCustomerId) return [];
+
+  const stripe = getPaymentProcessor();
+  const expired: string[] = [];
+  for await (const session of stripe.checkout.sessions.list({
+    customer: user.stripeCustomerId,
+    status: "open",
+    limit: 100,
+  })) {
+    try {
+      await stripe.checkout.sessions.expire(session.id);
+      expired.push(session.id);
+    } catch (error) {
+      logger.error(
+        { err: error, user: user.id, session: session.id },
+        "payments.user_delete.expire_checkout",
+      );
+      throw error;
+    }
+  }
+
+  if (expired.length)
+    logger.info({ user: user.id, sessions: expired }, "payments.user_delete.expired_checkouts");
+  return expired;
+}

@@ -12,7 +12,10 @@ import { stripe } from "@better-auth/stripe";
 import { getPaymentProcessor } from "@f/payments/payment";
 import { paymentsRepo } from "@f/payments/repo";
 import { handleStripeEvent } from "@f/payments/lib/webhook";
-import { cancelSubscriptionsForDeletedUser } from "@f/payments/lib/user-deletion";
+import {
+  cancelSubscriptionsForDeletedUser,
+  expireCheckoutsForDeletedUser,
+} from "@f/payments/lib/user-deletion";
 import { blockRetiredPlanUpgrade } from "@f/payments/lib/plan-retirement";
 
 export const auth = betterAuth({
@@ -52,8 +55,11 @@ export const auth = betterAuth({
     user: {
       delete: {
         // every deletion path (admin removeUser, self-service /delete-user) runs this; a throw
-        // aborts the deletion, so a user is never removed while Stripe is still billing them
+        // aborts the deletion, so a user is never removed while Stripe is still billing them -
+        // or while a checkout they left open could still be paid. Checkouts first, so none can
+        // start a subscription after the cancellation pass has listed them
         before: async (user) => {
+          await expireCheckoutsForDeletedUser(user);
           await cancelSubscriptionsForDeletedUser(user);
         },
       },

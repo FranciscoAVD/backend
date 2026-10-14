@@ -15,6 +15,10 @@ let cancelCalls: { id: string; params: unknown }[] = [];
 let cancelFails = false;
 let checkoutCreateCalls = 0;
 let customerCreateCalls = 0;
+// a customer's Checkout Sessions, by status - what checkout.sessions.list filters on
+let fakeCheckoutSessions: { id: string; customer: string; status: string }[] = [];
+let expireCalls: string[] = [];
+let expireFails = false;
 let customerCreateFails = false;
 
 // Stripe's list() result is both awaitable (one page: `{ data }`) and async-iterable (every
@@ -50,6 +54,19 @@ mock.module("@f/payments/payment", () => ({
     prices: { retrieve: async (id: string) => ({ id, recurring: { interval: "month" } }) },
     checkout: {
       sessions: {
+        list: (params: { customer?: string; status?: string }) =>
+          listOf(
+            fakeCheckoutSessions.filter(
+              (s) =>
+                (!params.customer || s.customer === params.customer) &&
+                (!params.status || s.status === params.status),
+            ),
+          ),
+        expire: async (id: string) => {
+          if (expireFails) throw new Error("Stripe is down");
+          expireCalls.push(id);
+          return { id, status: "expired" };
+        },
         create: async () => {
           checkoutCreateCalls++;
           return { id: "cs_sub_fake", url: "https://checkout.stripe.com/sub" };
@@ -70,6 +87,9 @@ beforeEach(async () => {
   checkoutCreateCalls = 0;
   customerCreateCalls = 0;
   customerCreateFails = false;
+  fakeCheckoutSessions = [];
+  expireCalls = [];
+  expireFails = false;
 });
 
 const userExists = async (id: string) =>
@@ -104,6 +124,32 @@ describe("deleting a user cancels their subscriptions", () => {
 
     await expect(
       (await auth.$context).internalAdapter.deleteUser(userId),
+    ).rejects.toThrow();
+    expect(await userExists(userId)).toBe(true);
+  });
+
+  test("expires the user's open checkouts too, so nothing can be bought after deletion", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_del" });
+    fakeCheckoutSessions = [
+      { id: "cs_open_one_time", customer: "cus_del", status: "open" },
+      { id: "cs_open_subscription", customer: "cus_del", status: "open" },
+      { id: "cs_done", customer: "cus_del", status: "complete" },
+      { id: "cs_someone_else", customer: "cus_other", status: "open" },
+    ];
+
+    await (await auth.$context).internalAdapter.deleteUser(userId);
+
+    expect(expireCalls.sort()).toEqual(["cs_open_one_time", "cs_open_subscription"]);
+    expect(await userExists(userId)).toBe(false);
+  });
+
+  test("a failed expiry aborts the deletion, same as a failed cancellation", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_del" });
+    fakeCheckoutSessions = [{ id: "cs_open", customer: "cus_del", status: "open" }];
+    expireFails = true;
+
+    await expect(
+      (async () => (await auth.$context).internalAdapter.deleteUser(userId))(),
     ).rejects.toThrow();
     expect(await userExists(userId)).toBe(true);
   });

@@ -641,6 +641,15 @@ cancelled a deleted user's subscriptions before this, so a deleted user kept
 being billed (the plugin only has a hook for deleting organizations, which
 this app doesn't use).
 
+First, `expireCheckoutsForDeletedUser` (same file, same hook) expires every
+Checkout Session the customer still has open - this feature's one-time ones
+and the plugin's subscription ones alike. Otherwise a tab left open at deletion
+could still be paid: a purchase recorded with no owner, or a subscription
+billing a user who no longer exists. It runs first so no new subscription can
+appear after the cancellation pass has listed them, and fails closed the same
+way (a session the user completed at that very moment fails the expiry, and a
+retry then finds it no longer open).
+
 It lists the customer's subscriptions from Stripe rather than reading the
 `subscription` table, so a subscription with a missing or stale row is still
 caught, and cancels every one not already in a terminal status, on
