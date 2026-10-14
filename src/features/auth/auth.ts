@@ -24,6 +24,10 @@ export const auth = betterAuth({
     schema,
   }),
   trustedOrigins: [env.CLIENT_URL],
+  advanced: {
+    // lets the rate limiter see the real client through this app's own proxies (see env.ts)
+    ipAddress: { trustedProxies: env.TRUSTED_PROXIES },
+  },
   // without a `verification.storeInDatabase: true` override, having secondaryStorage
   // set means verification records (email verification, password reset, OAuth state)
   // live only in Redis, never in the DB `verification` table
