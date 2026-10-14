@@ -53,3 +53,20 @@ export async function getReconcilableSubscriptions(): Promise<Subscription[]> {
     .from(subscriptionTable)
     .where(notInArray(subscriptionTable.status, [...SUBSCRIPTION_TERMINAL_STATUSES]));
 }
+
+/**
+ * @description Select query for the subscription rows with the given IDs (better-auth's own row IDs,
+ * not Stripe's) - e.g. to see which plan the stripe plugin's pending checkouts are for, since it tags
+ * each with its row's id. Assumes validation. Operation must be wrapped in try-catch
+ * @param ids the subscription row IDs to look up
+ * @returns The matching rows' IDs and plan names; IDs with no row are left out.
+ */
+export async function getSubscriptionsByIds(
+  ids: string[],
+): Promise<Pick<Subscription, "id" | "plan">[]> {
+  if (ids.length === 0) return [];
+  return db
+    .select({ id: subscriptionTable.id, plan: subscriptionTable.plan })
+    .from(subscriptionTable)
+    .where(inArray(subscriptionTable.id, ids));
+}

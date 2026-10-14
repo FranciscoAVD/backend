@@ -51,6 +51,10 @@ let sessionCreateFails = false;
 // PATCH /plans/:id's retire/reactivate mirroring onto the plan's Stripe prices
 let priceUpdateCalls: { id: string; active: boolean }[] = [];
 let priceUpdateFails = false;
+// open Checkout Sessions on the account, for PATCH /plans/:id's retirement expiry
+let openSessions: { id: string; status: string; metadata: Record<string, string> }[] = [];
+let expiredSessions: string[] = [];
+let expireFails = false;
 mock.module("@f/payments/payment", () => ({
   getPaymentProcessor: () => ({
     prices: {
@@ -62,6 +66,13 @@ mock.module("@f/payments/payment", () => ({
     },
     checkout: {
       sessions: {
+        list: (params: { status?: string }) =>
+          openSessions.filter((s) => !params.status || s.status === params.status),
+        expire: async (id: string) => {
+          if (expireFails) throw new Error("Stripe is down");
+          expiredSessions.push(id);
+          return { id, status: "expired" };
+        },
         create: async (args: Record<string, unknown>) => {
           sessionCreateCalls.push(args);
           if (sessionCreateDelayMs) await Bun.sleep(sessionCreateDelayMs);
@@ -588,6 +599,64 @@ describe("PATCH /plans/:id", () => {
     await resetRedis();
     priceUpdateCalls = [];
     priceUpdateFails = false;
+    openSessions = [];
+    expiredSessions = [];
+    expireFails = false;
+  });
+
+  test("retiring a one-time plan expires checkouts still open for it, and only those", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    const other = await seedPlan();
+    openSessions = [
+      { id: "cs_this_plan", status: "open", metadata: { planId: String(plan.id) } },
+      { id: "cs_other_plan", status: "open", metadata: { planId: String(other.id) } },
+      { id: "cs_done", status: "complete", metadata: { planId: String(plan.id) } },
+      { id: "cs_foreign", status: "open", metadata: {} },
+    ];
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+
+    expect((await patch(plan.id, { active: false })).status).toBe(204);
+    expect(expiredSessions).toEqual(["cs_this_plan"]);
+  });
+
+  test("retiring a recurring plan expires the stripe plugin's open checkouts for it", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ name: "Pro", type: "recurring", interval: "month", durationDays: null });
+    // the plugin's pending row for a subscription checkout, and one for another plan
+    await seedSubscription({ id: "subrow_pro", referenceId: userId, plan: "pro", status: "incomplete" });
+    await seedSubscription({ id: "subrow_basic", referenceId: userId, plan: "basic", status: "incomplete" });
+    openSessions = [
+      { id: "cs_sub_pro", status: "open", metadata: { subscriptionId: "subrow_pro", userId } },
+      { id: "cs_sub_basic", status: "open", metadata: { subscriptionId: "subrow_basic", userId } },
+    ];
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+
+    expect((await patch(plan.id, { active: false })).status).toBe(204);
+    expect(expiredSessions).toEqual(["cs_sub_pro"]);
+  });
+
+  test("reactivating a plan expires nothing", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ active: false });
+    openSessions = [{ id: "cs_x", status: "open", metadata: { planId: String(plan.id) } }];
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+
+    expect((await patch(plan.id, { active: true })).status).toBe(204);
+    expect(expiredSessions).toEqual([]);
+  });
+
+  test("a failed expiry 500s, and repeating the retirement completes it", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    openSessions = [{ id: "cs_open", status: "open", metadata: { planId: String(plan.id) } }];
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+
+    expireFails = true;
+    expect((await patch(plan.id, { active: false })).status).toBe(500);
+    expireFails = false;
+    expect((await patch(plan.id, { active: false })).status).toBe(204);
+    expect(expiredSessions).toEqual(["cs_open"]);
   });
 
   const patch = (id: number, body: Record<string, unknown>) =>

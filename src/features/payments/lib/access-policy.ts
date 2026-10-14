@@ -59,6 +59,14 @@ export const PARTIAL_REFUND_REVOKES_ACCESS = false;
 export const RETIRED_PLANS_KEEP_ACCESS = true;
 
 /**
+ * Whether retiring a plan also expires checkouts already open for it. `true` means retiring stops
+ * every new purchase at once: archiving the plan's price blocks new checkouts, but one created
+ * before retirement would otherwise stay payable for up to 24h. Set `false` to let anyone already
+ * mid-checkout finish (grandfathering the last few buyers).
+ */
+export const RETIRING_EXPIRES_OPEN_CHECKOUTS = true;
+
+/**
  * How a user's live subscriptions are cancelled when the user is deleted. Without this, deleting a
  * user would leave Stripe billing them indefinitely. The default ends the subscription now, with
  * no refund for the unused part of the period and no final invoice for pending usage.

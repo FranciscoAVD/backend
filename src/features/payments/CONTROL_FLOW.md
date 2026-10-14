@@ -631,6 +631,7 @@ documented constant, rather than inside the queries that read it:
 | `PURCHASE_BLOCKING_STATUSES` | `paid`, `disputed` | what stops a non-repeatable plan being bought again |
 | `PARTIAL_REFUND_REVOKES_ACCESS` | `false` | `true` to end access on any refund |
 | `RETIRED_PLANS_KEEP_ACCESS` | `true` | `false` to end access when a plan is deactivated |
+| `RETIRING_EXPIRES_OPEN_CHECKOUTS` | `true` | `false` to let checkouts already open when a plan is retired still complete |
 | `CANCEL_ON_USER_DELETE` | cancel now, no proration | `prorate: true` to credit unused time |
 
 `SUBSCRIPTION_TERMINAL_STATUSES` sits alongside them but isn't a choice - it's
@@ -650,6 +651,14 @@ and keeps existing ones working:
   the plan is already updated in the database and the PATCH answers 500; the
   sync is idempotent, so repeating the same PATCH completes it. (A plan retired
   before this existed still has active prices - PATCH `{ active: false }` again.)
+- **Checkouts already open:** archiving a price doesn't touch a session created
+  before retirement, which would stay payable for up to 24h. Per
+  `RETIRING_EXPIRES_OPEN_CHECKOUTS` (on by default), retiring also expires every
+  open session for the plan (`expireOpenCheckoutsForPlan`): one-time ones by their
+  `metadata.planId`, the plugin's subscription ones by the plan of the pending
+  `subscription` row their `metadata.subscriptionId` points at. Turn it off to let
+  anyone mid-checkout finish. Failures answer 500 like the price sync, and
+  repeating the PATCH completes it.
 
 - **One-time:** `POST /checkout` already 404s an inactive plan. Existing
   purchases keep their access per `RETIRED_PLANS_KEEP_ACCESS`.

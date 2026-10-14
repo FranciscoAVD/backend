@@ -18,7 +18,10 @@ import {
   updatePlanSchema,
 } from "@f/payments/lib/schemas";
 import { isCheckoutSessionId } from "@f/payments/lib/utils";
-import { RETIRED_PLANS_KEEP_ACCESS } from "@f/payments/lib/access-policy";
+import {
+  RETIRED_PLANS_KEEP_ACCESS,
+  RETIRING_EXPIRES_OPEN_CHECKOUTS,
+} from "@f/payments/lib/access-policy";
 
 import tryCatch from "@vicstack/try-catch";
 import HTTP from "@vicstack/http";
@@ -463,7 +466,15 @@ const app = new Hono<PinoLoggerEnv>()
       // sold through anything outside this app (the Customer Portal, a Payment Link, ...).
       // Idempotent, so repeating the same PATCH completes a sync that failed here
       if (data.active !== undefined) {
-        const [, syncError] = await tryCatch(paymentsRepo.plan.syncPricesActive(res));
+        const [, syncError] = await tryCatch(
+          (async () => {
+            await paymentsRepo.plan.syncPricesActive(res);
+            // archiving stops new checkouts, but one opened before retirement would stay
+            // payable for up to 24h - expire those too, per RETIRING_EXPIRES_OPEN_CHECKOUTS
+            if (!res.active && RETIRING_EXPIRES_OPEN_CHECKOUTS)
+              await paymentsRepo.plan.expireOpenCheckouts(res);
+          })(),
+        );
         if (syncError) {
           c.var.logger.error(
             { err: syncError, user: user.id, plan: id },
@@ -472,7 +483,7 @@ const app = new Hono<PinoLoggerEnv>()
           return c.json(
             {
               message:
-                "Plan updated, but its Stripe prices couldn't be updated. Retry the same change.",
+                "Plan updated, but Stripe couldn't be fully updated. Retry the same change.",
             },
             HTTP.InternalServerError,
           );
