@@ -81,10 +81,13 @@ flowchart TD
 ```
 
 `ensureStripeCustomer` re-reads `user.stripeCustomerId` from Postgres on every
-call rather than trusting the session object: better-auth can serve a
-Redis-cached `user` blob without querying Postgres at all, and this function's
-own raw DB write bypasses the adapter hook that would otherwise refresh that
-cache - so a value read from the session can be stale. It also passes a
+call rather than trusting the session object, since better-auth can serve a
+Redis-cached `user` blob without querying Postgres at all. When it does create a
+customer, it saves the id through better-auth's `internalAdapter.updateUser`
+rather than a raw query, so the user's cached sessions are refreshed too. That
+matters beyond this flow: the stripe plugin's subscription upgrade reads
+`stripeCustomerId` from the session, and a stale `null` there made it create a
+second customer and switch the user over to it. It also passes a
 `customer-<userId>` Stripe idempotency key, so a retried call can't create a
 second customer (though it doesn't fully dedupe two truly simultaneous requests
 - Stripe's idempotency semantics don't strictly guarantee that).

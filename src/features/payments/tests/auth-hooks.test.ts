@@ -14,6 +14,8 @@ let fakeSubscriptions: FakeSubscription[] = [];
 let cancelCalls: { id: string; params: unknown }[] = [];
 let cancelFails = false;
 let checkoutCreateCalls = 0;
+let customerCreateCalls = 0;
+let customerCreateFails = false;
 
 // Stripe's list() result is both awaitable (one page: `{ data }`) and async-iterable (every
 // page) - this app iterates it, the stripe plugin awaits it
@@ -27,7 +29,11 @@ const listOf = <T>(items: T[]) =>
 mock.module("@f/payments/payment", () => ({
   getPaymentProcessor: () => ({
     customers: {
-      create: async () => ({ id: `cus_${crypto.randomUUID()}` }),
+      create: async () => {
+        if (customerCreateFails) throw new Error("Stripe is down");
+        customerCreateCalls++;
+        return { id: `cus_${crypto.randomUUID()}` };
+      },
       retrieve: async (id: string) => ({ id, email: null, deleted: false }),
       update: async () => ({}),
       search: async () => ({ data: [] }),
@@ -62,6 +68,8 @@ beforeEach(async () => {
   cancelCalls = [];
   cancelFails = false;
   checkoutCreateCalls = 0;
+  customerCreateCalls = 0;
+  customerCreateFails = false;
 });
 
 const userExists = async (id: string) =>
@@ -183,5 +191,49 @@ describe("the Stripe webhook isn't throttled by better-auth's rate limiter", () 
   test("other auth endpoints are still rate limited", async () => {
     const statuses = await flood("/ok");
     expect(statuses.filter((status) => status === 429).length).toBeGreaterThan(0);
+  });
+});
+
+describe("a Stripe customer created at checkout reaches the cached session", () => {
+  test("the subscription flow reuses it instead of creating a second customer", async () => {
+    await seedPlan({ name: "Current", type: "recurring", interval: "month", active: true });
+
+    // Stripe is down at sign-up, so createCustomerOnSignUp leaves stripeCustomerId unset...
+    customerCreateFails = true;
+    const email = `u-${crypto.randomUUID()}@example.com`;
+    const signUp = await auth.api.signUpEmail({
+      body: { email, password: "correct-horse-battery", name: "Test" },
+      asResponse: true,
+    });
+    const cookie = signUp.headers.get("set-cookie") ?? "";
+    const session = await auth.api.getSession({ headers: new Headers({ cookie }) });
+    expect(session?.user.stripeCustomerId ?? null).toBeNull();
+    customerCreateFails = false;
+
+    // ...then a one-time checkout creates the customer
+    const { ensureStripeCustomer } = await import("@f/payments/use-cases/ensure-customer");
+    const customerId = await ensureStripeCustomer({ id: session!.user.id, name: "Test", email });
+    expect(customerCreateCalls).toBe(1);
+
+    // the session the stripe plugin reads now carries it
+    const refreshed = await auth.api.getSession({ headers: new Headers({ cookie }) });
+    expect(refreshed?.user.stripeCustomerId).toBe(customerId);
+
+    // so subscribing doesn't create (and switch the user to) a second customer
+    const res = await auth.handler(
+      new Request(`${env.BETTER_AUTH_URL}/api/auth/subscription/upgrade`, {
+        method: "POST",
+        headers: { "content-type": "application/json", cookie, origin: env.CLIENT_URL },
+        body: JSON.stringify({
+          plan: "current",
+          successUrl: `${env.CLIENT_URL}/ok`,
+          cancelUrl: `${env.CLIENT_URL}/cancel`,
+        }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(customerCreateCalls).toBe(1);
+    const [row] = await db.select().from(userTable).where(eq(userTable.id, session!.user.id));
+    expect(row?.stripeCustomerId).toBe(customerId);
   });
 });
