@@ -173,7 +173,7 @@ async function updateByCharge(
   const stripePaymentIntentId = idOf(paymentIntent);
   if (!stripePaymentIntentId) return;
 
-  // the live state is fetched with the purchase row locked, so a concurrent sync of the same
+  // written compare-and-set against the row as read before the fetch, so a concurrent sync of the same
   // purchase can't write an older fetch over this one (see syncPurchaseCharge)
   const synced = await paymentsRepo.purchase.syncCharge({ stripePaymentIntentId }, () =>
     resolveChargeState(stripePaymentIntentId),

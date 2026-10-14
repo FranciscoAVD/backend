@@ -308,22 +308,27 @@ refund state rather than forcing `paid`: `charge.disputed` stays true forever
 once a dispute was opened, so a refund made after a won dispute or a closed
 inquiry would otherwise be masked and keep granting access.
 
-The fetch and the write happen with the purchase row locked
-(`syncPurchaseCharge`, `SELECT ... FOR UPDATE` in one transaction), and the
-reconciler syncs through the same function. Re-fetching live state isn't enough
-on its own: two syncs of one purchase running together (a refund and a dispute
-event, a retry, the reconciler) could each fetch, and the one that fetched first
-could write last - undoing a refund and handing access back. Under the lock they
-run one after the other, so the last write always comes from the last fetch.
+The write is a compare-and-set (`syncPurchaseCharge`): the purchase row is read,
+the live state fetched, and the update only lands if the row still holds what
+was read; otherwise it re-reads and re-fetches (up to 3 attempts, then throws so
+the webhook gets a 400 and Stripe redelivers). The reconciler syncs through the
+same function. Re-fetching live state isn't enough on its own: two syncs of one
+purchase running together (a refund and a dispute event, a retry, the
+reconciler) could each fetch, and the one that fetched first could write last -
+undoing a refund and handing access back. Not a row lock held across the fetch:
+that kept a database connection checked out for as long as Stripe took to
+answer, so a burst during a Stripe slowdown could exhaust the pool and stall the
+whole app.
 
 ```mermaid
 flowchart TD
     Start(["updateByCharge(paymentIntent)"]) --> HasId{"payment_intent\npresent on the event?"}
     HasId -- no --> NoOp1["return (nothing to update)"]
-    HasId -- yes --> Lock["syncPurchaseCharge: in a transaction,\nSELECT the purchase for this intent FOR UPDATE"]
-    Lock --> Found{"a purchase row?"}
-    Found -- yes --> Resolve["resolveChargeState(paymentIntentId), lock held:\nstripe.paymentIntents.retrieve(expand: latest_charge)\n+ stripe.disputes.list if charge.disputed"]
-    Resolve --> Write["write status/amountRefunded if they differ\n(no charge yet: nothing to write), commit"]
+    HasId -- yes --> Read["syncPurchaseCharge:\nread the purchase for this intent"]
+    Read --> Found{"a purchase row?"}
+    Found -- yes --> Resolve["resolveChargeState(paymentIntentId):\nstripe.paymentIntents.retrieve(expand: latest_charge)\n+ stripe.disputes.list if charge.disputed"]
+    Resolve --> Write["if it differs: UPDATE ... WHERE the row still\nholds what was read (no charge yet: nothing to write)"]
+    Write -- "row changed meanwhile" --> Read
     Found -- no --> Retrieve["stripe.paymentIntents.retrieve(id)\n(plain, no expand - just for metadata)"]
     Retrieve --> OursButMissing{"intent.metadata.planId\nset (one of our checkouts)?"}
     OursButMissing -- yes --> Throw["throw\n(confirmCheckout's insert is still\nin flight/retrying - fail so Stripe\nretries this event too)"]

@@ -77,8 +77,8 @@ export async function reconcile(
     return { inserted, updated: false };
 
   // the listed snapshot only says *whether* to sync - it was fetched before this pass and a
-  // webhook may have written newer state since. The write itself fetches fresh, with the row
-  // locked, so it can never put an older state over a newer one
+  // webhook may have written newer state since. The write itself fetches fresh and is a
+  // compare-and-set, so it can never put an older state over a newer one
   if (dryRun) {
     logger.info(
       { session: session.id, from: current, to: target, dryRun },
@@ -189,7 +189,7 @@ async function getChargeEventIntents(sinceSec: number): Promise<Set<string>> {
  * @returns Whether the purchase changed (or, in a dry run, would have).
  */
 async function syncCharge(stripePaymentIntentId: string, dryRun: boolean): Promise<boolean> {
-  // locked fetch-then-write, the same as the webhook's (see syncPurchaseCharge)
+  // compare-and-set fetch-then-write, the same as the webhook's (see syncPurchaseCharge)
   const synced = await paymentsRepo.purchase.syncCharge(
     { stripePaymentIntentId },
     () => resolveChargeState(stripePaymentIntentId),
