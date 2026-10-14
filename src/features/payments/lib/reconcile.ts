@@ -334,12 +334,26 @@ export async function reconcileSubscription(
 
   if (!subscriptionFieldsDiffer(row, target)) return { updated: false };
 
+  if (!dryRun) {
+    // only if the row still holds what was read: a webhook that landed since may be newer than
+    // this snapshot, and must not be overwritten (see updateSubscriptionFields)
+    const written = await paymentsRepo.subscription.updateFields(
+      { stripeSubscriptionId: current.id },
+      target,
+      row,
+    );
+    if (!written) {
+      logger.info(
+        { subscription: current.id, from: row, to: target },
+        "payments.reconcile.subscription_changed",
+      );
+      return { updated: false };
+    }
+  }
   logger.info(
     { subscription: current.id, from: row, to: target, dryRun },
     "payments.reconcile.subscription_update",
   );
-  if (!dryRun)
-    await paymentsRepo.subscription.updateFields({ stripeSubscriptionId: current.id }, target);
   return { updated: true };
 }
 

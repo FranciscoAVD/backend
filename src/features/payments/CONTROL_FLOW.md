@@ -423,6 +423,14 @@ moved period fields to the item level) - same simplification applies to the
 price lookup (first item only), which only matters for multi-item/seat
 subscriptions this app doesn't use.
 
+The correction is a compare-and-set: `updateSubscriptionFields` only writes if
+the row still holds exactly the values it was read with. The listed snapshot
+can be older than a webhook that lands mid-run - a cancellation, say - and the
+plugin writes this table straight from each webhook, with no lock this code
+could share, so writing the snapshot blindly could undo that cancellation and
+hand access back. A row that changed in the meantime is skipped
+(`payments.reconcile.subscription_changed`) and compared again on the next run.
+
 A reconcilable row that even the individual retrieve can't find - a wrong or
 orphaned `stripeSubscriptionId`, not a normal occurrence - is counted as `failed`
 under its own message (`payments.reconcile.subscription_not_found`), the

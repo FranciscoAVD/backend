@@ -521,6 +521,77 @@ describe("runSubscriptions", () => {
     expect(retrieved).toEqual([]);
   });
 
+  test("still corrects a row whose timestamps are all set (the compare-and-set matches them exactly)", async () => {
+    const userId = await seedUser();
+    const at = (iso: string) => new Date(iso);
+    await seedSubscription({
+      referenceId: userId,
+      plan: "pro",
+      stripeSubscriptionId: "sub_1",
+      status: "active",
+      periodStart: at("2026-09-01T10:11:12.345Z"),
+      periodEnd: at("2026-10-01T10:11:12.345Z"),
+      trialStart: at("2026-08-01T00:00:00.001Z"),
+      trialEnd: at("2026-08-15T00:00:00.999Z"),
+      cancelAt: at("2026-10-01T10:11:12.345Z"),
+      canceledAt: at("2026-09-20T05:06:07.890Z"),
+      cancelAtPeriodEnd: true,
+    });
+    fakeSubscriptions = [fakeSubscription({ id: "sub_1", status: "past_due" })];
+
+    const summary = await runSubscriptions(false);
+
+    expect(summary).toEqual({ checked: 1, updated: 1, failed: 0 });
+    const [row] = await db
+      .select()
+      .from(subscriptionTable)
+      .where(eq(subscriptionTable.stripeSubscriptionId, "sub_1"));
+    expect(row?.status).toBe("past_due");
+  });
+
+  test("never writes an older listed snapshot over a webhook that landed mid-run", async () => {
+    const userId = await seedUser();
+    await seedSubscription({
+      referenceId: userId,
+      plan: "pro",
+      stripeSubscriptionId: "sub_1",
+      status: "active",
+      periodEnd: new Date(0),
+    });
+    // listed before the cancellation: still active, with a renewed period (so it differs)
+    fakeSubscriptions = [
+      fakeSubscription({
+        id: "sub_1",
+        status: "active",
+        items: { data: [{ current_period_start: 0, current_period_end: 1_800_000_000, price: { id: "price_default" } }] },
+      }),
+    ];
+
+    // the customer.subscription.deleted webhook lands after the reconciler has read the row
+    const { paymentsRepo } = await import("@f/payments/repo");
+    const realGetReconcilable = paymentsRepo.subscription.getReconcilable;
+    paymentsRepo.subscription.getReconcilable = async () => {
+      const rows = await realGetReconcilable();
+      await db
+        .update(subscriptionTable)
+        .set({ status: "canceled", endedAt: new Date() })
+        .where(eq(subscriptionTable.stripeSubscriptionId, "sub_1"));
+      return rows;
+    };
+    try {
+      const summary = await runSubscriptions(false);
+      expect(summary).toMatchObject({ checked: 1, updated: 0, failed: 0 });
+    } finally {
+      paymentsRepo.subscription.getReconcilable = realGetReconcilable;
+    }
+
+    const [row] = await db
+      .select()
+      .from(subscriptionTable)
+      .where(eq(subscriptionTable.stripeSubscriptionId, "sub_1"));
+    expect(row?.status).toBe("canceled");
+  });
+
   test("leaves a row untouched when nothing differs from Stripe", async () => {
     const userId = await seedUser();
     // periodStart/periodEnd match the fake's own epoch-0 default below - this test is
