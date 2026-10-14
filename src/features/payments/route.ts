@@ -508,7 +508,8 @@ const app = new Hono<PinoLoggerEnv>()
           );
       };
 
-      if (!plan.repeatable) {
+      // whether the user already owns this non-repeatable plan, answering 409 (or 500) if so
+      const blockIfOwned = async () => {
         const [existing, existingError] = await tryCatch(
           paymentsRepo.purchase.getBlockingByPlan({
             userId: user.id,
@@ -527,25 +528,31 @@ const app = new Hono<PinoLoggerEnv>()
           );
         }
 
-        if (existing) {
-          const [, auditError] = await tryCatch(
-            paymentsRepo.audit.add({
-              type: "checkout_blocked_existing_purchase",
-              userId: user.id,
-              planId: plan.id,
-              existingPurchaseId: existing.id,
-            }),
+        if (!existing) return null;
+
+        const [, auditError] = await tryCatch(
+          paymentsRepo.audit.add({
+            type: "checkout_blocked_existing_purchase",
+            userId: user.id,
+            planId: plan.id,
+            existingPurchaseId: existing.id,
+          }),
+        );
+        if (auditError)
+          c.var.logger.warn(
+            { err: auditError, user: user.id, plan: plan.id },
+            "payments.audit.write_failed",
           );
-          if (auditError)
-            c.var.logger.warn(
-              { err: auditError, user: user.id, plan: plan.id },
-              "payments.audit.write_failed",
-            );
-          return c.json(
-            { message: "You've already purchased this plan" },
-            HTTP.Conflict,
-          );
-        }
+        return c.json(
+          { message: "You've already purchased this plan" },
+          HTTP.Conflict,
+        );
+      };
+
+      if (!plan.repeatable) {
+        // fast path: an owner is turned away before touching Redis at all
+        const blocked = await blockIfOwned();
+        if (blocked) return blocked;
 
         // an atomic claim, not a check-then-create: two concurrent requests can't both get
         // past this and both reach Stripe
@@ -602,6 +609,17 @@ const app = new Hono<PinoLoggerEnv>()
           );
         }
         reservation = token;
+
+        // checked again now the slot is ours: the user's previous checkout can confirm between
+        // the check above and the reservation - confirmCheckout inserts its purchase and only
+        // then frees the slot, so the reservation can succeed for a plan they now own. That
+        // ordering is also what makes this second check sufficient: once the slot is free, the
+        // purchase is already visible
+        const blockedAfterReserve = await blockIfOwned();
+        if (blockedAfterReserve) {
+          await releaseReservation();
+          return blockedAfterReserve;
+        }
       }
 
       const [stripeCustomerId, customerError] = await tryCatch(

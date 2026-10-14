@@ -68,8 +68,10 @@ import { paymentAuditLog } from "@d/schemas/payment-schema";
 import {
   savePendingCheckout,
   getPendingCheckout,
+  getResumableCheckout,
   PENDING_CHECKOUT_TTL_SEC,
 } from "@f/payments/lib/pending-checkout";
+import { paymentsRepo } from "@f/payments/repo";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 // dynamic, not static - route.ts calls .use(sessionMiddleware) at module-evaluation
 // time, capturing the function by value into Hono's middleware chain immediately.
@@ -848,6 +850,55 @@ describe("POST /checkout", () => {
     expect(sessionCreateCalls).toHaveLength(0);
     const auditRows = await db.select().from(paymentAuditLog);
     expect(auditRows[0]?.type).toBe("checkout_blocked_pending_checkout");
+  });
+
+  test("a purchase confirmed between the ownership check and the reservation still 409s", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: false });
+    setSession({ id: userId, ...regularUser });
+
+    // the interleaving: the first ownership check runs before the user's earlier checkout is
+    // confirmed, and the webhook then inserts the purchase and clears the slot before this
+    // request reserves it
+    const realGetBlocking = paymentsRepo.purchase.getBlockingByPlan;
+    let calls = 0;
+    paymentsRepo.purchase.getBlockingByPlan = async (...args) => {
+      if (calls++ === 0) {
+        const first = await realGetBlocking(...args);
+        await addPurchase(
+          { userId },
+          {
+            planId: plan.id,
+            stripeCheckoutSessionId: "cs_just_confirmed",
+            stripePaymentIntentId: "pi_just_confirmed",
+            amountTotal: plan.amount,
+            currency: plan.currency,
+          },
+          { durationDays: plan.durationDays },
+          new Date(),
+        );
+        return first;
+      }
+      return realGetBlocking(...args);
+    };
+    try {
+      const res = await app.request("/checkout", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({ planId: plan.id }),
+      });
+      expect(res.status).toBe(409);
+    } finally {
+      paymentsRepo.purchase.getBlockingByPlan = realGetBlocking;
+    }
+
+    // no second checkout for an already-owned plan, and the slot isn't left held
+    expect(sessionCreateCalls).toHaveLength(0);
+    expect(await getResumableCheckout(userId, plan.id)).toBeNull();
+    const { reservePendingCheckout } = await import("@f/payments/lib/pending-checkout");
+    expect(await reservePendingCheckout(userId, plan.id)).not.toBeNull();
+    const auditRows = await db.select().from(paymentAuditLog);
+    expect(auditRows.map((row) => row.type)).toEqual(["checkout_blocked_existing_purchase"]);
   });
 
   test("repeatable plan: happy path bypasses the repeat-purchase guard entirely", async () => {

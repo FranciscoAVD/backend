@@ -27,6 +27,13 @@ a later write, so two concurrent requests can't both get past it and both reach
 Stripe. They still can't close every race - see `confirmCheckout`'s own re-check
 further down for the narrower one that reaches the webhook anyway.
 
+Ownership is checked twice for a non-repeatable plan: once before reserving,
+as a fast path, and again once the reservation is held. The second check closes
+a gap the first leaves open - the user's earlier checkout confirming in between,
+which inserts the purchase and then frees the slot for this request to reserve.
+Because `confirmCheckout` writes the purchase *before* it frees the slot, any
+request that reserves a freed slot is guaranteed to see the purchase.
+
 When the slot is held by the same user's still-`open` session, the reservation
 fails but the request isn't refused: it gets that session's id and URL back
 (`getResumableCheckout`, from the url stored on the pending entry). That's the
@@ -59,7 +66,9 @@ flowchart TD
     Resumable -- yes --> Resume200["200 { sessionId, url } of that session\n(Checkout resumed - no new Stripe session,\nno audit entry)"]
     Resumable -- "no (processing, a live reservation,\nor a pre-url entry)" --> Audit2["audit log: checkout_blocked_pending_checkout\n(best-effort)"]
     Audit2 --> Conflict2["409 You already have a checkout\nin progress for this plan"]
-    Claimed -- yes --> EnsureCustomer
+    Claimed -- yes --> Recheck["getBlockingByPlan again, now the slot is held\n(the user's earlier checkout may have confirmed\nbetween the first check and the reservation)"]
+    Recheck -- "owned" --> Release409["release the reservation,\naudit log + 409 You've already purchased this plan"]
+    Recheck -- "not owned" --> EnsureCustomer
 
     EnsureCustomer["paymentsRepo.customer.ensure(id, name, email)\n(always re-reads the live user row itself -\nnever trusts a caller-supplied id, which can\nbe a stale cached session - see below)"] -->|stripe/db error| Err500c["500\n(releases the reservation)"]
     EnsureCustomer --> CreateSession
