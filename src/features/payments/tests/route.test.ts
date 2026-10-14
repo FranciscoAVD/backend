@@ -758,7 +758,7 @@ describe("POST /checkout", () => {
     expect(auditRows[0]?.userId).toBe(userId);
   });
 
-  test("409s on a non-repeatable plan with a checkout already pending", async () => {
+  test("409s on a non-repeatable plan with a pending checkout it can't resume (no stored url)", async () => {
     const userId = await seedUser({ stripeCustomerId: "cus_test" });
     const plan = await seedPlan({ type: "one_time", repeatable: false });
     await savePendingCheckout(
@@ -775,6 +775,79 @@ describe("POST /checkout", () => {
     });
     expect(res.status).toBe(409);
     expect(sessionCreateCalls).toHaveLength(0);
+  });
+
+  test("resumes an open checkout for a non-repeatable plan instead of locking the buyer out", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: false });
+    await savePendingCheckout(
+      "cs_open",
+      { userId, planId: plan.id, status: "open", url: "https://checkout.stripe.com/c/open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request("/checkout", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ planId: plan.id }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({
+      data: { sessionId: "cs_open", url: "https://checkout.stripe.com/c/open" },
+      message: "Checkout resumed",
+    });
+    // same session, no new one in Stripe, and not a blocked attempt worth auditing
+    expect(sessionCreateCalls).toHaveLength(0);
+    expect(await db.select().from(paymentAuditLog)).toHaveLength(0);
+  });
+
+  test("a buyer who closed the tab gets the same session back on retry", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: false });
+    setSession({ id: userId, ...regularUser });
+    const request = () =>
+      app.request("/checkout", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({ planId: plan.id }),
+      });
+
+    const first = await request();
+    const second = await request();
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    type Body = { data: { sessionId: string; url: string | null } };
+    const [firstBody, secondBody] = (await Promise.all([first.json(), second.json()])) as Body[];
+    expect(secondBody!.data).toEqual(firstBody!.data);
+    expect(sessionCreateCalls).toHaveLength(1);
+  });
+
+  test("still 409s while the pending checkout is processing - it's already paid", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: false });
+    await savePendingCheckout(
+      "cs_processing",
+      {
+        userId,
+        planId: plan.id,
+        status: "processing",
+        url: "https://checkout.stripe.com/c/processing",
+      },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request("/checkout", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ planId: plan.id }),
+    });
+    expect(res.status).toBe(409);
+    expect(sessionCreateCalls).toHaveLength(0);
+    const auditRows = await db.select().from(paymentAuditLog);
+    expect(auditRows[0]?.type).toBe("checkout_blocked_pending_checkout");
   });
 
   test("repeatable plan: happy path bypasses the repeat-purchase guard entirely", async () => {

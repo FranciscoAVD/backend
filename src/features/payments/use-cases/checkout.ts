@@ -65,7 +65,7 @@ export async function createCheckout(
 
   await savePendingCheckout(
     session.id,
-    { userId: user.userId, planId: plan.id, status: "open" },
+    { userId: user.userId, planId: plan.id, status: "open", url: session.url ?? undefined },
     PENDING_CHECKOUT_TTL_SEC,
   );
 
@@ -97,6 +97,7 @@ export async function getCheckoutStatus(
 // lib/pending-checkout.ts directly
 export {
   getPendingCheckout,
+  getResumableCheckout,
   reservePendingCheckout,
   releaseReservation,
   markProcessing,

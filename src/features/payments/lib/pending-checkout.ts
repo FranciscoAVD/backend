@@ -13,6 +13,10 @@ export type PendingCheckout = {
   userId: string;
   planId: Payment.Plan["id"];
   status: "open" | "processing" | "failed" | "expired";
+  // the Stripe-hosted page for this session, so a buyer who closed the tab can be sent back to
+  // it (see getResumableCheckout) instead of being locked out until the session expires. Absent
+  // on entries written before this field existed
+  url?: string;
 };
 
 /** Matches the Checkout Session `expires_at` set in `createCheckout`. */
@@ -144,6 +148,25 @@ export async function hasActivePendingCheckout(
   // block forever, but only if it hasn't been replaced in the meantime
   await delIfEquals(pointerKey(userId, planId), current);
   return false;
+}
+
+/**
+ * @description The user's still-open checkout for this plan, if one holds the (user, plan) slot -
+ * so `POST /checkout` can send a buyer who closed the Stripe tab back to the same session rather
+ * than refusing them until it expires (up to `PENDING_CHECKOUT_TTL_SEC`). Only an `open` session
+ * is resumable: a `processing` one is already paid and settling, and an in-flight reservation has
+ * no session yet - both still hold the slot.
+ * @returns The session id and its Stripe-hosted URL, or null if there's nothing to resume.
+ */
+export async function getResumableCheckout(
+  userId: string,
+  planId: number,
+): Promise<{ sessionId: string; url: string } | null> {
+  const current = await redis.get(pointerKey(userId, planId));
+  if (!current || current.startsWith(RESERVATION_PREFIX)) return null;
+  const pending = await getPendingCheckout(current);
+  if (pending?.status !== "open" || pending.userId !== userId || !pending.url) return null;
+  return { sessionId: current, url: pending.url };
 }
 
 /**

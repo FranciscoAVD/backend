@@ -9,6 +9,7 @@ import {
   hasActivePendingCheckout,
   reservePendingCheckout,
   releaseReservation,
+  getResumableCheckout,
   PENDING_CHECKOUT_TTL_SEC,
   PROCESSING_TTL_SEC,
   RESERVATION_TTL_SEC,
@@ -410,5 +411,58 @@ describe("transition atomicity", () => {
 
       expect((await getPendingCheckout(sessionId))?.status).toBe("failed");
     }
+  });
+});
+
+describe("getResumableCheckout", () => {
+  beforeEach(resetRedis);
+
+  const url = "https://checkout.stripe.com/c/cs_1";
+
+  test("returns the open session holding the (user, plan) slot", async () => {
+    await savePendingCheckout(
+      "cs_1",
+      { userId: "u1", planId: 1, status: "open", url },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+
+    expect(await getResumableCheckout("u1", 1)).toEqual({ sessionId: "cs_1", url });
+  });
+
+  test("nothing to resume when the slot is free, or held by another plan's checkout", async () => {
+    expect(await getResumableCheckout("u1", 1)).toBeNull();
+
+    await savePendingCheckout(
+      "cs_1",
+      { userId: "u1", planId: 2, status: "open", url },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+    expect(await getResumableCheckout("u1", 1)).toBeNull();
+  });
+
+  test("not resumable once processing (already paid), and the url survives the transition", async () => {
+    await savePendingCheckout(
+      "cs_1",
+      { userId: "u1", planId: 1, status: "open", url },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+    await markProcessing("cs_1");
+
+    expect(await getResumableCheckout("u1", 1)).toBeNull();
+    expect((await getPendingCheckout("cs_1"))?.url).toBe(url);
+  });
+
+  test("not resumable while a reservation (no session yet) holds the slot", async () => {
+    expect(await reservePendingCheckout("u1", 1)).not.toBeNull();
+    expect(await getResumableCheckout("u1", 1)).toBeNull();
+  });
+
+  test("not resumable for an entry written before urls were stored", async () => {
+    await savePendingCheckout(
+      "cs_1",
+      { userId: "u1", planId: 1, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+    expect(await getResumableCheckout("u1", 1)).toBeNull();
   });
 });

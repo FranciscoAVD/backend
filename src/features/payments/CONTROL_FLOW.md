@@ -27,6 +27,15 @@ a later write, so two concurrent requests can't both get past it and both reach
 Stripe. They still can't close every race - see `confirmCheckout`'s own re-check
 further down for the narrower one that reaches the webhook anyway.
 
+When the slot is held by the same user's still-`open` session, the reservation
+fails but the request isn't refused: it gets that session's id and URL back
+(`getResumableCheckout`, from the url stored on the pending entry). That's the
+common case - a buyer who closed the Stripe tab and clicked buy again - and
+without it they'd be locked out until the session expired, up to 24h. It's still
+one session per (user, plan), so the guard isn't weakened. A `processing`
+session (already paid, settling) or an in-flight reservation (no session yet)
+still answers 409, as does a pending entry written before urls were stored.
+
 ```mermaid
 flowchart TD
     Start(["POST /checkout { planId }"]) --> LookupPlan["paymentsRepo.plan.get(planId)"]
@@ -46,7 +55,9 @@ flowchart TD
     AlreadyOwns -- no --> Reserve["paymentsRepo.checkout.reserve(userId, planId)\n(atomic SET NX of the Redis pointer to a\nreserving:token placeholder, TTL 5 min;\nclears a stale pointer and retries)"]
     Reserve -->|redis error| Err500e["500"]
     Reserve --> Claimed{"slot claimed?\n(no open/processing checkout\nor other live reservation)"}
-    Claimed -- no --> Audit2["audit log: checkout_blocked_pending_checkout\n(best-effort)"]
+    Claimed -- no --> Resumable{"paymentsRepo.checkout.getResumable:\nslot held by this user's own\nopen session (with a stored url)?"}
+    Resumable -- yes --> Resume200["200 { sessionId, url } of that session\n(Checkout resumed - no new Stripe session,\nno audit entry)"]
+    Resumable -- "no (processing, a live reservation,\nor a pre-url entry)" --> Audit2["audit log: checkout_blocked_pending_checkout\n(best-effort)"]
     Audit2 --> Conflict2["409 You already have a checkout\nin progress for this plan"]
     Claimed -- yes --> EnsureCustomer
 
@@ -54,7 +65,7 @@ flowchart TD
     EnsureCustomer --> CreateSession
 
     CreateSession["createCheckout:\nstripe.checkout.sessions.create\n(mode: payment, customer: stripeCustomerId,\nmetadata: userId, planId, durationDays snapshot)"] -->|stripe error| Err500d["500\n(releases the reservation)"]
-    CreateSession --> SavePending["savePendingCheckout\n(Redis key checkout:sessionId + a\ncheckout:active:userId:planId pointer,\nreplacing the reservation;\nstatus: open, TTL 24h)"]
+    CreateSession --> SavePending["savePendingCheckout\n(Redis key checkout:sessionId + a\ncheckout:active:userId:planId pointer,\nreplacing the reservation;\nstatus: open, the session url, TTL 24h)"]
     SavePending -->|redis error| Err500f["500\n(harmless - the Stripe session\nstill expires on its own)"]
     SavePending --> Return200["200 { sessionId, url }"]
     Return200 --> Redirect(["client redirects user to\nthe Stripe-hosted url"])

@@ -565,6 +565,25 @@ const app = new Hono<PinoLoggerEnv>()
         }
 
         if (!token) {
+          // the usual reason the slot is held: this buyer opened a checkout and closed the tab.
+          // Send them back to that same session rather than locking them out until it expires
+          // (up to 24h) - it's still one checkout for the (user, plan) slot, so nothing about the
+          // non-repeatable guard is weakened. A processing (already paid) session or an in-flight
+          // reservation isn't resumable and still 409s below.
+          const [resumable, resumeError] = await tryCatch(
+            paymentsRepo.checkout.getResumable(user.id, plan.id),
+          );
+          if (resumeError)
+            c.var.logger.warn(
+              { err: resumeError, user: user.id, plan: plan.id },
+              "payments.checkout.resume",
+            );
+          if (resumable)
+            return c.json(
+              { data: resumable, message: "Checkout resumed" },
+              HTTP.OK,
+            );
+
           const [, auditError] = await tryCatch(
             paymentsRepo.audit.add({
               type: "checkout_blocked_pending_checkout",

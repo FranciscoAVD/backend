@@ -69,7 +69,12 @@ describe("createCheckout", () => {
     });
 
     const pending = await getPendingCheckout("cs_test_fake");
-    expect(pending).toEqual({ userId: "u1", planId: plan.id, status: "open" });
+    expect(pending).toEqual({
+      userId: "u1",
+      planId: plan.id,
+      status: "open",
+      url: "https://checkout.stripe.com/fake",
+    });
   });
 
   test("uses the user's Stripe customer id", async () => {
