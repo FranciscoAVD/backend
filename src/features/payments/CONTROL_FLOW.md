@@ -240,7 +240,7 @@ flowchart TD
     AlreadyOwns -- yes --> LogDup["log error: payments.webhook.duplicate_purchase\n+ audit log: duplicate_purchase_confirmed\n(best-effort; the money's already taken,\nso this still falls through to AddPurchase -\nthe financial record must never be dropped)"]
     LogDup --> AddPurchase
 
-    AddPurchase["paymentsRepo.purchase.add:\npurchasedAt = session.created (not insert time)\ndurationDays = session.metadata snapshot\n(plan's current value only for older sessions)\nexpiresAt = durationDays ? purchasedAt + durationDays : null\nINSERT ... ON CONFLICT (stripeCheckoutSessionId) DO NOTHING\n(on a user_id FK violation - the user was deleted\nmid-checkout - retries once with userId: null)"]
+    AddPurchase["paymentsRepo.purchase.add:\npurchasedAt = paidAt: when Stripe recorded\nthe payment as succeeded (not session\ncreation, not insert time)\ndurationDays = session.metadata snapshot\n(plan's current value only for older sessions)\nexpiresAt = durationDays ? purchasedAt + durationDays : null\nINSERT ... ON CONFLICT (stripeCheckoutSessionId) DO NOTHING\n(on a user_id FK violation - the user was deleted\nmid-checkout - retries once with userId: null)"]
     AddPurchase --> RemovePending["paymentsRepo.checkout.removePending(session.id)\n(best-effort; a leftover key just expires via its TTL)"]
 ```
 
@@ -251,9 +251,17 @@ blocking check only looks for a *different* session's purchase.
 
 `addPurchase` is idempotent on `stripeCheckoutSessionId`, so a retried
 `checkout.session.completed` (Stripe's at-least-once delivery) is a no-op the
-second time. `createdAt`/`expiresAt` are derived from the Stripe session's own
-`created` timestamp, not insert time - so a purchase recorded late (e.g. by the
-reconciler) doesn't get bonus days of access. For the same reason, `durationDays`
+second time. `createdAt`/`expiresAt` start from `paidAt`, when Stripe recorded the
+payment as succeeded - the `created` timestamp of the webhook's own
+`checkout.session.completed`/`async_payment_succeeded` event, which is the same
+on every redelivery. Not insert time, so a purchase recorded late (a delayed
+delivery, or the reconciler) doesn't get bonus days of access; and not the
+session's own `created`, so a delayed payment method that took days to settle
+doesn't lose them - with that clock, a 7-day plan paid by a bank debit that
+settled on day 8 granted no access at all. The reconciler recovers the same
+timestamp by listing those two event types (Stripe keeps events for 30 days,
+longer than the default 14-day scan); failing that, it uses the charge's own
+creation time. For the same reason, `durationDays`
 comes from the snapshot `createCheckout` writes into the session's metadata
 (`"none"` for a never-expiring plan, since Stripe drops empty metadata values),
 not the plan's value when the payment confirms - an admin edit while a bank debit

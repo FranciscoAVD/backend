@@ -33,6 +33,7 @@ type ReconcileResult = { inserted: boolean; updated: boolean };
 export async function reconcile(
   session: Stripe.Checkout.Session,
   dryRun: boolean,
+  paidAt?: Date,
 ): Promise<ReconcileResult> {
   const userId = session.metadata?.userId;
   if (!userId) throw new Error("Checkout session has no userId metadata");
@@ -52,7 +53,7 @@ export async function reconcile(
     } else {
       // confirmCheckout reports what actually happened: false if the row appeared between the
       // lookup above and this insert (the webhook landed first), so that's not counted
-      inserted = await confirmCheckout(session);
+      inserted = await confirmCheckout(session, paidAt ?? fallbackPaidAt(session));
       if (inserted) logger.info({ session: session.id }, "payments.reconcile.insert");
     }
     current = inserted
@@ -86,15 +87,68 @@ export async function reconcile(
   return { inserted, updated: true };
 }
 
+// the events that mark a one-time checkout's payment as succeeded - the same two the webhook
+// confirms on, so a purchase the reconciler records starts its access window exactly where the
+// webhook's would have
+const SUCCESS_EVENTS = [
+  "checkout.session.completed",
+  "checkout.session.async_payment_succeeded",
+] as const satisfies readonly Stripe.Event.Type[];
+
+/**
+ * @description When each recent Checkout Session's payment succeeded, per Stripe's own events -
+ * the webhook's `paidAt`, recovered for sessions whose webhook never landed. A `completed` event
+ * for a still-unpaid (delayed-method) session isn't a success; its later `async_payment_succeeded`
+ * is. Stripe keeps events for 30 days, comfortably longer than the default scan window.
+ * @returns A map of session id to payment time.
+ */
+async function getSuccessTimes(sinceSec: number): Promise<Map<string, Date>> {
+  const times = new Map<string, Date>();
+  const events = getPaymentProcessor().events.list({
+    types: [...SUCCESS_EVENTS],
+    created: { gte: sinceSec },
+    limit: 100,
+  });
+  for await (const event of events) {
+    const session = event.data.object as Stripe.Checkout.Session;
+    if (session.mode !== "payment") continue;
+    if (event.type === "checkout.session.completed" && session.payment_status === "unpaid")
+      continue;
+    // async success always comes after its own completed event, so the latest one wins
+    const at = new Date(event.created * 1000);
+    const seen = times.get(session.id);
+    if (!seen || at > seen) times.set(session.id, at);
+  }
+  return times;
+}
+
+/**
+ * @description Best available payment time when no success event was found (e.g. an older scan
+ * than Stripe's 30-day event retention): the charge's own creation, which for a card is the moment
+ * it was paid. For a delayed method that's when it was initiated rather than settled, still no
+ * earlier than the session's creation.
+ */
+function fallbackPaidAt(session: Stripe.Checkout.Session): Date {
+  const intent = session.payment_intent as Stripe.PaymentIntent | string | null;
+  const charge =
+    intent && typeof intent !== "string"
+      ? (intent.latest_charge as Stripe.Charge | string | null)
+      : null;
+  const chargedAt = charge && typeof charge !== "string" ? charge.created : undefined;
+  return new Date((typeof chargedAt === "number" ? chargedAt : session.created) * 1000);
+}
+
 export async function run(
   days: number,
   dryRun: boolean,
 ): Promise<ReconcileSummary> {
   const summary: ReconcileSummary = { scanned: 0, inserted: 0, updated: 0, failed: 0 };
   const stripe = getPaymentProcessor();
+  const sinceSec = Math.floor(Date.now() / 1000) - days * 24 * 60 * 60;
+  const successTimes = await getSuccessTimes(sinceSec);
   const sessions = stripe.checkout.sessions.list({
     status: "complete",
-    created: { gte: Math.floor(Date.now() / 1000) - days * 24 * 60 * 60 },
+    created: { gte: sinceSec },
     expand: ["data.payment_intent.latest_charge"],
     limit: 100,
   });
@@ -110,7 +164,9 @@ export async function run(
       continue;
 
     summary.scanned++;
-    const [result, error] = await tryCatch(reconcile(session, dryRun));
+    const [result, error] = await tryCatch(
+      reconcile(session, dryRun, successTimes.get(session.id)),
+    );
     if (error) {
       summary.failed++;
       logger.error({ err: error, session: session.id }, "payments.reconcile");

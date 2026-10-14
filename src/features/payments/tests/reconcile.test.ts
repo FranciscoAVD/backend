@@ -7,6 +7,7 @@ import { resetDb, seedUser, seedPlan, seedSubscription } from "@/test-helpers/db
 import { resetRedis } from "@/test-helpers/redis";
 
 let fakeSessions: Partial<Stripe.Checkout.Session>[] = [];
+let fakeEvents: Partial<Stripe.Event>[] = [];
 let fakeSubscriptions: Partial<Stripe.Subscription>[] = [];
 // ids runSubscriptions fell back to retrieving individually, because the list didn't return them
 let retrieved: string[] = [];
@@ -16,6 +17,10 @@ let retrieved: string[] = [];
 mock.module("@f/payments/payment", () => ({
   getPaymentProcessor: () => ({
     checkout: { sessions: { list: () => fakeSessions } },
+    events: {
+      list: (params: Stripe.EventListParams) =>
+        fakeEvents.filter((e) => params.types?.includes(e.type as string) ?? true),
+    },
     disputes: { list: async () => ({ data: [] }) },
     subscriptions: {
       // mirrors Stripe's real default: without a `status`, the list leaves out canceled
@@ -55,6 +60,8 @@ const fakeSubscription = (overrides: Record<string, unknown> = {}): Stripe.Subsc
     ...overrides,
   }) as unknown as Stripe.Subscription;
 
+const DAY_SEC = 24 * 60 * 60;
+
 const fakeSession = (
   overrides: Partial<Stripe.Checkout.Session> = {},
 ): Stripe.Checkout.Session =>
@@ -72,6 +79,7 @@ beforeEach(async () => {
   await resetDb();
   await resetRedis();
   fakeSessions = [];
+  fakeEvents = [];
   fakeSubscriptions = [];
   retrieved = [];
 });
@@ -95,6 +103,65 @@ describe("run", () => {
 
     expect(summary).toEqual({ scanned: 1, inserted: 1, updated: 0, failed: 0 });
     expect(await getAllPurchases({ userId })).toHaveLength(1);
+  });
+
+  test("a late insert starts access when Stripe says it was paid, not when checkout began or now", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ durationDays: 30 });
+    const now = Math.floor(Date.now() / 1000);
+    const startedAt = now - 10 * DAY_SEC;
+    const settledAt = now - 2 * DAY_SEC;
+    const s = fakeSession({
+      id: "cs_settled",
+      created: startedAt,
+      payment_status: "paid",
+      metadata: { userId, planId: String(plan.id) },
+      payment_intent: {
+        id: "pi_settled",
+        latest_charge: { created: startedAt, amount_refunded: 0, refunded: false, disputed: false },
+      } as unknown as Stripe.PaymentIntent,
+    });
+    fakeSessions = [s];
+    fakeEvents = [
+      // the delayed method's completed-but-unpaid event isn't the success
+      {
+        type: "checkout.session.completed",
+        created: startedAt,
+        data: { object: { ...s, payment_status: "unpaid" } },
+      } as Partial<Stripe.Event>,
+      {
+        type: "checkout.session.async_payment_succeeded",
+        created: settledAt,
+        data: { object: s },
+      } as Partial<Stripe.Event>,
+    ];
+
+    await run(14, false);
+
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase?.createdAt.getTime()).toBe(settledAt * 1000);
+  });
+
+  test("with no success event to go by, a late insert falls back to the charge's own time", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ durationDays: 30 });
+    const chargedAt = Math.floor(Date.now() / 1000) - 3 * DAY_SEC;
+    fakeSessions = [
+      fakeSession({
+        id: "cs_no_event",
+        created: chargedAt - 600,
+        metadata: { userId, planId: String(plan.id) },
+        payment_intent: {
+          id: "pi_no_event",
+          latest_charge: { created: chargedAt, amount_refunded: 0, refunded: false, disputed: false },
+        } as unknown as Stripe.PaymentIntent,
+      }),
+    ];
+
+    await run(14, false);
+
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase?.createdAt.getTime()).toBe(chargedAt * 1000);
   });
 
   test("a confirmCheckout failure (e.g. the plan was deleted) counts as failed, not inserted", async () => {

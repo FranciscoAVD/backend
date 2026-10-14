@@ -9,8 +9,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /**
  * @description Idempotent insert query for a confirmed purchase. A purchase already recorded for the
  * same checkout session is left untouched, so webhook retries are safe. `expiresAt`/`durationDays` are
- * snapshotted from the plan at `purchasedAt` (the Stripe session's own creation time, not insert time,
- * so a purchase recorded late by the reconciler doesn't get bonus days), independent of any other
+ * snapshotted from the plan at `purchasedAt` (when Stripe recorded the payment as succeeded, not insert
+ * time - so a purchase recorded late by the reconciler doesn't get bonus days, and one paid by a
+ * delayed method that took days to settle doesn't lose them), independent of any other
  * purchase of the same plan (purchases of a plan can overlap). If the user was deleted between checkout
  * and this insert, the resulting foreign-key violation is caught and retried with `userId: null` - the
  * purchase is still a real financial record and must never be dropped just because its owner is gone.
@@ -18,7 +19,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * @param user object of the purchasing user's own (always real, live at checkout time) user ID
  * @param purchase object of insert fields enforced by Payment.Purchase.Insert
  * @param plan object of the purchased plan's duration, enforced by Pick<Payment.Plan, "durationDays">
- * @param purchasedAt the moment of purchase (the Stripe session's own `created` timestamp)
+ * @param purchasedAt the moment the payment succeeded (see `confirmCheckout`'s `paidAt`)
  * @returns Purchase object or null. If null, the purchase was already recorded.
  */
 export async function addPurchase(

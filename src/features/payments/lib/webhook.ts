@@ -35,12 +35,20 @@ async function resolveOwner(
  * @description Records a confirmed payment. Both drop cases below throw rather than return, so
  * the plugin answers non-2xx and Stripe retries/eventually flags the endpoint as failing in its
  * dashboard - a silently-swallowed 200 would mean a payment with no trace of ever going wrong.
+ * @param session the paid Checkout Session
+ * @param paidAt when the payment actually succeeded - the access window starts here. For a delayed
+ * payment method (e.g. a bank debit) that's when it settled, up to 14 days after the session was
+ * created, and the buyer must not lose that time. The webhook passes its success event's own
+ * `created` (Stripe's timestamp, unaffected by retries or delivery delays, so a late delivery still
+ * doesn't grant bonus days); the reconciler looks the same event up. Defaults to the session's own
+ * creation time, only for a caller with nothing better.
  * @returns true if this call inserted the purchase row; false if it was already recorded (a
  * redelivery, or the webhook and the reconciler racing) or the session isn't one of ours. Lets
  * the reconciler count only inserts that actually happened.
  */
 export async function confirmCheckout(
   session: Stripe.Checkout.Session,
+  paidAt: Date = new Date(session.created * 1000),
 ): Promise<boolean> {
   const owner = await resolveOwner(session);
   if (!owner) {
@@ -139,7 +147,7 @@ export async function confirmCheckout(
       currency: session.currency ?? "",
     },
     snapshot ?? { durationDays: plan.durationDays },
-    new Date(session.created * 1000),
+    paidAt,
   );
 
   // the purchase is already stored; a leftover key just expires with its TTL
@@ -179,6 +187,12 @@ async function updateByCharge(
 }
 
 /**
+ * @description When Stripe recorded the payment's success: the event's own `created`, which stays
+ * the same across every redelivery of it.
+ */
+const paidAtOf = (event: Stripe.Event) => new Date(event.created * 1000);
+
+/**
  * @description `onEvent` hook for better-auth's stripe plugin. Handles one-time payments:
  * in-flight checkouts live in Redis and a `purchase` row is only written once Stripe
  * confirms the payment. Errors are rethrown so the plugin answers 400 and Stripe retries.
@@ -195,12 +209,12 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
           await paymentsRepo.checkout.markProcessing(session.id);
           return;
         }
-        await confirmCheckout(session);
+        await confirmCheckout(session, paidAtOf(event));
         return;
       }
       case "checkout.session.async_payment_succeeded": {
         const session = event.data.object;
-        if (session.mode === "payment") await confirmCheckout(session);
+        if (session.mode === "payment") await confirmCheckout(session, paidAtOf(event));
         return;
       }
       case "checkout.session.async_payment_failed": {

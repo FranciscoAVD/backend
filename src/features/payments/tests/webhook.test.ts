@@ -58,10 +58,15 @@ const session = (
     ...overrides,
   }) as unknown as Stripe.Checkout.Session;
 
-const event = (type: Stripe.Event.Type, object: unknown): Stripe.Event =>
+const event = (
+  type: Stripe.Event.Type,
+  object: unknown,
+  created = Math.floor(Date.now() / 1000),
+): Stripe.Event =>
   ({
     id: "evt_1",
     type,
+    created,
     data: { object },
   }) as unknown as Stripe.Event;
 
@@ -108,7 +113,7 @@ describe("confirmCheckout", () => {
     expect(purchase?.stripeCheckoutSessionId).toBe("cs_2");
   });
 
-  test("uses the session's own created timestamp, not insert time, as the purchase's createdAt", async () => {
+  test("without a paidAt, falls back to the session's own created timestamp, not insert time", async () => {
     const userId = await seedUser();
     const plan = await seedPlan({ durationDays: 30 });
     const createdAgo = Math.floor(Date.now() / 1000) - 5 * 24 * 60 * 60; // 5 days ago
@@ -334,6 +339,52 @@ describe("handleStripeEvent", () => {
 
     const [purchase] = await getAllPurchases({ userId });
     expect(purchase).not.toBeUndefined();
+  });
+
+  test("a delayed payment's access window starts when it settled, not when checkout began", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ durationDays: 7 });
+    const now = Math.floor(Date.now() / 1000);
+    const startedAt = now - 8 * 24 * 60 * 60; // bank debit started 8 days ago...
+    const settledAt = now - 60; // ...and settled a minute ago
+
+    await handleStripeEvent(
+      event(
+        "checkout.session.async_payment_succeeded",
+        session({
+          id: "cs_bank_debit",
+          created: startedAt,
+          metadata: { userId, planId: String(plan.id), durationDays: "7" },
+        }),
+        settledAt,
+      ),
+    );
+
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase?.createdAt.getTime()).toBe(settledAt * 1000);
+    expect(purchase?.expiresAt?.getTime()).toBe((settledAt + 7 * 24 * 60 * 60) * 1000);
+    // with session.created as the clock, this 7-day plan would already have lapsed
+    const { hasActivePurchase } = await import("@f/payments/use-cases/get-purchases");
+    expect(
+      await hasActivePurchase({ userId, planId: plan.id }, { overlapping: plan.overlapping }),
+    ).toBe(true);
+  });
+
+  test("a redelivered success event keeps its original timestamp, so a late delivery adds no days", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ durationDays: 30 });
+    const paidAt = Math.floor(Date.now() / 1000) - 3 * 24 * 60 * 60; // paid 3 days ago, delivered now
+
+    await handleStripeEvent(
+      event(
+        "checkout.session.completed",
+        session({ id: "cs_late", metadata: { userId, planId: String(plan.id) } }),
+        paidAt,
+      ),
+    );
+
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase?.createdAt.getTime()).toBe(paidAt * 1000);
   });
 
   test("checkout.session.completed with an unpaid status marks it processing instead", async () => {
