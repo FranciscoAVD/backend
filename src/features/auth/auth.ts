@@ -35,6 +35,15 @@ export const auth = betterAuth({
   rateLimit: {
     enabled: true,
     storage: "secondary-storage",
+    customRules: {
+      // Stripe's webhook deliveries are authenticated by their signature, not throttled by IP:
+      // they arrive in bursts from a handful of Stripe IPs, and the limiter runs before the
+      // signature check - so without this, a burst (or anyone flooding the path with unsigned
+      // junk, if client IPs aren't resolved and every caller shares one bucket) gets real events
+      // 429'd. Stripe retries those, but only for 3 days, and a dropped
+      // customer.subscription.deleted or charge.dispute.* means access that should have ended
+      "/stripe/webhook": false,
+    },
   },
   emailAndPassword: {
     enabled: true,

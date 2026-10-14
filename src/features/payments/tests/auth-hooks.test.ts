@@ -156,3 +156,32 @@ describe("retired recurring plans", () => {
     expect(checkoutCreateCalls).toBe(1);
   });
 });
+
+describe("the Stripe webhook isn't throttled by better-auth's rate limiter", () => {
+  // no client-IP header, like a deployment without trusted-proxy config: better-auth then puts every
+  // caller in one shared bucket per path, so unsigned junk could otherwise use up the budget and
+  // get Stripe's real deliveries 429'd
+  const flood = (path: string, init: RequestInit = {}) =>
+    Promise.all(
+      Array.from({ length: 150 }, () =>
+        auth.handler(new Request(`${env.BETTER_AUTH_URL}/api/auth${path}`, init)),
+      ).map(async (res) => (await res).status),
+    );
+
+  test("well past the default limit, every webhook request still reaches signature checking", async () => {
+    const statuses = await flood("/stripe/webhook", {
+      method: "POST",
+      headers: { "stripe-signature": "t=0,v1=forged", "content-type": "application/json" },
+      body: "{}",
+    });
+
+    expect(statuses.filter((status) => status === 429)).toHaveLength(0);
+    // rejected on its forged signature, as it should be
+    expect(new Set(statuses)).toEqual(new Set([400]));
+  });
+
+  test("other auth endpoints are still rate limited", async () => {
+    const statuses = await flood("/ok");
+    expect(statuses.filter((status) => status === 429).length).toBeGreaterThan(0);
+  });
+});

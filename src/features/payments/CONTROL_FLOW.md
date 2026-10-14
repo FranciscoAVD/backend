@@ -136,6 +136,12 @@ signature, handles `customer.subscription.*` internally (writing the
 `onEvent` hook this app wired up to `handleStripeEvent` in `lib/webhook.ts` -
 regardless of event type.
 
+The endpoint is exempt from better-auth's IP rate limiter (`rateLimit.customRules`
+in `auth.ts`): it's authenticated by Stripe's signature instead, and the limiter
+runs *before* that check - so without the exemption, a burst of real events, or
+anyone flooding the path with unsigned requests while client IPs go unresolved
+(every caller then shares one bucket), would get Stripe's deliveries 429'd.
+
 Its own `checkout.session.completed` handler runs for **every** session mode
 except `"setup"` - including one-time (`mode: "payment"`) sessions, not just
 subscription ones. For a one-time session it calls `subscriptions.retrieve`
