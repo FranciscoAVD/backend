@@ -118,47 +118,73 @@ export function decodeDurationDays(
   return { durationDays: Number(value) };
 }
 
+/**
+ * @description Encodes a plan's `overlapping` for Checkout Session metadata, snapshotted at checkout
+ * time alongside `durationDays`.
+ */
+export function encodeOverlapping(overlapping: Payment.Plan["overlapping"]): string {
+  return String(overlapping);
+}
+
+/**
+ * @description Decodes `encodeOverlapping`'s output from a Checkout Session's metadata.
+ * @returns `{ overlapping }` when the session carries a valid snapshot, or undefined when it
+ * doesn't (a session created before this snapshot existed, or a malformed value), so the caller
+ * falls back to the plan's current setting.
+ */
+export function decodeOverlapping(
+  value: string | undefined,
+): { overlapping: boolean } | undefined {
+  if (value === "true") return { overlapping: true };
+  if (value === "false") return { overlapping: false };
+  return undefined;
+}
+
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
  * @description Whether a user's access-granting purchases of one plan give them access at `now`.
- * Storage never chains purchases - each row's expiresAt comes from its own createdAt + the plan's
- * durationDays at purchase time - so `overlapping` only changes how they're read: `true` treats
- * any one unexpired purchase as enough; `false` chains purchases end-to-end in order (gaps
- * included, so a lapse before the next purchase isn't backfilled), recomputing each purchase's
- * end as `(chain-adjusted start) + its own durationDays` rather than trusting its
- * independently-computed, unchained `expiresAt` - a later purchase bought before an earlier one
- * lapses must extend access from where the earlier one ends, not shorten it to its own naive
- * window. Pure, so the single-plan check and the all-plans lookup share one definition.
+ * Storage never chains purchases - each row's expiresAt comes from its own createdAt + its own
+ * durationDays snapshot - so chaining happens only here, at read time, per each purchase's own
+ * `overlapping` snapshot (the rule it was sold under): an overlapping purchase's window starts at
+ * its own createdAt and runs alongside any earlier one; a non-overlapping purchase starts where the
+ * earlier ones end, if that's later than its own createdAt (gaps aren't backfilled), and its end
+ * is recomputed as `(chain-adjusted start) + its own durationDays` rather than trusting its
+ * unchained `expiresAt` - a purchase bought before an earlier one lapses must extend access, not
+ * shorten it. A row with no snapshot (written before the column existed) uses the plan's current
+ * `overlapping`, which was the old, all-or-nothing behavior. Pure, so the single-plan check and the
+ * all-plans lookup share one definition.
  * @param purchases the purchases to evaluate, all of one plan, already filtered to
  * access-granting statuses and sorted by createdAt ascending
- * @param plan object of the plan's overlapping setting, enforced by Pick<Payment.Plan, "overlapping">
+ * @param plan object of the plan's current overlapping setting, the fallback for unsnapshotted rows
  * @param now the moment to evaluate access at
  * @returns Whether those purchases grant access at `now`.
  */
 export function isPurchaseAccessActive(
-  purchases: Pick<Payment.Purchase, "createdAt" | "expiresAt" | "durationDays">[],
+  purchases: (Pick<Payment.Purchase, "createdAt" | "expiresAt" | "durationDays"> & {
+    overlapping?: boolean | null;
+  })[],
   plan: Pick<Payment.Plan, "overlapping">,
   now: Date,
 ): boolean {
-  if (plan.overlapping)
-    return purchases.some((p) => p.expiresAt === null || p.expiresAt > now);
-
+  // the latest end of every window so far - what a non-overlapping purchase chains on after
   let chainEnd: Date | null = null;
   for (const p of purchases) {
-    const start: Date = chainEnd && chainEnd > p.createdAt ? chainEnd : p.createdAt;
+    const overlapping = p.overlapping ?? plan.overlapping;
+    const start: Date =
+      !overlapping && chainEnd && chainEnd > p.createdAt ? chainEnd : p.createdAt;
+
+    let end: Date;
     if (p.durationDays == null) {
       // no duration snapshot: either a genuinely perpetual purchase (expiresAt also
-      // null), or a pre-migration row written before this column existed - either way,
+      // null), or a pre-migration row written before durationDays existed - either way,
       // trust its own expiresAt rather than treating a null duration as "never expires"
       if (p.expiresAt === null) return true;
-      if (now >= start && now < p.expiresAt) return true;
-      chainEnd = p.expiresAt;
-      continue;
-    }
-    const end: Date = new Date(start.getTime() + p.durationDays * DAY_MS);
+      end = p.expiresAt;
+    } else end = new Date(start.getTime() + p.durationDays * DAY_MS);
+
     if (now >= start && now < end) return true;
-    chainEnd = end;
+    if (!chainEnd || end > chainEnd) chainEnd = end;
   }
   return false;
 }

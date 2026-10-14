@@ -87,6 +87,11 @@ export const purchase = pgTable(
     // snapshot of the plan's durationDays at purchase time, so a later edit to the plan
     // doesn't rewrite history for purchases already made (used to re-derive chained windows)
     durationDays: integer("duration_days"),
+    // snapshot of the plan's `overlapping` at checkout time: whether this purchase's window runs
+    // alongside earlier ones (true) or chains on after them (false). Snapshotted for the same
+    // reason as durationDays - flipping the plan's flag later mustn't rewrite access already sold.
+    // null on rows written before this column existed, which fall back to the plan's current value
+    overlapping: boolean("overlapping"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at")
       .notNull()

@@ -387,6 +387,53 @@ describe("handleStripeEvent", () => {
     expect(purchase?.createdAt.getTime()).toBe(paidAt * 1000);
   });
 
+  test("each purchase keeps the overlapping rule it was sold under after the plan changes", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ durationDays: 30, repeatable: true, overlapping: false });
+    const now = Math.floor(Date.now() / 1000);
+    const buy = (id: string, paidDaysAgo: number) =>
+      confirmCheckout(
+        session({
+          id,
+          payment_intent: `pi_${id}`,
+          metadata: {
+            userId,
+            planId: String(plan.id),
+            durationDays: "30",
+            overlapping: "false",
+          },
+        }),
+        new Date((now - paidDaysAgo * 24 * 60 * 60) * 1000),
+      );
+    // bought 40 and 35 days ago as a chained pair: -40..-10, then -10..+20
+    await buy("cs_a", 40);
+    await buy("cs_b", 35);
+
+    const purchases = await getAllPurchases({ userId });
+    expect(purchases.map((p) => p.overlapping)).toEqual([false, false]);
+
+    // the admin later flips the plan - read with the plan's new flag, both windows lapsed
+    const { db } = await import("@d/connection");
+    const { plan: planTable } = await import("@d/schemas/payment-schema");
+    const { eq } = await import("drizzle-orm");
+    await db.update(planTable).set({ overlapping: true }).where(eq(planTable.id, plan.id));
+
+    const { hasActivePurchase } = await import("@f/payments/use-cases/get-purchases");
+    expect(await hasActivePurchase({ userId, planId: plan.id }, { overlapping: true })).toBe(true);
+  });
+
+  test("a session from before the overlapping snapshot falls back to the plan's setting", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ overlapping: false });
+
+    await confirmCheckout(
+      session({ id: "cs_old", metadata: { userId, planId: String(plan.id) } }),
+    );
+
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase?.overlapping).toBe(false);
+  });
+
   test("checkout.session.completed with an unpaid status marks it processing instead", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();

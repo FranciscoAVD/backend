@@ -73,6 +73,7 @@ export const insertPurchaseSchema = createInsertSchema(purchase).omit({
   amountRefunded: true,
   expiresAt: true,
   durationDays: true,
+  overlapping: true,
   createdAt: true,
   updatedAt: true,
 });

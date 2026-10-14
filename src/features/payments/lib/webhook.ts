@@ -3,7 +3,7 @@ import { logger } from "@/lib/logger";
 import tryCatch from "@vicstack/try-catch";
 import type { PendingCheckout } from "@f/payments/lib/pending-checkout";
 import { paymentsRepo } from "@f/payments/repo";
-import { isAllowedEvent, decodeDurationDays } from "@f/payments/lib/utils";
+import { isAllowedEvent, decodeDurationDays, decodeOverlapping } from "@f/payments/lib/utils";
 import { resolveChargeState } from "@f/payments/lib/charge-state";
 import { getPaymentProcessor } from "@f/payments/payment";
 
@@ -146,7 +146,13 @@ export async function confirmCheckout(
       amountTotal: session.amount_total ?? 0,
       currency: session.currency ?? "",
     },
-    snapshot ?? { durationDays: plan.durationDays },
+    {
+      ...(snapshot ?? { durationDays: plan.durationDays }),
+      // same snapshot reasoning as durationDays: the chaining rule this purchase was sold under.
+      // Sessions created before this snapshot existed fall back to the plan's current value
+      overlapping:
+        decodeOverlapping(session.metadata?.overlapping)?.overlapping ?? plan.overlapping,
+    },
     paidAt,
   );
 

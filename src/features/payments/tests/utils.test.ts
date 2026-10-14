@@ -5,6 +5,8 @@ import {
   isAllowedEvent,
   purchaseUpdateFromCharge,
   purchaseStatusFromDispute,
+  encodeOverlapping,
+  decodeOverlapping,
   encodeDurationDays,
   decodeDurationDays,
   isPurchaseAccessActive,
@@ -88,6 +90,20 @@ describe("purchaseStatusFromDispute", () => {
   });
 });
 
+describe("encodeOverlapping / decodeOverlapping", () => {
+  test("round-trips both values", () => {
+    expect(decodeOverlapping(encodeOverlapping(true))).toEqual({ overlapping: true });
+    expect(decodeOverlapping(encodeOverlapping(false))).toEqual({ overlapping: false });
+  });
+
+  test.each([undefined, "", "yes", "1", "TRUE"])(
+    "returns undefined with no valid snapshot, so the caller falls back: %p",
+    (value) => {
+      expect(decodeOverlapping(value)).toBeUndefined();
+    },
+  );
+});
+
 describe("encodeDurationDays / decodeDurationDays", () => {
   test("round-trips a duration", () => {
     expect(decodeDurationDays(encodeDurationDays(30))).toEqual({ durationDays: 30 });
@@ -138,6 +154,42 @@ describe("isPurchaseAccessActive", () => {
   test("a never-expiring purchase grants access either way", () => {
     expect(isPurchaseAccessActive([purchase(-400, null)], { overlapping: true }, now)).toBe(true);
     expect(isPurchaseAccessActive([purchase(-400, null)], { overlapping: false }, now)).toBe(true);
+  });
+
+  // each purchase follows the rule it was sold under, whatever the plan says now
+  const snap = (startDays: number, durationDays: number, overlapping: boolean) => ({
+    ...purchase(startDays, durationDays),
+    overlapping,
+  });
+
+  test("purchases snapshotted as chained keep chaining after the plan flips to overlapping", () => {
+    // -40..-10, chained -10..+20 - read as concurrent this would have lapsed at -5
+    expect(
+      isPurchaseAccessActive([snap(-40, 30, false), snap(-35, 30, false)], { overlapping: true }, now),
+    ).toBe(true);
+  });
+
+  test("purchases snapshotted as overlapping stay concurrent after the plan flips to chained", () => {
+    // both lapsed (-10, -5) - read as chained, the second would wrongly run until +20
+    expect(
+      isPurchaseAccessActive([snap(-40, 30, true), snap(-35, 30, true)], { overlapping: false }, now),
+    ).toBe(false);
+  });
+
+  test("a chained purchase chains after an earlier overlapping one's window", () => {
+    expect(
+      isPurchaseAccessActive([snap(-40, 30, true), snap(-35, 30, false)], { overlapping: true }, now),
+    ).toBe(true);
+  });
+
+  test("a row without a snapshot follows the plan's current setting", () => {
+    expect(
+      isPurchaseAccessActive(
+        [{ ...purchase(-40, 30), overlapping: null }, { ...purchase(-35, 30), overlapping: null }],
+        { overlapping: false },
+        now,
+      ),
+    ).toBe(true);
   });
 
   test("no purchases, no access", () => {

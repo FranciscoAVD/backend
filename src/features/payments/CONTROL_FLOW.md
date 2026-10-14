@@ -441,39 +441,40 @@ Fetches the user's purchases of the plan with an access-granting status
 (`lib/utils.ts`) - a pure function shared with `GET /access`'s
 `getActivePlans`, so the two can never read `overlapping` chaining
 differently. Storage is always independent rows - each purchase's own
-`durationDays` is snapshotted at purchase time, never chained with any other
-purchase's - so `plan.overlapping` only changes how they're *read*:
-`overlapping: false` recomputes each purchase's end as `(chain-adjusted
-start) + its own durationDays`, rather than trusting its
+`durationDays` and `overlapping` are snapshotted at checkout time, never chained
+with any other purchase's - so chaining happens only at read time, per each
+purchase's own `overlapping` snapshot (the rule it was sold under, so flipping
+the plan's flag later never rewrites access already sold): an overlapping
+purchase's window starts at its own `createdAt`; a non-overlapping one starts
+where the earlier windows end, if that's later, and its end is recomputed as
+`(chain-adjusted start) + its own durationDays` rather than trusting its
 independently-computed `expiresAt`, so a later purchase bought before an
 earlier one lapses correctly extends access instead of shortening it. A row
-with no `durationDays` snapshot at all falls back to its own `expiresAt`
-instead of being treated as perpetual - that distinguishes a genuinely
-never-expiring purchase (`expiresAt` also `null`) from a pre-migration row
-that predates this column and was never backfilled.
+with no `overlapping` snapshot (written before that column existed) follows the
+plan's current setting. A row with no `durationDays` snapshot at all falls back
+to its own `expiresAt` instead of being treated as perpetual - that
+distinguishes a genuinely never-expiring purchase (`expiresAt` also `null`) from
+a pre-migration row that predates this column and was never backfilled.
 
 ```mermaid
 flowchart TD
     Start(["hasActivePurchase(userId, planId, plan.overlapping)"]) --> Fetch["SELECT access-granting purchases\nfor (userId, planId), ORDER BY createdAt ASC"]
     Fetch --> IsPurchaseAccessActive["isPurchaseAccessActive(purchases, plan, now)"]
-    IsPurchaseAccessActive --> Overlap{"plan.overlapping?"}
-
-    Overlap -- true --> AnyActive{"any purchase has\nexpiresAt IS NULL\nor expiresAt > now?"}
-    AnyActive -- yes --> True1["true"]
-    AnyActive -- no --> False1["false"]
-
-    Overlap -- false --> Walk["walk purchases in order,\nchaining: start = max(chainEnd, createdAt)"]
-    Walk --> PerDuration{"this purchase's\nown durationDays?"}
+    IsPurchaseAccessActive --> Walk["walk purchases in createdAt order"]
+    Walk --> Overlap{"this purchase's own overlapping snapshot\n(the plan's current value if it has none)"}
+    Overlap -- true --> OwnStart["start = createdAt"]
+    Overlap -- false --> Chained["start = max(chainEnd, createdAt)"]
+    OwnStart --> PerDuration
+    Chained --> PerDuration
+    PerDuration{"this purchase's\nown durationDays?"}
     PerDuration -- "null" --> ExpiresNull{"expiresAt also null?\n(no duration snapshot at all - either\ngenuinely perpetual, or a pre-migration\nrow written before this column existed)"}
     ExpiresNull -- yes --> True2["true"]
-    ExpiresNull -- no --> InExpiresWindow{"start <= now < expiresAt?"}
-    InExpiresWindow -- yes --> True2b["true"]
-    InExpiresWindow -- no --> Advance2["chainEnd = expiresAt,\nmove to next purchase"]
-    Advance2 --> Walk
+    ExpiresNull -- no --> EndExp["end = expiresAt"]
     PerDuration -- "set" --> Recompute["end = start + durationDays\n(recomputed from the chain-adjusted start,\nnot the purchase's own stored expiresAt)"]
+    EndExp --> InWindow
     Recompute --> InWindow{"start <= now < end?"}
     InWindow -- yes --> True3["true"]
-    InWindow -- no --> Advance["chainEnd = end,\nmove to next purchase\n(a gap before the next one isn't backfilled)"]
+    InWindow -- no --> Advance["chainEnd = max(chainEnd, end),\nmove to next purchase\n(a gap before the next one isn't backfilled)"]
     Advance --> Walk
     Walk -->|no purchases left| False3["false"]
 ```
@@ -630,16 +631,19 @@ plan's lifecycle is governed by its Stripe subscription period instead, and
 | --- | --- | --- |
 | `repeatable` | can the same user buy this plan more than once at all | `POST /checkout`'s and `confirmCheckout`'s `getBlockingByPlan` guards (a `paid` or `disputed` purchase blocks; only `refunded` frees the slot) |
 | `durationDays` | days of access one purchase grants from its own `createdAt`; `null` = never expires | `addPurchase`, which snapshots it onto `purchase.durationDays` and derives `purchase.expiresAt` from it |
-| `overlapping` | when a user has multiple paid purchases of the plan, can their access windows run concurrently (`true`) or must a later one chain on after an earlier one expires (`false`) | `hasActivePurchase` |
+| `overlapping` | when a user has multiple paid purchases of the plan, can their access windows run concurrently (`true`) or must a later one chain on after an earlier one expires (`false`) | `addPurchase`, which snapshots it onto `purchase.overlapping`; `isPurchaseAccessActive` reads each purchase's own snapshot |
 
 All three (plus `limits`, `active`, `trialDays`) are editable via `PATCH /plans/:id` -
 pricing/identity fields (`name`, `type`, `amount`, `interval`, the Stripe ids) aren't,
 since they're either baked into an already-created Stripe Price or relied on as a
 lookup key elsewhere (`name`, by `getSubscriptionPlans`). An edit to `durationDays`
-only affects checkouts started *after* it - `createCheckout` snapshots the plan's
-`durationDays` into the session's metadata, and `addPurchase` stores that snapshot
-on the purchase row, so it never rewrites history for purchases already made or
-still settling. Flipping `repeatable` from `false` to `true` is rejected
+or `overlapping` only affects checkouts started *after* it - `createCheckout`
+snapshots both into the session's metadata, and `addPurchase` stores those
+snapshots on the purchase row, so an edit never rewrites history for purchases
+already made or still settling. (Rows from before the `overlapping` snapshot
+existed have none and follow the plan's current value; backfill them once, before
+the next edit, with `UPDATE purchase p SET overlapping = pl.overlapping FROM plan pl
+WHERE p.plan_id = pl.id AND p.overlapping IS NULL`.) Flipping `repeatable` from `false` to `true` is rejected
 (409) while any user still has a blocking purchase of the plan
 (`paymentsRepo.purchase.hasAnyBlocking`) - otherwise it would silently reopen a
 once-only/trial plan to every past purchaser, not just whoever's buying it next.

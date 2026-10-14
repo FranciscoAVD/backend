@@ -87,14 +87,19 @@ describe("createCheckout", () => {
     expect(sessionCreateCalls[0]).toMatchObject({ customer: "cus_abc" });
   });
 
-  test("snapshots the plan's durationDays onto both metadata objects", async () => {
-    const plan = await seedPlan({ durationDays: 30 });
+  test("snapshots the plan's durationDays and overlapping onto both metadata objects", async () => {
+    const plan = await seedPlan({ durationDays: 30, overlapping: false });
     await createCheckout(
       { userId: "u1", stripeCustomerId: "cus_abc" },
       plan,
     );
 
-    const metadata = { userId: "u1", planId: String(plan.id), durationDays: "30" };
+    const metadata = {
+      userId: "u1",
+      planId: String(plan.id),
+      durationDays: "30",
+      overlapping: "false",
+    };
     expect(lastMetadata()).toEqual({ session: metadata, intent: metadata });
   });
 
@@ -131,9 +136,9 @@ describe("createCheckout", () => {
     });
   });
 
-  test("the extension can't override userId/planId/durationDays in metadata, but can add its own keys", async () => {
+  test("the extension can't override userId/planId/durationDays/overlapping in metadata, but can add its own keys", async () => {
     extensionParams = {
-      metadata: { userId: "someone-else", campaign: "spring-sale" },
+      metadata: { userId: "someone-else", overlapping: "false", campaign: "spring-sale" },
       payment_intent_data: { metadata: { planId: "999999" } },
     };
     const plan = await seedPlan({ durationDays: 30 });
@@ -145,6 +150,7 @@ describe("createCheckout", () => {
       userId: "u1",
       planId: String(plan.id),
       durationDays: "30",
+      overlapping: "true",
     };
     expect(lastMetadata()).toEqual({ session: metadata, intent: metadata });
   });
@@ -161,7 +167,12 @@ describe("createCheckout", () => {
 
     await createCheckout({ userId: "u1", stripeCustomerId: "cus_abc" }, plan);
 
-    const core = { userId: "u1", planId: String(plan.id), durationDays: "30" };
+    const core = {
+      userId: "u1",
+      planId: String(plan.id),
+      durationDays: "30",
+      overlapping: "true",
+    };
     expect(lastMetadata()).toEqual({
       // the intent-only key stays off the session itself
       session: { campaign: "spring-sale", ...core },

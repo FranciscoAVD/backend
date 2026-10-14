@@ -18,14 +18,15 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * Assumes validation. Operation must be wrapped in try-catch
  * @param user object of the purchasing user's own (always real, live at checkout time) user ID
  * @param purchase object of insert fields enforced by Payment.Purchase.Insert
- * @param plan object of the purchased plan's duration, enforced by Pick<Payment.Plan, "durationDays">
+ * @param plan object of the purchased plan's snapshotted duration, and its `overlapping` snapshot (left
+ * out, or null, to store none - the purchase then follows the plan's current setting)
  * @param purchasedAt the moment the payment succeeded (see `confirmCheckout`'s `paidAt`)
  * @returns Purchase object or null. If null, the purchase was already recorded.
  */
 export async function addPurchase(
   user: { userId: string },
   purchase: Payment.Purchase.Insert,
-  plan: Pick<Payment.Plan, "durationDays">,
+  plan: Pick<Payment.Plan, "durationDays"> & { overlapping?: boolean | null },
   purchasedAt: Date,
 ): Promise<Payment.Purchase | null> {
   const expiresAt = plan.durationDays
@@ -36,6 +37,7 @@ export async function addPurchase(
     userId: user.userId,
     expiresAt,
     durationDays: plan.durationDays,
+    overlapping: plan.overlapping ?? null,
     createdAt: purchasedAt,
   };
 

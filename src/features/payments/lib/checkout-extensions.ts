@@ -17,7 +17,7 @@
  * - `expires_at` - kept in lockstep with `PENDING_CHECKOUT_TTL_SEC` (the Redis entry's own TTL);
  *   letting it drift would open a window where Stripe still accepts the session but Redis has
  *   already forgotten it.
- * - the `userId`/`planId`/`durationDays` keys of `metadata` and `payment_intent_data.metadata` -
+ * - the `userId`/`planId`/`durationDays`/`overlapping` keys of `metadata` and `payment_intent_data.metadata` -
  *   `confirmCheckout` and the reconciler depend on these to resolve a session back to a purchase
  *   at all. Additional keys *are* merged in, so an app can still tag a session with its own data
  *   (e.g. a campaign id) alongside them. The payment intent gets the session's `metadata` too,

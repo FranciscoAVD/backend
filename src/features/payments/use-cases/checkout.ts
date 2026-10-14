@@ -6,7 +6,7 @@ import {
   getPendingCheckout,
   savePendingCheckout,
 } from "@f/payments/lib/pending-checkout";
-import { encodeDurationDays } from "@f/payments/lib/utils";
+import { encodeDurationDays, encodeOverlapping } from "@f/payments/lib/utils";
 import { getCheckoutSessionParams } from "@f/payments/lib/checkout-extensions";
 import { getPurchaseBySession } from "@f/payments/use-cases/get-purchases";
 
@@ -19,7 +19,7 @@ type CheckoutUser = {
 
 /**
  * @description Creates a one-time Stripe Checkout Session and tracks it in Redis until Stripe
- * confirms the payment. The plan's `durationDays` is snapshotted onto the session's metadata here,
+ * confirms the payment. The plan's `durationDays` and `overlapping` are snapshotted onto the session's metadata here,
  * at checkout time, so an admin edit made while the payment is still settling (up to 14 days for
  * bank debits, or later via the reconciler) can't change what this buyer gets.
  *
@@ -46,6 +46,7 @@ export async function createCheckout(
     userId: user.userId,
     planId: String(plan.id),
     durationDays: encodeDurationDays(plan.durationDays),
+    overlapping: encodeOverlapping(plan.overlapping),
   };
 
   const session = await getPaymentProcessor().checkout.sessions.create({
