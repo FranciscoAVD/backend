@@ -118,8 +118,10 @@ rather than a raw query, so the user's cached sessions are refreshed too. That
 matters beyond this flow: the stripe plugin's subscription upgrade reads
 `stripeCustomerId` from the session, and a stale `null` there made it create a
 second customer and switch the user over to it. It also passes a
-`customer-<userId>` Stripe idempotency key, so a retried call can't create a
-second customer (though it doesn't fully dedupe two truly simultaneous requests
+`customer-<userId>-<hash of email and name>` Stripe idempotency key, so a
+retried call can't create a second customer, and a user who changed their
+details in between doesn't hit Stripe's "same key, different parameters" error
+for 24 hours (though it doesn't fully dedupe two truly simultaneous requests
 - Stripe's idempotency semantics don't strictly guarantee that).
 
 ### Adding Stripe params: `lib/checkout-extensions.ts`
@@ -289,17 +291,22 @@ flowchart TD
     RepeatCheck -- yes --> Blocking["paymentsRepo.purchase.getBlockingByPlan(\n{ userId, planId },\nexclude: { stripeCheckoutSessionId: session.id })"]
     Blocking --> AlreadyOwns{"a blocking purchase\nfor a DIFFERENT session\nalready exists?"}
     AlreadyOwns -- no --> AddPurchase
-    AlreadyOwns -- yes --> LogDup["log error: payments.webhook.duplicate_purchase\n+ audit log: duplicate_purchase_confirmed\n(best-effort; the money's already taken,\nso this still falls through to AddPurchase -\nthe financial record must never be dropped)"]
-    LogDup --> AddPurchase
+    AlreadyOwns -- yes --> AddPurchase
 
     AddPurchase["paymentsRepo.purchase.add:\npurchasedAt = paidAt: when Stripe recorded\nthe payment as succeeded (not session\ncreation, not insert time)\ndurationDays = session.metadata snapshot\n(plan's current value only for older sessions)\nexpiresAt = durationDays ? purchasedAt + durationDays : null\nINSERT ... ON CONFLICT (stripeCheckoutSessionId) DO NOTHING\n(on a user_id FK violation - the user was deleted\nmid-checkout - retries once with userId: null)"]
-    AddPurchase --> RemovePending["paymentsRepo.checkout.removePending(session.id)\n(best-effort; a leftover key just expires via its TTL)"]
+    AddPurchase --> Flag{"a blocking purchase was found\nAND this call inserted the row?"}
+    Flag -- yes --> LogDup["log error: payments.webhook.duplicate_purchase\n+ audit log: duplicate_purchase_confirmed\n(best-effort; the money's already taken,\nand the purchase was recorded regardless -\nthe financial record must never be dropped)"]
+    LogDup --> RemovePending
+    Flag -- no --> RemovePending["paymentsRepo.checkout.removePending(session.id)\n(best-effort; a leftover key just expires via its TTL)"]
 ```
 
 The `exclude` on `getBlockingByPlan` matters for a Stripe redelivery of the *same*
 session: without it, the second delivery would find the purchase row the first
 delivery just wrote and wrongly flag it as `duplicate_purchase_confirmed` - the
-blocking check only looks for a *different* session's purchase.
+blocking check only looks for a *different* session's purchase. The audit entry
+is also written only by the call that actually inserted the row, so redeliveries
+of a genuine duplicate (or the reconciler racing the webhook) don't add more
+entries: one duplicate charge, one entry to review.
 
 `addPurchase` is idempotent on `stripeCheckoutSessionId`, so a retried
 `checkout.session.completed` (Stripe's at-least-once delivery) is a no-op the
@@ -501,7 +508,9 @@ affects how the other is parsed; the exit code is 1 if *either* pass failed.
 ## Checking active access: `GET /plans/:id/access`
 
 The route that answers "does the caller currently have access to this
-plan" (404 if the plan doesn't exist). Which of the two feature's two systems
+plan" (404 if the plan doesn't exist). It requires `plan: read:active`, the same
+gate as `GET /plans/:id` - otherwise anyone signed in could tell which plan ids
+exist. Which of the two feature's two systems
 it checks depends on `plan.type`, mirroring the same split as checkout above.
 `GET /access` answers the broader question - every plan the caller has access
 to - with the same rules (see "Every active plan" below).
@@ -663,6 +672,7 @@ documented constant, rather than inside the queries that read it:
 | `PURCHASE_ACCESS_STATUSES` | `paid` | add `disputed` to keep access until a dispute is lost |
 | `PURCHASE_BLOCKING_STATUSES` | `paid`, `disputed` | what stops a non-repeatable plan being bought again |
 | `PARTIAL_REFUND_REVOKES_ACCESS` | `false` | `true` to end access on any refund |
+| `DISPUTE_INQUIRY_REVOKES_ACCESS` | `true` | `false` to keep access while the issuer only inquires, pausing it once an actual chargeback opens |
 | `RETIRED_PLANS_KEEP_ACCESS` | `true` | `false` to end access when a plan is deactivated |
 | `RETIRING_EXPIRES_OPEN_CHECKOUTS` | `true` | `false` to let checkouts already open when a plan is retired still complete |
 | `CANCEL_ON_USER_DELETE` | cancel now, no proration | `prorate: true` to credit unused time |

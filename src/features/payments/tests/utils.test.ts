@@ -88,6 +88,19 @@ describe("purchaseStatusFromDispute", () => {
       "disputed",
     );
   });
+
+  test("an open inquiry pauses access by default, like a chargeback", () => {
+    for (const status of ["warning_needs_response", "warning_under_review"] as const)
+      expect(purchaseStatusFromDispute({ status })).toBe("disputed");
+  });
+
+  test("with DISPUTE_INQUIRY_REVOKES_ACCESS off, an inquiry keeps access - a chargeback still doesn't", () => {
+    for (const status of ["warning_needs_response", "warning_under_review"] as const)
+      expect(purchaseStatusFromDispute({ status }, false)).toBe("paid");
+    for (const status of ["needs_response", "under_review"] as const)
+      expect(purchaseStatusFromDispute({ status }, false)).toBe("disputed");
+    expect(purchaseStatusFromDispute({ status: "lost" }, false)).toBe("refunded");
+  });
 });
 
 describe("encodeOverlapping / decodeOverlapping", () => {

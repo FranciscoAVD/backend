@@ -1,4 +1,4 @@
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import {
   pgTable,
   pgEnum,
@@ -6,6 +6,7 @@ import {
   timestamp,
   boolean,
   index,
+  uniqueIndex,
   varchar,
   text,
   jsonb,
@@ -58,7 +59,12 @@ export const plan = pgTable("plan", {
     .notNull()
     .defaultNow()
     .$onUpdate(() => new Date()),
-});
+},
+  // unique case-insensitively, not just as written: the stripe plugin and every subscription lookup
+  // here match plan names case-insensitively, so "Pro" and "pro" side by side would make one
+  // subscription grant both plans. POST /plans checks this too, but only this closes the race
+  (t) => [uniqueIndex("plan_name_lower_idx").on(sql`lower(${t.name})`)],
+);
 
 export const purchase = pgTable(
   "purchase",

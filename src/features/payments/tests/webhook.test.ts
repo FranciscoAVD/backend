@@ -660,3 +660,35 @@ describe("handleStripeEvent", () => {
     expect(purchase?.amountRefunded).toBe(plan.amount);
   });
 });
+
+describe("duplicate_purchase_confirmed is written once per duplicate charge", () => {
+  beforeEach(async () => {
+    await resetDb();
+    await resetRedis();
+  });
+
+  test("redeliveries of an already-recorded duplicate add no further entries", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ repeatable: false });
+    const paid = (id: string) =>
+      session({
+        id,
+        payment_intent: `pi_${id}`,
+        metadata: { userId, planId: String(plan.id) },
+      });
+
+    await confirmCheckout(paid("cs_first"));
+    // the duplicate, then Stripe redelivering it twice (e.g. a lost 200), plus the reconciler
+    await confirmCheckout(paid("cs_dup"));
+    await confirmCheckout(paid("cs_dup"));
+    await confirmCheckout(paid("cs_dup"));
+
+    const rows = await db.select().from(paymentAuditLogTable);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      type: "duplicate_purchase_confirmed",
+      stripeCheckoutSessionId: "cs_dup",
+    });
+    expect(await getAllPurchases({ userId })).toHaveLength(2);
+  });
+});

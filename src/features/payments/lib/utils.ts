@@ -5,7 +5,10 @@ import {
   CHECKOUT_SESSION_ID_PREFIX,
 } from "@f/payments/lib/constants";
 import type { Payment } from "@f/payments/lib/types";
-import { PARTIAL_REFUND_REVOKES_ACCESS } from "@f/payments/lib/access-policy";
+import {
+  DISPUTE_INQUIRY_REVOKES_ACCESS,
+  PARTIAL_REFUND_REVOKES_ACCESS,
+} from "@f/payments/lib/access-policy";
 
 export type AllowedEvent = Extract<
   Stripe.Event,
@@ -55,6 +58,20 @@ export function isForeignKeyViolation(error: unknown, column: string): boolean {
 }
 
 /**
+ * @description Whether an error is a Postgres unique violation (SQLSTATE 23505), unwrapped from
+ * Drizzle's `DrizzleQueryError` the same way as `isForeignKeyViolation`.
+ */
+export function isUniqueViolation(error: unknown): boolean {
+  const cause =
+    error instanceof SQL.PostgresError
+      ? error
+      : error instanceof Error && error.cause instanceof SQL.PostgresError
+        ? error.cause
+        : null;
+  return cause !== null && cause.errno === "23505";
+}
+
+/**
  * @description Purchase refund state for a charge. Whether a partial refund keeps the purchase
  * `paid` is `PARTIAL_REFUND_REVOKES_ACCESS`'s call (by default it does).
  * Shared by the webhook and the reconciler so both map Stripe state the same way.
@@ -73,10 +90,13 @@ export function purchaseUpdateFromCharge(
 
 /**
  * @description Purchase status for a dispute: a lost dispute returns the money, a closed
- * one in our favor keeps it paid, and an open one is disputed.
+ * one in our favor keeps it paid, and an open one is disputed. An open inquiry (not yet a
+ * chargeback) counts as disputed or not per `DISPUTE_INQUIRY_REVOKES_ACCESS`.
+ * @param inquiryRevokesAccess the policy to apply - defaults to `DISPUTE_INQUIRY_REVOKES_ACCESS`
  */
 export function purchaseStatusFromDispute(
   dispute: Pick<Stripe.Dispute, "status">,
+  inquiryRevokesAccess: boolean = DISPUTE_INQUIRY_REVOKES_ACCESS,
 ): Payment.Purchase["status"] {
   switch (dispute.status) {
     case "lost":
@@ -85,6 +105,9 @@ export function purchaseStatusFromDispute(
     case "warning_closed":
     case "prevented":
       return "paid";
+    case "warning_needs_response":
+    case "warning_under_review":
+      return inquiryRevokesAccess ? "disputed" : "paid";
     default:
       return "disputed";
   }

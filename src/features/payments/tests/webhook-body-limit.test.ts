@@ -20,12 +20,29 @@ async function statuses() {
 
 describe("the Stripe webhook's request body cap", () => {
   test("oversized bodies are refused before they're read or signature-checked", async () => {
-    expect(await statuses()).toEqual({
+    const { oversized, oversizedStreamed, eventSized, webhookOverApiCap } = await statuses();
+    expect({ oversized, oversizedStreamed, eventSized, webhookOverApiCap }).toEqual({
       oversized: 413,
       // no Content-Length to trust - the cap still applies as the body streams in
       oversizedStreamed: 413,
       // an event-sized body still reaches the plugin, which rejects the forged signature
       eventSized: 400,
+      // the app-wide cap doesn't apply to the webhook - its own, larger one does
+      webhookOverApiCap: 400,
+    });
+  });
+});
+
+describe("the app-wide request body cap", () => {
+  test("every other route refuses an oversized body before auth or routing", async () => {
+    const { signUpOversized, signUpOversizedStreamed, checkoutOversized } = await statuses();
+    expect({ signUpOversized, signUpOversizedStreamed, checkoutOversized }).toEqual({
+      // unauthenticated, and still refused
+      signUpOversized: 413,
+      // no Content-Length - refused as it streams in
+      signUpOversizedStreamed: 413,
+      // refused before the session check would 401 it
+      checkoutOversized: 413,
     });
   });
 });

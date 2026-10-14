@@ -46,6 +46,16 @@ export const PURCHASE_BLOCKING_STATUSES = [
 ] as const satisfies readonly Payment.Purchase["status"][];
 
 /**
+ * Whether a dispute *inquiry* pauses access, like a chargeback does. An inquiry
+ * (`warning_needs_response`, `warning_under_review`) is the card issuer asking about a charge before
+ * deciding whether to file a chargeback - most are answered and closed without one, and no money
+ * has moved. `true` (the default) treats it like a chargeback: access pauses until it closes in
+ * your favor. `false` keeps access through the inquiry and only pauses it once a real chargeback is
+ * opened. Either way, a lost dispute ends access.
+ */
+export const DISPUTE_INQUIRY_REVOKES_ACCESS = true;
+
+/**
  * Whether a partial refund ends access. `false` keeps the purchase `paid` (and its access) until the
  * charge is fully refunded - typical for goodwill credits. `true` treats any refund as revoking it.
  */

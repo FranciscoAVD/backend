@@ -57,9 +57,15 @@ let priceUpdateFails = false;
 let openSessions: { id: string; status: string; metadata: Record<string, string> }[] = [];
 let expiredSessions: string[] = [];
 let expireFails = false;
+let productsCreated = 0;
 mock.module("@f/payments/payment", () => ({
   getPaymentProcessor: () => ({
+    products: {
+      create: async () => ({ id: `prod_route_${++productsCreated}` }),
+      update: async (id: string) => ({ id }),
+    },
     prices: {
+      create: async () => ({ id: `price_route_${crypto.randomUUID()}` }),
       update: async (id: string, params: { active: boolean }) => {
         if (priceUpdateFails) throw new Error("Stripe is down");
         priceUpdateCalls.push({ id, active: params.active });
@@ -424,9 +430,18 @@ describe("GET /plans/:id/access", () => {
     await resetRedis();
   });
 
+  test("403s without plan:read:active, like GET /plans/:id", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    setSession({ id: userId, ...regularUser });
+
+    const res = await app.request(`/plans/${plan.id}/access`);
+    expect(res.status).toBe(403);
+  });
+
   test("404s for a nonexistent plan", async () => {
     const userId = await seedUser();
-    setSession({ id: userId, ...regularUser });
+    setSession({ id: userId, ...regularUser }, { plan: ["read:active"] });
 
     const res = await app.request("/plans/999999/access");
     expect(res.status).toBe(404);
@@ -447,7 +462,7 @@ describe("GET /plans/:id/access", () => {
       { durationDays: plan.durationDays },
       new Date(),
     );
-    setSession({ id: userId, ...regularUser });
+    setSession({ id: userId, ...regularUser }, { plan: ["read:active"] });
 
     const res = await app.request(`/plans/${plan.id}/access`);
     expect(res.status).toBe(200);
@@ -457,7 +472,7 @@ describe("GET /plans/:id/access", () => {
   test("one_time: not active without a purchase", async () => {
     const userId = await seedUser();
     const plan = await seedPlan({ type: "one_time" });
-    setSession({ id: userId, ...regularUser });
+    setSession({ id: userId, ...regularUser }, { plan: ["read:active"] });
 
     const res = await app.request(`/plans/${plan.id}/access`);
     expect(res.status).toBe(200);
@@ -468,7 +483,7 @@ describe("GET /plans/:id/access", () => {
     const userId = await seedUser();
     const plan = await seedPlan({ type: "recurring", interval: "month", durationDays: null });
     await seedSubscription({ referenceId: userId, plan: plan.name, status: "active" });
-    setSession({ id: userId, ...regularUser });
+    setSession({ id: userId, ...regularUser }, { plan: ["read:active"] });
 
     const res = await app.request(`/plans/${plan.id}/access`);
     expect(res.status).toBe(200);
@@ -478,7 +493,7 @@ describe("GET /plans/:id/access", () => {
   test("recurring: not active without a subscription", async () => {
     const userId = await seedUser();
     const plan = await seedPlan({ type: "recurring", interval: "month", durationDays: null });
-    setSession({ id: userId, ...regularUser });
+    setSession({ id: userId, ...regularUser }, { plan: ["read:active"] });
 
     const res = await app.request(`/plans/${plan.id}/access`);
     expect(res.status).toBe(200);
@@ -513,7 +528,7 @@ describe("GET /plans/:id/access on a retired plan", () => {
   test("someone who still holds it keeps access", async () => {
     const userId = await seedUser();
     const plan = await retiredPlanBoughtBy(userId);
-    setSession({ id: userId, ...regularUser });
+    setSession({ id: userId, ...regularUser }, { plan: ["read:active"] });
 
     const res = await app.request(`/plans/${plan.id}/access`);
     expect(res.status).toBe(200);
@@ -523,7 +538,7 @@ describe("GET /plans/:id/access on a retired plan", () => {
   test("anyone else gets a 404, as if it never existed", async () => {
     const userId = await seedUser();
     const plan = await retiredPlanBoughtBy(null);
-    setSession({ id: userId, ...regularUser });
+    setSession({ id: userId, ...regularUser }, { plan: ["read:active"] });
 
     const res = await app.request(`/plans/${plan.id}/access`);
     expect(res.status).toBe(404);
@@ -595,6 +610,28 @@ describe("POST /plans", () => {
       body: JSON.stringify({ name: "pro", type: "one_time", amount: 1000, currency: "usd" }),
     });
     expect(res.status).toBe(409);
+  });
+
+  test("409s, not 500s, when a same-name plan lands between the check and the insert", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...admin }, { plan: ["create"] });
+    // the concurrent create lands right after this request's own name check
+    const realGetByName = paymentsRepo.plan.getByName;
+    paymentsRepo.plan.getByName = async (...args) => {
+      const res = await realGetByName(...args);
+      await seedPlan({ name: "Pro" });
+      return res;
+    };
+    try {
+      const res = await app.request("/plans", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({ name: "pro", type: "one_time", amount: 1000, currency: "usd" }),
+      });
+      expect(res.status).toBe(409);
+    } finally {
+      paymentsRepo.plan.getByName = realGetByName;
+    }
   });
 });
 
@@ -1263,5 +1300,61 @@ describe("POST /checkout: reservations, deletion and repeatable plans", () => {
     expect((await checkout(plan.id)).status).toBe(500);
     sessionCreateFails = false;
     expect((await checkout(plan.id)).status).toBe(200);
+  });
+});
+
+describe("plan day counts are capped", () => {
+  beforeEach(async () => {
+    await resetDb();
+    await resetRedis();
+  });
+
+  const create = (body: Record<string, unknown>) =>
+    app.request("/plans", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ type: "one_time", amount: 1000, currency: "usd", ...body }),
+    });
+
+  test("POST /plans refuses a durationDays past the cap, and accepts the cap itself", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...admin }, { plan: ["create"] });
+    const { MAX_DURATION_DAYS } = await import("@f/payments/lib/constants");
+
+    expect((await create({ name: "Huge", durationDays: 2_000_000_000 })).status).toBe(422);
+    expect((await create({ name: "Over", durationDays: MAX_DURATION_DAYS + 1 })).status).toBe(422);
+    expect((await create({ name: "Max", durationDays: MAX_DURATION_DAYS })).status).toBe(201);
+  });
+
+  test("POST /plans refuses a trialDays past Stripe's limit", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...admin }, { plan: ["create"] });
+    const { MAX_TRIAL_DAYS } = await import("@f/payments/lib/constants");
+
+    const res = await create({
+      name: "Trial",
+      type: "recurring",
+      interval: "month",
+      trialDays: MAX_TRIAL_DAYS + 1,
+    });
+    expect(res.status).toBe(422);
+  });
+
+  test("PATCH /plans/:id applies the same caps", async () => {
+    const userId = await seedUser();
+    const oneTime = await seedPlan({ type: "one_time" });
+    const recurring = await seedPlan({ type: "recurring", interval: "month" });
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+    const { MAX_DURATION_DAYS, MAX_TRIAL_DAYS } = await import("@f/payments/lib/constants");
+    const patch = (id: number, body: Record<string, unknown>) =>
+      app.request(`/plans/${id}`, {
+        method: "PATCH",
+        headers: jsonHeaders,
+        body: JSON.stringify(body),
+      });
+
+    expect((await patch(oneTime.id, { durationDays: MAX_DURATION_DAYS + 1 })).status).toBe(422);
+    expect((await patch(recurring.id, { trialDays: MAX_TRIAL_DAYS + 1 })).status).toBe(422);
+    expect((await patch(oneTime.id, { durationDays: MAX_DURATION_DAYS })).status).toBe(204);
   });
 });

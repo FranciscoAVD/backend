@@ -31,3 +31,12 @@ export const PURCHASES_MAX_LIMIT = 100;
  */
 export const STRIPE_TIMEOUT_MS = 20_000;
 export const STRIPE_MAX_NETWORK_RETRIES = 2;
+
+/**
+ * Upper bounds for a plan's day counts. `durationDays` past ~100 million days pushes a purchase's
+ * `expiresAt` beyond what a Date can hold, and every confirmation of that plan then fails after
+ * the buyer has paid - so it's capped well short of that, at 100 years. `trialDays` is capped at
+ * Stripe's own limit on a subscription trial, so a value it would reject never gets stored.
+ */
+export const MAX_DURATION_DAYS = 36_500;
+export const MAX_TRIAL_DAYS = 730;

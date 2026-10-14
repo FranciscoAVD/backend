@@ -17,7 +17,7 @@ import {
   insertPlanSchema,
   updatePlanSchema,
 } from "@f/payments/lib/schemas";
-import { isCheckoutSessionId } from "@f/payments/lib/utils";
+import { isCheckoutSessionId, isUniqueViolation } from "@f/payments/lib/utils";
 import {
   RETIRED_PLANS_KEEP_ACCESS,
   RETIRING_EXPIRES_OPEN_CHECKOUTS,
@@ -153,63 +153,70 @@ const app = new Hono<PinoLoggerEnv>()
       return c.json({ data: res, message: "Plan found" }, HTTP.OK);
     },
   )
-  .get("/plans/:id/access", idParamValidator, async (c) => {
-    const { user } = c.get("session");
-    const { id } = c.req.valid("param");
+  .get(
+    "/plans/:id/access",
+    idParamValidator,
+    // the same gate as GET /plans/:id: without it, anyone signed in could probe which plan ids
+    // exist (404 vs 200) even with no permission to read plans at all
+    requirePermissionMiddleware({ plan: ["read:active"] }),
+    async (c) => {
+      const { user } = c.get("session");
+      const { id } = c.req.valid("param");
 
-    const [plan, planError] = await tryCatch(paymentsRepo.plan.get({ id }));
-    if (planError) {
-      c.var.logger.error({ err: planError, user: user.id, plan: id }, "payments.plan.access");
-      return c.json(
-        { message: "Something went wrong. Try again later." },
-        HTTP.InternalServerError,
+      const [plan, planError] = await tryCatch(paymentsRepo.plan.get({ id }));
+      if (planError) {
+        c.var.logger.error({ err: planError, user: user.id, plan: id }, "payments.plan.access");
+        return c.json(
+          { message: "Something went wrong. Try again later." },
+          HTTP.InternalServerError,
+        );
+      }
+
+      if (!plan) return c.json({ message: "Plan not found" }, HTTP.NotFound);
+
+      // one_time access lives in the `purchase` table; recurring access is governed by
+      // the subscription's own Stripe period, tracked in better-auth's `subscription` table
+      const [active, activeError] = await tryCatch(
+        plan.type === "one_time"
+          ? paymentsRepo.purchase.hasActive(
+              { userId: user.id, planId: plan.id },
+              { overlapping: plan.overlapping },
+            )
+          : paymentsRepo.subscription.hasActive(
+              { userId: user.id },
+              { name: plan.name },
+            ),
       );
-    }
+      if (activeError) {
+        c.var.logger.error(
+          { err: activeError, user: user.id, plan: plan.id },
+          "payments.plan.access",
+        );
+        return c.json(
+          { message: "Something went wrong. Try again later." },
+          HTTP.InternalServerError,
+        );
+      }
 
-    if (!plan) return c.json({ message: "Plan not found" }, HTTP.NotFound);
+      // whether a retired plan still grants access to those who hold it is a policy choice
+      const holds = active && (plan.active || RETIRED_PLANS_KEEP_ACCESS);
 
-    // one_time access lives in the `purchase` table; recurring access is governed by
-    // the subscription's own Stripe period, tracked in better-auth's `subscription` table
-    const [active, activeError] = await tryCatch(
-      plan.type === "one_time"
-        ? paymentsRepo.purchase.hasActive(
-            { userId: user.id, planId: plan.id },
-            { overlapping: plan.overlapping },
-          )
-        : paymentsRepo.subscription.hasActive(
-            { userId: user.id },
-            { name: plan.name },
-          ),
-    );
-    if (activeError) {
-      c.var.logger.error(
-        { err: activeError, user: user.id, plan: plan.id },
-        "payments.plan.access",
-      );
-      return c.json(
-        { message: "Something went wrong. Try again later." },
-        HTTP.InternalServerError,
-      );
-    }
+      // a retired plan is only revealed to someone who still holds it, or to an admin (read:all) -
+      // anyone else gets the same 404 as a plan that never existed, matching GET /plans/:id
+      if (!plan.active && !holds) {
+        let authorized = false;
+        await requirePermissionMiddleware({ plan: ["read:all"] })(
+          c as unknown as Parameters<ReturnType<typeof requirePermissionMiddleware>>[0],
+          async () => {
+            authorized = true;
+          },
+        );
+        if (!authorized) return c.json({ message: "Plan not found" }, HTTP.NotFound);
+      }
 
-    // whether a retired plan still grants access to those who hold it is a policy choice
-    const holds = active && (plan.active || RETIRED_PLANS_KEEP_ACCESS);
-
-    // a retired plan is only revealed to someone who still holds it, or to an admin (read:all) -
-    // anyone else gets the same 404 as a plan that never existed, matching GET /plans/:id
-    if (!plan.active && !holds) {
-      let authorized = false;
-      await requirePermissionMiddleware({ plan: ["read:all"] })(
-        c as unknown as Parameters<ReturnType<typeof requirePermissionMiddleware>>[0],
-        async () => {
-          authorized = true;
-        },
-      );
-      if (!authorized) return c.json({ message: "Plan not found" }, HTTP.NotFound);
-    }
-
-    return c.json({ data: { active: holds }, message: "Access checked" }, HTTP.OK);
-  })
+      return c.json({ data: { active: holds }, message: "Access checked" }, HTTP.OK);
+    },
+  )
   .get("/access", async (c) => {
     const { user } = c.get("session");
     const [res, error] = await tryCatch(
@@ -360,6 +367,15 @@ const app = new Hono<PinoLoggerEnv>()
         );
 
       const [res, error] = await tryCatch(paymentsRepo.plan.add(body.data));
+
+      // the check above can race another create of the same name, or one differing only in case;
+      // the database's case-insensitive unique index is what settles it (addPlan has already
+      // archived the Stripe product it made)
+      if (error && isUniqueViolation(error))
+        return c.json(
+          { message: "A plan with that name already exists" },
+          HTTP.Conflict,
+        );
 
       if (error) {
         c.var.logger.error({ err: error, user: user.id }, "payments.plan.add");

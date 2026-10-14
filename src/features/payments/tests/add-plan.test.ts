@@ -100,3 +100,24 @@ describe("addPlan", () => {
     expect(productsUpdateCalls).toEqual([{ id: "prod_2", active: false }]);
   });
 });
+
+describe("plan names are unique regardless of case", () => {
+  beforeEach(async () => {
+    await resetDb();
+    productsCreateCalls = [];
+    pricesCreateCalls = [];
+    productsUpdateCalls = [];
+    failPricesCreate = false;
+  });
+
+  test("a name differing only in case is refused by the database, and its product archived", async () => {
+    await addPlan(onePlan({ name: "Pro" }));
+
+    const error = await addPlan(onePlan({ name: "PRO" })).catch((e: unknown) => e);
+
+    const { isUniqueViolation } = await import("@f/payments/lib/utils");
+    expect(isUniqueViolation(error)).toBe(true);
+    // the second product was created in Stripe before the insert failed - and then archived
+    expect(productsUpdateCalls).toEqual([{ id: "prod_2", active: false }]);
+  });
+});

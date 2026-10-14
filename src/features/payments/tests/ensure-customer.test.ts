@@ -19,7 +19,10 @@ mock.module("@f/payments/payment", () => ({
   }),
 }));
 
-import { ensureStripeCustomer } from "@f/payments/use-cases/ensure-customer";
+import {
+  ensureStripeCustomer,
+  customerIdempotencyKey,
+} from "@f/payments/use-cases/ensure-customer";
 
 describe("ensureStripeCustomer", () => {
   beforeEach(async () => {
@@ -72,7 +75,25 @@ describe("ensureStripeCustomer", () => {
     });
 
     expect(customersCreateCalls[0]?.options).toEqual({
-      idempotencyKey: `customer-${userId}`,
+      idempotencyKey: customerIdempotencyKey({
+        id: userId,
+        name: "Test User",
+        email: "test@example.test",
+      }),
     });
+  });
+
+  test("the key changes with the details sent, so Stripe never sees one key with two payloads", () => {
+    const base = { id: "u1", name: "Ana", email: "ana@example.test" };
+    const key = customerIdempotencyKey(base);
+
+    expect(key).toStartWith("customer-u1-");
+    expect(customerIdempotencyKey({ ...base })).toBe(key);
+    expect(customerIdempotencyKey({ ...base, name: "Ana B" })).not.toBe(key);
+    expect(customerIdempotencyKey({ ...base, email: "ana2@example.test" })).not.toBe(key);
+    // not confusable by moving text between fields
+    expect(customerIdempotencyKey({ id: "u1", name: "a", email: "bc" })).not.toBe(
+      customerIdempotencyKey({ id: "u1", name: "ab", email: "c" }),
+    );
   });
 });

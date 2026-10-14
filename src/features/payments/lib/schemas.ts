@@ -10,13 +10,15 @@ import {
   AUDIT_LOG_MAX_LIMIT,
   PURCHASES_DEFAULT_LIMIT,
   PURCHASES_MAX_LIMIT,
+  MAX_DURATION_DAYS,
+  MAX_TRIAL_DAYS,
 } from "@f/payments/lib/constants";
 
 export const insertPlanSchema = createInsertSchema(plan, {
   amount: (s) => s.positive(),
   annualAmount: (s) => s.positive(),
-  trialDays: (s) => s.positive(),
-  durationDays: (s) => s.positive(),
+  trialDays: (s) => s.positive().max(MAX_TRIAL_DAYS),
+  durationDays: (s) => s.positive().max(MAX_DURATION_DAYS),
   currency: (s) => s.length(3).toLowerCase(),
 })
   .omit({
@@ -49,8 +51,8 @@ export const insertPlanSchema = createInsertSchema(plan, {
     path: ["durationDays"],
   });
 export const updatePlanSchema = createUpdateSchema(plan, {
-  trialDays: (s) => s.positive(),
-  durationDays: (s) => s.positive(),
+  trialDays: (s) => s.positive().max(MAX_TRIAL_DAYS),
+  durationDays: (s) => s.positive().max(MAX_DURATION_DAYS),
 })
   // allow-list, not a deny-list, of the Stripe-independent policy fields a plan's
   // pricing/identity (name, type, amount, interval, Stripe ids, ...) stays out of this

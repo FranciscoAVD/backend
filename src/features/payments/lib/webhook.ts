@@ -86,46 +86,14 @@ export async function confirmCheckout(
   // (see paymentsRepo.checkout.reserve in route.ts); this re-check catches the narrower one it can't -
   // two webhook deliveries confirming two separately-started sessions for the same plan. The
   // money is already taken either way, so the purchase is still recorded (never silently dropped,
-  // same reasoning as the FK-violation case in addPurchase) - this just flags it for review.
-  if (!plan.repeatable) {
-    const blocking = await paymentsRepo.purchase.getBlockingByPlan(
-      { userId: owner.userId, planId: owner.planId },
-      { stripeCheckoutSessionId: session.id },
-    );
-    if (blocking) {
-      logger.error(
-        {
-          err: new Error(
-            "Paid checkout for an already-owned non-repeatable plan",
-          ),
-          session: session.id,
-          user: owner.userId,
-          plan: owner.planId,
-          existingPurchase: blocking.id,
-        },
-        "payments.webhook.duplicate_purchase",
+  // same reasoning as the FK-violation case in addPurchase) - it's just flagged for review below,
+  // once the insert shows this delivery is the one that recorded it
+  const blocking = plan.repeatable
+    ? null
+    : await paymentsRepo.purchase.getBlockingByPlan(
+        { userId: owner.userId, planId: owner.planId },
+        { stripeCheckoutSessionId: session.id },
       );
-      const [, auditError] = await tryCatch(
-        paymentsRepo.audit.add({
-          type: "duplicate_purchase_confirmed",
-          userId: owner.userId,
-          planId: owner.planId,
-          existingPurchaseId: blocking.id,
-          stripeCheckoutSessionId: session.id,
-          details: {
-            stripePaymentIntentId: idOf(session.payment_intent),
-            amountTotal: session.amount_total ?? 0,
-          },
-        }),
-      );
-      if (auditError)
-        logger.warn(
-          { err: auditError, session: session.id },
-          "payments.audit.write_failed",
-        );
-      // fall through: the purchase row is still recorded below
-    }
-  }
 
   // the duration snapshotted at checkout time, so an admin edit made while this payment was
   // settling doesn't change what the buyer gets; sessions created before the snapshot existed
@@ -155,6 +123,40 @@ export async function confirmCheckout(
     },
     paidAt,
   );
+
+  // flagged only by the delivery that actually recorded the purchase: a redelivery of the same
+  // event, or the reconciler racing the webhook, finds the row already there and adds nothing - so
+  // one duplicate charge is one audit entry, however often Stripe retries it
+  if (blocking && inserted) {
+    logger.error(
+      {
+        err: new Error("Paid checkout for an already-owned non-repeatable plan"),
+        session: session.id,
+        user: owner.userId,
+        plan: owner.planId,
+        existingPurchase: blocking.id,
+      },
+      "payments.webhook.duplicate_purchase",
+    );
+    const [, auditError] = await tryCatch(
+      paymentsRepo.audit.add({
+        type: "duplicate_purchase_confirmed",
+        userId: owner.userId,
+        planId: owner.planId,
+        existingPurchaseId: blocking.id,
+        stripeCheckoutSessionId: session.id,
+        details: {
+          stripePaymentIntentId: idOf(session.payment_intent),
+          amountTotal: session.amount_total ?? 0,
+        },
+      }),
+    );
+    if (auditError)
+      logger.warn(
+        { err: auditError, session: session.id },
+        "payments.audit.write_failed",
+      );
+  }
 
   // the purchase is already stored; a leftover key just expires with its TTL
   const [, error] = await tryCatch(paymentsRepo.checkout.removePending(session.id));
