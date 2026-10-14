@@ -310,7 +310,10 @@ dispute overrides it only while open (`disputed`) or once lost (`refunded`). A
 dispute closed in our favor (`won`, `warning_closed`, `prevented`) defers to the
 refund state rather than forcing `paid`: `charge.disputed` stays true forever
 once a dispute was opened, so a refund made after a won dispute or a closed
-inquiry would otherwise be masked and keep granting access.
+inquiry would otherwise be masked and keep granting access. A lost dispute also
+counts toward `amountRefunded`: Stripe leaves a chargeback out of the charge's
+`amount_refunded`, so it's added on (to any earlier partial refund, capped at the
+charge amount) - `amountRefunded` is all money returned to the customer.
 
 The write is a compare-and-set (`syncPurchaseCharge`): the purchase row is read,
 the live state fetched, and the update only lands if the row still holds what

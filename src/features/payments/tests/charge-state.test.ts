@@ -50,6 +50,32 @@ describe("resolveChargeState", () => {
     expect(res?.status).toBe("refunded");
   });
 
+  test("a lost dispute counts the charged-back money as refunded, not just the status", async () => {
+    fakeLatestCharge = { amount: 1000, amount_refunded: 0, refunded: false, disputed: true };
+    fakeDispute = { status: "lost", amount: 1000 };
+
+    const res = await resolveChargeState("pi_1");
+    expect(res).toEqual({ status: "refunded", amountRefunded: 1000 });
+  });
+
+  test("a lost dispute after a partial refund adds the two, never past the charge", async () => {
+    fakeLatestCharge = { amount: 1000, amount_refunded: 200, refunded: false, disputed: true };
+    fakeDispute = { status: "lost", amount: 800 };
+    expect(await resolveChargeState("pi_1")).toEqual({ status: "refunded", amountRefunded: 1000 });
+
+    fakeDispute = { status: "lost", amount: 1000 }; // disputed the full amount anyway
+    expect(await resolveChargeState("pi_1")).toEqual({ status: "refunded", amountRefunded: 1000 });
+  });
+
+  test("an open or won dispute leaves amountRefunded as the charge's own refunds", async () => {
+    fakeLatestCharge = { amount: 1000, amount_refunded: 200, refunded: false, disputed: true };
+    fakeDispute = { status: "needs_response", amount: 800 };
+    expect((await resolveChargeState("pi_1"))?.amountRefunded).toBe(200);
+
+    fakeDispute = { status: "won", amount: 800 };
+    expect((await resolveChargeState("pi_1"))?.amountRefunded).toBe(200);
+  });
+
   test("an open dispute marks it disputed", async () => {
     fakeLatestCharge = { amount_refunded: 0, refunded: false, disputed: true };
     fakeDispute = { status: "needs_response" };

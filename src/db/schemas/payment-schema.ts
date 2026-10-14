@@ -79,6 +79,7 @@ export const purchase = pgTable(
     stripePaymentIntentId: text("stripe_payment_intent_id").unique(),
     // minor units (e.g. cents)
     amountTotal: integer("amount_total").notNull(),
+    // money returned to the customer: refunds, plus a lost chargeback's disputed amount (minor units)
     amountRefunded: integer("amount_refunded").notNull().default(0),
     currency: varchar("currency", { length: 3 }).notNull(),
     // from the plan's durationDays at the time of purchase; null means it never expires.

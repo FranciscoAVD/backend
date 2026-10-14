@@ -41,6 +41,14 @@ export async function resolveChargeState(
     // inquiry) would otherwise be masked, and the purchase would keep granting access
     const fromDispute = dispute ? purchaseStatusFromDispute(dispute) : "paid";
     if (fromDispute !== "paid") target.status = fromDispute;
+    // a lost chargeback returns the disputed amount to the customer just as surely as a refund
+    // does, but Stripe doesn't count it in amount_refunded - so `refunded` with
+    // amountRefunded 0 would misstate revenue. Added to any earlier refunds, never past the charge
+    if (dispute && fromDispute === "refunded")
+      target.amountRefunded = Math.min(
+        charge.amount ?? Number.POSITIVE_INFINITY,
+        charge.amount_refunded + (dispute.amount ?? 0),
+      );
   }
   return target;
 }
