@@ -15,12 +15,10 @@ import {
   getPurchasesByUserAdmin,
   getPurchaseBySession,
   getPurchaseBySessionAnyUser,
-  getPurchaseByPaymentIntent,
   getBlockingPurchaseByPlan,
   hasAnyBlockingPurchase,
   hasActivePurchase,
 } from "@f/payments/use-cases/get-purchases";
-import { updatePurchaseByPaymentIntent } from "@f/payments/use-cases/update-purchase";
 import {
   hasActiveSubscription,
   getReconcilableSubscriptions,
@@ -39,6 +37,7 @@ import {
   removePendingCheckout,
 } from "@f/payments/use-cases/checkout";
 import { syncPlanPricesActive } from "@f/payments/use-cases/sync-plan-prices";
+import { syncPurchaseCharge } from "@f/payments/use-cases/sync-purchase-charge";
 import { ensureStripeCustomer } from "@f/payments/use-cases/ensure-customer";
 import { addAuditLog } from "@f/payments/use-cases/add-audit-log";
 import { getActivePlans } from "@f/payments/use-cases/get-active-plans";
@@ -69,11 +68,10 @@ export const paymentsRepo = {
     getByUserAdmin: getPurchasesByUserAdmin,
     getBySession: getPurchaseBySession,
     getBySessionAnyUser: getPurchaseBySessionAnyUser,
-    getByPaymentIntent: getPurchaseByPaymentIntent,
     getBlockingByPlan: getBlockingPurchaseByPlan,
     hasAnyBlocking: hasAnyBlockingPurchase,
     hasActive: hasActivePurchase,
-    updateByPaymentIntent: updatePurchaseByPaymentIntent,
+    syncCharge: syncPurchaseCharge,
   },
   subscription: {
     hasActive: hasActiveSubscription,

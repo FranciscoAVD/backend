@@ -173,14 +173,12 @@ async function updateByCharge(
   const stripePaymentIntentId = idOf(paymentIntent);
   if (!stripePaymentIntentId) return;
 
-  const target = await resolveChargeState(stripePaymentIntentId);
-  if (!target) return;
-
-  const updated = await paymentsRepo.purchase.updateByPaymentIntent(
-    { stripePaymentIntentId },
-    target,
+  // the live state is fetched with the purchase row locked, so a concurrent sync of the same
+  // purchase can't write an older fetch over this one (see syncPurchaseCharge)
+  const synced = await paymentsRepo.purchase.syncCharge({ stripePaymentIntentId }, () =>
+    resolveChargeState(stripePaymentIntentId),
   );
-  if (updated) return;
+  if (synced.found) return;
 
   // one of our checkouts whose purchase isn't recorded yet (its completed event is still
   // being retried): fail so Stripe retries this one too instead of dropping it. Other

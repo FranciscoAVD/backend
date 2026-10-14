@@ -31,7 +31,11 @@ mock.module("@f/payments/payment", () => ({
     paymentIntents: {
       retrieve: async (id: string) => {
         intentRetrieves.push(id);
-        return { id, latest_charge: fakeCharges[id] ?? null };
+        // live state: an explicit override, else the charge the listed session itself carries
+        const listed = fakeSessions.find(
+          (s) => (s.payment_intent as { id?: string } | null)?.id === id,
+        )?.payment_intent as { latest_charge?: unknown } | undefined;
+        return { id, latest_charge: fakeCharges[id] ?? listed?.latest_charge ?? null };
       },
     },
     subscriptions: {

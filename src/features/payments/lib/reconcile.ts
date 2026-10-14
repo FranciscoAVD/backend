@@ -76,16 +76,27 @@ export async function reconcile(
   )
     return { inserted, updated: false };
 
-  logger.info(
-    { session: session.id, from: current, to: target, dryRun },
-    "payments.reconcile.update",
-  );
-  if (!dryRun)
-    await paymentsRepo.purchase.updateByPaymentIntent(
-      { stripePaymentIntentId: intent.id },
-      target,
+  // the listed snapshot only says *whether* to sync - it was fetched before this pass and a
+  // webhook may have written newer state since. The write itself fetches fresh, with the row
+  // locked, so it can never put an older state over a newer one
+  if (dryRun) {
+    logger.info(
+      { session: session.id, from: current, to: target, dryRun },
+      "payments.reconcile.update",
     );
-  return { inserted, updated: true };
+    return { inserted, updated: true };
+  }
+  const synced = await paymentsRepo.purchase.syncCharge(
+    { stripePaymentIntentId: intent.id },
+    () => resolveChargeState(intent.id),
+  );
+  const updated = synced.found && synced.updated;
+  if (updated && synced.found)
+    logger.info(
+      { session: session.id, from: synced.from, to: synced.to, dryRun },
+      "payments.reconcile.update",
+    );
+  return { inserted, updated };
 }
 
 // the events that mark a one-time checkout's payment as succeeded - the same two the webhook
@@ -178,22 +189,18 @@ async function getChargeEventIntents(sinceSec: number): Promise<Set<string>> {
  * @returns Whether the purchase changed (or, in a dry run, would have).
  */
 async function syncCharge(stripePaymentIntentId: string, dryRun: boolean): Promise<boolean> {
-  const current = await paymentsRepo.purchase.getByPaymentIntent({ stripePaymentIntentId });
-  if (!current) return false;
-
-  const target = await resolveChargeState(stripePaymentIntentId);
-  if (
-    !target ||
-    (current.status === target.status && current.amountRefunded === target.amountRefunded)
-  )
-    return false;
+  // locked fetch-then-write, the same as the webhook's (see syncPurchaseCharge)
+  const synced = await paymentsRepo.purchase.syncCharge(
+    { stripePaymentIntentId },
+    () => resolveChargeState(stripePaymentIntentId),
+    { write: !dryRun },
+  );
+  if (!synced.found || !synced.updated) return false;
 
   logger.info(
-    { paymentIntent: stripePaymentIntentId, from: current, to: target, dryRun },
+    { paymentIntent: stripePaymentIntentId, from: synced.from, to: synced.to, dryRun },
     "payments.reconcile.charge_update",
   );
-  if (!dryRun)
-    await paymentsRepo.purchase.updateByPaymentIntent({ stripePaymentIntentId }, target);
   return true;
 }
 
