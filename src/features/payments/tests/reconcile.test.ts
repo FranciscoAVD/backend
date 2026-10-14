@@ -8,6 +8,8 @@ import { resetRedis } from "@/test-helpers/redis";
 
 let fakeSessions: Partial<Stripe.Checkout.Session>[] = [];
 let fakeSubscriptions: Partial<Stripe.Subscription>[] = [];
+// ids runSubscriptions fell back to retrieving individually, because the list didn't return them
+let retrieved: string[] = [];
 
 // no free local "real Stripe" to run against — the SDK surface run()/reconcile() actually call
 // is faked here via bun:test's mock.module
@@ -15,7 +17,23 @@ mock.module("@f/payments/payment", () => ({
   getPaymentProcessor: () => ({
     checkout: { sessions: { list: () => fakeSessions } },
     disputes: { list: async () => ({ data: [] }) },
-    subscriptions: { list: () => fakeSubscriptions },
+    subscriptions: {
+      // mirrors Stripe's real default: without a `status`, the list leaves out canceled
+      // subscriptions - a fake that ignored this is what let runSubscriptions miss them
+      list: (params: Stripe.SubscriptionListParams = {}) =>
+        params.status === "all"
+          ? fakeSubscriptions
+          : fakeSubscriptions.filter((sub) => sub.status !== "canceled"),
+      retrieve: async (id: string) => {
+        retrieved.push(id);
+        const sub = fakeSubscriptions.find((s) => s.id === id);
+        if (!sub)
+          throw Object.assign(new Error(`No such subscription: '${id}'`), {
+            code: "resource_missing",
+          });
+        return sub;
+      },
+    },
   }),
 }));
 
@@ -55,6 +73,7 @@ beforeEach(async () => {
   await resetRedis();
   fakeSessions = [];
   fakeSubscriptions = [];
+  retrieved = [];
 });
 
 describe("run", () => {
@@ -283,6 +302,44 @@ describe("runSubscriptions", () => {
     expect(row?.canceledAt?.getTime()).toBe(canceledAt.getTime());
   });
 
+  test("revokes access when the cancellation webhook was lost", async () => {
+    const userId = await seedUser();
+    await seedSubscription({
+      referenceId: userId,
+      plan: "pro",
+      stripeSubscriptionId: "sub_1",
+      status: "active",
+    });
+    fakeSubscriptions = [
+      fakeSubscription({ id: "sub_1", status: "canceled", ended_at: 1_767_225_600 }),
+    ];
+
+    const { hasActiveSubscription } = await import("@f/payments/use-cases/get-subscription");
+    expect(await hasActiveSubscription({ userId }, { name: "pro" })).toBe(true);
+
+    const summary = await runSubscriptions(false);
+
+    expect(summary).toEqual({ checked: 1, updated: 1, failed: 0 });
+    expect(retrieved).toEqual(["sub_1"]);
+    expect(await hasActiveSubscription({ userId }, { name: "pro" })).toBe(false);
+  });
+
+  test("only falls back to a per-row retrieve for rows the list didn't return", async () => {
+    const userId = await seedUser();
+    await seedSubscription({
+      referenceId: userId,
+      plan: "pro",
+      stripeSubscriptionId: "sub_live",
+      status: "active",
+    });
+    fakeSubscriptions = [fakeSubscription({ id: "sub_live", status: "past_due" })];
+
+    const summary = await runSubscriptions(false);
+
+    expect(summary).toEqual({ checked: 1, updated: 1, failed: 0 });
+    expect(retrieved).toEqual([]);
+  });
+
   test("leaves a row untouched when nothing differs from Stripe", async () => {
     const userId = await seedUser();
     // periodStart/periodEnd match the fake's own epoch-0 default below - this test is
@@ -325,7 +382,7 @@ describe("runSubscriptions", () => {
     expect(row?.status).toBe("canceled");
   });
 
-  test("a reconcilable row missing from the list counts as failed, not silently skipped", async () => {
+  test("a reconcilable row missing from Stripe entirely counts as failed, not silently skipped", async () => {
     const userId = await seedUser();
     await seedSubscription({
       referenceId: userId,
@@ -333,12 +390,13 @@ describe("runSubscriptions", () => {
       stripeSubscriptionId: "sub_missing",
       status: "active",
     });
-    // fakeSubscriptions stays empty - Stripe's list never returns this one, e.g. a wrong/
-    // orphaned stripeSubscriptionId
+    // fakeSubscriptions stays empty - neither the list nor a retrieve finds this one, e.g. a
+    // wrong/orphaned stripeSubscriptionId
 
     const summary = await runSubscriptions(false);
 
     expect(summary).toEqual({ checked: 1, updated: 0, failed: 1 });
+    expect(retrieved).toEqual(["sub_missing"]);
   });
 
   test("dry-run never writes to the DB", async () => {

@@ -207,15 +207,20 @@ export async function reconcileSubscription(
 
 /**
  * @description Second, independent reconciler pass: corrects subscription rows whose status,
- * period or plan has drifted from Stripe's own. Bulk-lists every subscription from Stripe
+ * period or plan has drifted from Stripe's own. Bulk-lists subscriptions from Stripe
  * (`subscriptions.list`, paginated) rather than retrieving one by one - call volume scales with
- * total subscriptions divided by 100, not with how many rows need checking, which stays
+ * total live subscriptions divided by 100, not with how many rows need checking, which stays
  * rate-limit-safe even as subscriber count grows. Only acts on rows not already in a terminal
  * state (`getReconcilableSubscriptions` - Stripe guarantees those never change again), matched
- * against the list by `stripeSubscriptionId`. A reconcilable row never found in the list - a
- * wrong/orphaned Stripe subscription ID, not a normal occurrence - is counted as `failed` rather
- * than silently skipped, so a genuinely broken row stays as visible as it would be with a direct
- * per-row lookup.
+ * against the list by `stripeSubscriptionId`.
+ *
+ * Stripe's default list leaves out canceled subscriptions - and a row still `active` because its
+ * `customer.subscription.deleted` webhook was lost is exactly the drift this pass most needs to
+ * catch. So every reconcilable row the list didn't return is retrieved individually afterwards:
+ * normally there are none, so this costs nothing in the common case, unlike listing with
+ * `status: "all"`, which would page through the account's entire cancellation history on every
+ * run. A row whose subscription doesn't exist in Stripe at all - a wrong/orphaned Stripe
+ * subscription ID - is counted as `failed` rather than silently skipped.
  */
 export async function runSubscriptions(
   dryRun: boolean,
@@ -228,31 +233,44 @@ export async function runSubscriptions(
     if (row.stripeSubscriptionId) byStripeId.set(row.stripeSubscriptionId, row);
   }
 
-  const matched = new Set<string>();
-  const subscriptions = getPaymentProcessor().subscriptions.list({ limit: 100 });
-  for await (const current of subscriptions) {
-    const row = byStripeId.get(current.id);
-    if (!row) continue;
-    matched.add(current.id);
-
+  const check = async (row: Subscription, current: Stripe.Subscription) => {
     summary.checked++;
     const [result, error] = await tryCatch(reconcileSubscription(row, current, dryRun));
     if (error) {
       summary.failed++;
       logger.error({ err: error, subscription: current.id }, "payments.reconcile.subscription");
-      continue;
+      return;
     }
     if (result.updated) summary.updated++;
+  };
+
+  const stripe = getPaymentProcessor();
+  const matched = new Set<string>();
+  for await (const current of stripe.subscriptions.list({ limit: 100 })) {
+    const row = byStripeId.get(current.id);
+    if (!row) continue;
+    matched.add(current.id);
+    await check(row, current);
   }
 
-  for (const stripeSubscriptionId of byStripeId.keys()) {
+  // not in the default list: canceled since the row was last written (a lost webhook), or
+  // genuinely missing from Stripe
+  for (const [stripeSubscriptionId, row] of byStripeId) {
     if (matched.has(stripeSubscriptionId)) continue;
-    summary.checked++;
-    summary.failed++;
-    logger.error(
-      { subscription: stripeSubscriptionId },
-      "payments.reconcile.subscription_not_found",
-    );
+    const [current, error] = await tryCatch(stripe.subscriptions.retrieve(stripeSubscriptionId));
+    if (error) {
+      summary.checked++;
+      summary.failed++;
+      const missing = (error as { code?: string }).code === "resource_missing";
+      logger.error(
+        { err: error, subscription: stripeSubscriptionId },
+        missing
+          ? "payments.reconcile.subscription_not_found"
+          : "payments.reconcile.subscription",
+      );
+      continue;
+    }
+    await check(row, current);
   }
 
   return summary;

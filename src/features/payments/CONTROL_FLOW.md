@@ -321,12 +321,19 @@ instead of `days`, it scopes by status: `getReconcilableSubscriptions` skips
 any row already `canceled` or `incomplete_expired`, since Stripe guarantees
 neither ever changes again.
 
-`runSubscriptions` bulk-lists every subscription from Stripe
-(`stripe.subscriptions.list()`, auto-paginated, no status filter) in one
-pass, rather than retrieving each reconcilable row one by one - call volume
-scales with *total subscriptions on the account divided by 100*, not with
-how many rows need checking, which stays comfortably within rate-limit
-budget even as subscriber count grows. Each listed subscription is matched
+`runSubscriptions` bulk-lists subscriptions from Stripe
+(`stripe.subscriptions.list()`, auto-paginated) in one pass, rather than
+retrieving each reconcilable row one by one - call volume scales with
+*live subscriptions on the account divided by 100*, not with how many rows
+need checking, which stays comfortably within rate-limit budget even as
+subscriber count grows. Stripe's default list omits canceled subscriptions,
+though, and a row left `active` by a lost `customer.subscription.deleted`
+webhook is the most important drift this pass exists to catch - so every
+reconcilable row the list didn't return is then retrieved individually
+(`subscriptions.retrieve`). Those are only the drifted or broken rows,
+normally none, so this costs nothing in the common case, unlike listing with
+`status: "all"`, which would page through the account's whole cancellation
+history on every run. Each listed subscription is matched
 back to a reconcilable row by `stripeSubscriptionId`; unmatched rows are
 handled after the loop (see below).
 
@@ -354,8 +361,8 @@ moved period fields to the item level) - same simplification applies to the
 price lookup (first item only), which only matters for multi-item/seat
 subscriptions this app doesn't use.
 
-A reconcilable row never matched against the list - a wrong or orphaned
-`stripeSubscriptionId`, not a normal occurrence - is counted as `failed`
+A reconcilable row that even the individual retrieve can't find - a wrong or
+orphaned `stripeSubscriptionId`, not a normal occurrence - is counted as `failed`
 under its own message (`payments.reconcile.subscription_not_found`), the
 same visibility a failed per-row lookup would have given; switching to
 bulk-listing must not make a genuinely broken row go silently unnoticed.
