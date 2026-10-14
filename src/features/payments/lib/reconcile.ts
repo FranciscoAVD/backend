@@ -211,7 +211,13 @@ export async function run(
   const summary: ReconcileSummary = { scanned: 0, inserted: 0, updated: 0, failed: 0 };
   const stripe = getPaymentProcessor();
   const sinceSec = Math.floor(Date.now() / 1000) - days * 24 * 60 * 60;
-  const successTimes = await getSuccessTimes(sinceSec);
+  // both event listings are optional extras on top of the session scan, so neither may take it
+  // down with it - e.g. a restricted API key without event read access, or Stripe's events
+  // endpoint failing on its own. Without payment times, inserts fall back to the charge's time
+  const [listedSuccessTimes, successTimesError] = await tryCatch(getSuccessTimes(sinceSec));
+  if (successTimesError)
+    logger.warn({ err: successTimesError }, "payments.reconcile.success_events_unavailable");
+  const successTimes = listedSuccessTimes ?? new Map<string, Date>();
   const sessions = stripe.checkout.sessions.list({
     status: "complete",
     created: { gte: sinceSec },
@@ -246,8 +252,15 @@ export async function run(
     if (result.inserted) summary.inserted++;
     if (result.updated) summary.updated++;
   }
-  // refunds/disputes on purchases older than the session scan's window
-  for (const intentId of await getChargeEventIntents(sinceSec)) {
+  // refunds/disputes on purchases older than the session scan's window. If the events can't be
+  // listed, this backstop didn't run at all - counted as a failure, so the run still exits
+  // non-zero and gets noticed, but the session scan's own results above are kept
+  const [chargeIntents, chargeEventsError] = await tryCatch(getChargeEventIntents(sinceSec));
+  if (chargeEventsError) {
+    summary.failed++;
+    logger.error({ err: chargeEventsError }, "payments.reconcile.charge_events_unavailable");
+  }
+  for (const intentId of chargeIntents ?? []) {
     if (synced.has(intentId)) continue;
     const [updated, error] = await tryCatch(syncCharge(intentId, dryRun));
     if (error) {

@@ -373,6 +373,14 @@ synced isn't fetched twice. Changes count toward `updated`, errors toward
 `failed`. Stripe keeps events for 30 days, so a `--days` beyond that only widens
 the session scan.
 
+Both event listings (payment times, and these charge events) are extras on top
+of the session scan, and neither can take it down: if Stripe's Events API fails -
+or the API key is a restricted one without event read access - inserts fall back
+to the charge's own time (`payments.reconcile.success_events_unavailable`, a
+warning), and the charge-event pass is skipped and counted as one `failed`
+(`payments.reconcile.charge_events_unavailable`), so the run still exits
+non-zero while keeping the session scan's own results.
+
 ### `runSubscriptions`: correcting stale subscription rows
 
 A second, independent reconciler pass, triggered by `GET /plans/:id/access`

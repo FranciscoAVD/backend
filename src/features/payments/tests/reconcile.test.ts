@@ -8,6 +8,8 @@ import { resetRedis } from "@/test-helpers/redis";
 
 let fakeSessions: Partial<Stripe.Checkout.Session>[] = [];
 let fakeEvents: Partial<Stripe.Event>[] = [];
+// e.g. a restricted API key without event read access
+let eventsFail = false;
 // live charge state per payment intent, for resolveChargeState's fresh retrieve
 let fakeCharges: Record<string, Record<string, unknown>> = {};
 let fakeDisputeStatus: string | null = null;
@@ -23,7 +25,14 @@ mock.module("@f/payments/payment", () => ({
     checkout: { sessions: { list: () => fakeSessions } },
     events: {
       list: (params: Stripe.EventListParams) =>
-        fakeEvents.filter((e) => params.types?.includes(e.type as string) ?? true),
+        eventsFail
+          ? {
+              // like the SDK's auto-paginating list, the request fails once iterated
+              async *[Symbol.asyncIterator]() {
+                throw new Error("This API key does not have the rak_event_read permission");
+              },
+            }
+          : fakeEvents.filter((e) => params.types?.includes(e.type as string) ?? true),
     },
     disputes: {
       list: async () => ({ data: fakeDisputeStatus ? [{ status: fakeDisputeStatus }] : [] }),
@@ -96,6 +105,7 @@ beforeEach(async () => {
   await resetRedis();
   fakeSessions = [];
   fakeEvents = [];
+  eventsFail = false;
   fakeCharges = {};
   fakeDisputeStatus = null;
   intentRetrieves = [];
@@ -179,6 +189,31 @@ describe("run", () => {
 
     await run(14, false);
 
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase?.createdAt.getTime()).toBe(chargedAt * 1000);
+  });
+
+  test("without the Events API, the session scan still runs; only the charge-event pass is lost", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    const chargedAt = Math.floor(Date.now() / 1000) - 3 * DAY_SEC;
+    fakeSessions = [
+      fakeSession({
+        id: "cs_ok",
+        metadata: { userId, planId: String(plan.id) },
+        payment_intent: {
+          id: "pi_ok",
+          latest_charge: { created: chargedAt, amount_refunded: 0, refunded: false, disputed: false },
+        } as unknown as Stripe.PaymentIntent,
+      }),
+    ];
+    eventsFail = true;
+
+    const summary = await run(14, false);
+
+    // the insert still happens, dated by the charge instead of the success event; the skipped
+    // charge-event pass counts as one failure, so the run still exits non-zero and gets noticed
+    expect(summary).toEqual({ scanned: 1, inserted: 1, updated: 0, failed: 1 });
     const [purchase] = await getAllPurchases({ userId });
     expect(purchase?.createdAt.getTime()).toBe(chargedAt * 1000);
   });
