@@ -129,6 +129,24 @@ export async function getPurchaseBySessionAnyUser(
 }
 
 /**
+ * @description Select query for the purchase paid by a given Stripe payment intent, whoever owns it
+ * (including a since-deleted user's). For system callers syncing refund/dispute state from Stripe
+ * (the reconciler), never for a route answering a user. Assumes validation. Operation must be
+ * wrapped in try-catch
+ * @param purchase object of a non-null Stripe payment intent ID
+ * @returns Purchase object or null. If null, no purchase was paid by that payment intent.
+ */
+export async function getPurchaseByPaymentIntent(
+  purchase: { stripePaymentIntentId: string },
+): Promise<Payment.Purchase | null> {
+  const res = await db
+    .select()
+    .from(purchaseTable)
+    .where(eq(purchaseTable.stripePaymentIntentId, purchase.stripePaymentIntentId));
+  return res[0] ?? null;
+}
+
+/**
  * @description Select query for a purchase of the given plan by the given user that should block a
  * repurchase of a plan whose `repeatable` flag is false - `paid` or `disputed` (money is still held
  * either way); only `refunded` frees the slot. `exclude`, when given, leaves out a specific checkout

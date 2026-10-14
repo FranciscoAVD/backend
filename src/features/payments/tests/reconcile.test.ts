@@ -8,6 +8,10 @@ import { resetRedis } from "@/test-helpers/redis";
 
 let fakeSessions: Partial<Stripe.Checkout.Session>[] = [];
 let fakeEvents: Partial<Stripe.Event>[] = [];
+// live charge state per payment intent, for resolveChargeState's fresh retrieve
+let fakeCharges: Record<string, Record<string, unknown>> = {};
+let fakeDisputeStatus: string | null = null;
+let intentRetrieves: string[] = [];
 let fakeSubscriptions: Partial<Stripe.Subscription>[] = [];
 // ids runSubscriptions fell back to retrieving individually, because the list didn't return them
 let retrieved: string[] = [];
@@ -21,7 +25,15 @@ mock.module("@f/payments/payment", () => ({
       list: (params: Stripe.EventListParams) =>
         fakeEvents.filter((e) => params.types?.includes(e.type as string) ?? true),
     },
-    disputes: { list: async () => ({ data: [] }) },
+    disputes: {
+      list: async () => ({ data: fakeDisputeStatus ? [{ status: fakeDisputeStatus }] : [] }),
+    },
+    paymentIntents: {
+      retrieve: async (id: string) => {
+        intentRetrieves.push(id);
+        return { id, latest_charge: fakeCharges[id] ?? null };
+      },
+    },
     subscriptions: {
       // mirrors Stripe's real default: without a `status`, the list leaves out canceled
       // subscriptions - a fake that ignored this is what let runSubscriptions miss them
@@ -80,6 +92,9 @@ beforeEach(async () => {
   await resetRedis();
   fakeSessions = [];
   fakeEvents = [];
+  fakeCharges = {};
+  fakeDisputeStatus = null;
+  intentRetrieves = [];
   fakeSubscriptions = [];
   retrieved = [];
 });
@@ -337,6 +352,101 @@ describe("run", () => {
 
     expect(summary).toEqual({ scanned: 1, inserted: 1, updated: 0, failed: 0 });
     expect(await getAllPurchases({ userId })).toEqual([]);
+  });
+});
+
+describe("run: refunds and disputes on older purchases", () => {
+  // a purchase made long before the session scan's window, so only the charge-event pass sees it
+  const oldPurchase = async (userId: string, intentId: string) => {
+    const plan = await seedPlan();
+    await addPurchase(
+      { userId },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: `cs_${intentId}`,
+        stripePaymentIntentId: intentId,
+        amountTotal: 1000,
+        currency: "usd",
+      },
+      { durationDays: null },
+      new Date(Date.now() - 60 * DAY_SEC * 1000),
+    );
+  };
+  const chargeEvent = (type: string, intentId: string) =>
+    ({ type, created: Math.floor(Date.now() / 1000), data: { object: { payment_intent: intentId } } }) as Partial<Stripe.Event>;
+
+  test("a lost dispute webhook on a 60-day-old purchase is still caught", async () => {
+    const userId = await seedUser();
+    await oldPurchase(userId, "pi_old");
+    fakeEvents = [chargeEvent("charge.dispute.created", "pi_old")];
+    fakeCharges = { pi_old: { amount_refunded: 0, refunded: false, disputed: true } };
+    fakeDisputeStatus = "needs_response";
+
+    const summary = await run(14, false);
+
+    expect(summary).toEqual({ scanned: 0, inserted: 0, updated: 1, failed: 0 });
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase?.status).toBe("disputed");
+  });
+
+  test("a lost refund webhook on an older purchase is still caught", async () => {
+    const userId = await seedUser();
+    await oldPurchase(userId, "pi_old");
+    fakeEvents = [chargeEvent("charge.refunded", "pi_old")];
+    fakeCharges = { pi_old: { amount_refunded: 1000, refunded: true, disputed: false } };
+
+    await run(14, false);
+
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase).toMatchObject({ status: "refunded", amountRefunded: 1000 });
+  });
+
+  test("an event whose state already matches changes nothing", async () => {
+    const userId = await seedUser();
+    await oldPurchase(userId, "pi_old");
+    fakeEvents = [chargeEvent("charge.dispute.closed", "pi_old")];
+    fakeCharges = { pi_old: { amount_refunded: 0, refunded: false, disputed: true } };
+    fakeDisputeStatus = "won";
+
+    expect(await run(14, false)).toEqual({ scanned: 0, inserted: 0, updated: 0, failed: 0 });
+  });
+
+  test("a payment intent with no purchase (e.g. a subscription invoice) is skipped, not failed", async () => {
+    fakeEvents = [chargeEvent("charge.refunded", "pi_invoice")];
+
+    expect(await run(14, false)).toEqual({ scanned: 0, inserted: 0, updated: 0, failed: 0 });
+    expect(intentRetrieves).toEqual([]);
+  });
+
+  test("a dry run reports the change without writing it", async () => {
+    const userId = await seedUser();
+    await oldPurchase(userId, "pi_old");
+    fakeEvents = [chargeEvent("charge.refunded", "pi_old")];
+    fakeCharges = { pi_old: { amount_refunded: 1000, refunded: true, disputed: false } };
+
+    expect((await run(14, true)).updated).toBe(1);
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase?.status).toBe("paid");
+  });
+
+  test("an intent the session scan already synced isn't fetched again", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    fakeSessions = [
+      fakeSession({
+        id: "cs_recent",
+        metadata: { userId, planId: String(plan.id) },
+        payment_intent: {
+          id: "pi_recent",
+          latest_charge: { amount_refunded: 0, refunded: false, disputed: false },
+        } as unknown as Stripe.PaymentIntent,
+      }),
+    ];
+    fakeEvents = [chargeEvent("charge.refunded", "pi_recent")];
+
+    await run(14, false);
+
+    expect(intentRetrieves).toEqual([]);
   });
 });
 

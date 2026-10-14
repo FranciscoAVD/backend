@@ -328,6 +328,18 @@ The default scan window is 14 days (derived from `PROCESSING_TTL_SEC`), not 7 -
 delayed payment methods (e.g. bank debits) can take that long to settle, and a
 late settlement whose webhook was lost needs to still fall inside the window.
 
+That window is about *sessions*, though, and refunds and disputes don't keep to
+it: chargebacks typically land 30-120 days after the purchase. So after the
+session scan, `run` also lists the window's `charge.refunded`,
+`charge.dispute.created` and `charge.dispute.closed` events - the same charge
+events the webhook acts on - and re-syncs each one's purchase from Stripe's live
+state (`resolveChargeState`, as `updateByCharge` does), whatever the purchase's
+own age. A payment intent with no purchase row (a subscription invoice, or a
+checkout the session scan handles) is skipped; one the session scan already
+synced isn't fetched twice. Changes count toward `updated`, errors toward
+`failed`. Stripe keeps events for 30 days, so a `--days` beyond that only widens
+the session scan.
+
 ### `runSubscriptions`: correcting stale subscription rows
 
 A second, independent reconciler pass, triggered by `GET /plans/:id/access`

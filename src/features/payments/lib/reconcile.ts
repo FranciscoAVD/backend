@@ -12,6 +12,7 @@ import { paymentsRepo } from "@f/payments/repo";
 import type { Subscription } from "@f/payments/use-cases/get-subscription";
 import type { SubscriptionCorrection } from "@f/payments/use-cases/update-subscription";
 import { logger } from "@/lib/logger";
+import type { ALLOWED_EVENTS } from "@f/payments/lib/constants";
 import tryCatch from "@vicstack/try-catch";
 
 export type ReconcileSummary = {
@@ -138,6 +139,64 @@ function fallbackPaidAt(session: Stripe.Checkout.Session): Date {
   return new Date((typeof chargedAt === "number" ? chargedAt : session.created) * 1000);
 }
 
+// the refund/dispute events the webhook syncs a purchase on - kept in step with ALLOWED_EVENTS's
+// charge.* entries, so the reconciler replays exactly what a lost webhook would have done
+const CHARGE_EVENTS = [
+  "charge.refunded",
+  "charge.dispute.created",
+  "charge.dispute.closed",
+] as const satisfies readonly (typeof ALLOWED_EVENTS)[number][];
+
+/**
+ * @description Payment intents with a refund or dispute event since `sinceSec`, whatever the age of
+ * the payment itself. Chargebacks typically land 30-120 days after the purchase - long after the
+ * session scan's window - so a lost `charge.dispute.*` webhook for an older purchase would
+ * otherwise never be caught, and the purchase would keep granting access. Stripe keeps events for
+ * 30 days, comfortably longer than the default window.
+ */
+async function getChargeEventIntents(sinceSec: number): Promise<Set<string>> {
+  const intents = new Set<string>();
+  const events = getPaymentProcessor().events.list({
+    types: [...CHARGE_EVENTS],
+    created: { gte: sinceSec },
+    limit: 100,
+  });
+  for await (const event of events) {
+    const object = event.data.object as Stripe.Charge | Stripe.Dispute;
+    const intent = object.payment_intent;
+    const id = typeof intent === "string" ? intent : intent?.id;
+    if (id) intents.add(id);
+  }
+  return intents;
+}
+
+/**
+ * @description Re-syncs one purchase's refund/dispute state from Stripe's live records, the same
+ * way the webhook's `updateByCharge` does. A payment intent with no purchase row is skipped: either
+ * not one of ours (e.g. a subscription invoice), or a checkout whose own insert is the session
+ * scan's job, not this pass's. Operation must be wrapped in try-catch
+ * @returns Whether the purchase changed (or, in a dry run, would have).
+ */
+async function syncCharge(stripePaymentIntentId: string, dryRun: boolean): Promise<boolean> {
+  const current = await paymentsRepo.purchase.getByPaymentIntent({ stripePaymentIntentId });
+  if (!current) return false;
+
+  const target = await resolveChargeState(stripePaymentIntentId);
+  if (
+    !target ||
+    (current.status === target.status && current.amountRefunded === target.amountRefunded)
+  )
+    return false;
+
+  logger.info(
+    { paymentIntent: stripePaymentIntentId, from: current, to: target, dryRun },
+    "payments.reconcile.charge_update",
+  );
+  if (!dryRun)
+    await paymentsRepo.purchase.updateByPaymentIntent({ stripePaymentIntentId }, target);
+  return true;
+}
+
 export async function run(
   days: number,
   dryRun: boolean,
@@ -153,6 +212,8 @@ export async function run(
     limit: 100,
   });
 
+  // payment intents the session scan already synced - the charge-event pass below skips them
+  const synced = new Set<string>();
   for await (const session of sessions) {
     // one-time checkouts from createCheckout only; subscriptions belong to the stripe plugin,
     // and unpaid ones are still settling (async_payment_succeeded will record them)
@@ -164,6 +225,9 @@ export async function run(
       continue;
 
     summary.scanned++;
+    const intent = session.payment_intent as Stripe.PaymentIntent | string | null;
+    const intentId = typeof intent === "string" ? intent : intent?.id;
+    if (intentId) synced.add(intentId);
     const [result, error] = await tryCatch(
       reconcile(session, dryRun, successTimes.get(session.id)),
     );
@@ -174,6 +238,17 @@ export async function run(
     }
     if (result.inserted) summary.inserted++;
     if (result.updated) summary.updated++;
+  }
+  // refunds/disputes on purchases older than the session scan's window
+  for (const intentId of await getChargeEventIntents(sinceSec)) {
+    if (synced.has(intentId)) continue;
+    const [updated, error] = await tryCatch(syncCharge(intentId, dryRun));
+    if (error) {
+      summary.failed++;
+      logger.error({ err: error, paymentIntent: intentId }, "payments.reconcile.charge");
+      continue;
+    }
+    if (updated) summary.updated++;
   }
   return summary;
 }
