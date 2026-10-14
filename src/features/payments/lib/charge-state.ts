@@ -35,7 +35,12 @@ export async function resolveChargeState(
       limit: 1,
     });
     const dispute = disputes.data[0];
-    if (dispute) target.status = purchaseStatusFromDispute(dispute);
+    // only an open or lost dispute overrides the refund-derived status: `charge.disputed` stays
+    // true forever once a dispute was opened, so one closed in our favor ("paid") must defer to
+    // the charge's own refund state - a refund made after it (e.g. a goodwill refund following an
+    // inquiry) would otherwise be masked, and the purchase would keep granting access
+    const fromDispute = dispute ? purchaseStatusFromDispute(dispute) : "paid";
+    if (fromDispute !== "paid") target.status = fromDispute;
   }
   return target;
 }

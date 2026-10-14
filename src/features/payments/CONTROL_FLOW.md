@@ -275,6 +275,13 @@ payload can be stale. Always re-fetches the current charge/dispute from Stripe
 instead (`resolveChargeState` in `lib/charge-state.ts`), the same function the
 reconciler uses.
 
+Status comes from the charge's refund state (`purchaseUpdateFromCharge`), and a
+dispute overrides it only while open (`disputed`) or once lost (`refunded`). A
+dispute closed in our favor (`won`, `warning_closed`, `prevented`) defers to the
+refund state rather than forcing `paid`: `charge.disputed` stays true forever
+once a dispute was opened, so a refund made after a won dispute or a closed
+inquiry would otherwise be masked and keep granting access.
+
 ```mermaid
 flowchart TD
     Start(["updateByCharge(paymentIntent)"]) --> HasId{"payment_intent\npresent on the event?"}

@@ -50,6 +50,34 @@ describe("resolveChargeState", () => {
     expect(res?.status).toBe("refunded");
   });
 
+  test("an open dispute marks it disputed", async () => {
+    fakeLatestCharge = { amount_refunded: 0, refunded: false, disputed: true };
+    fakeDispute = { status: "needs_response" };
+
+    const res = await resolveChargeState("pi_1");
+    expect(res?.status).toBe("disputed");
+  });
+
+  // `charge.disputed` stays true forever once a dispute was opened - a dispute closed in our
+  // favor must not mask a refund made afterwards (e.g. a goodwill refund after an inquiry)
+  for (const status of ["won", "warning_closed", "prevented"]) {
+    test(`a full refund after a ${status} dispute is still refunded`, async () => {
+      fakeLatestCharge = { amount_refunded: 1000, refunded: true, disputed: true };
+      fakeDispute = { status };
+
+      const res = await resolveChargeState("pi_1");
+      expect(res).toEqual({ amountRefunded: 1000, status: "refunded" });
+    });
+  }
+
+  test("a won dispute with no refund is back to paid", async () => {
+    fakeLatestCharge = { amount_refunded: 0, refunded: false, disputed: true };
+    fakeDispute = { status: "won" };
+
+    const res = await resolveChargeState("pi_1");
+    expect(res?.status).toBe("paid");
+  });
+
   test("passing a pre-fetched intent skips the retrieve call", async () => {
     const intent = {
       latest_charge: { amount_refunded: 0, refunded: false, disputed: false },
