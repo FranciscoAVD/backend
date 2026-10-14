@@ -48,8 +48,18 @@ let sessionCreateCalls: Record<string, unknown>[] = [];
 // guard and the Stripe call, as a real network round-trip would; a failure exercises cleanup
 let sessionCreateDelayMs = 0;
 let sessionCreateFails = false;
+// PATCH /plans/:id's retire/reactivate mirroring onto the plan's Stripe prices
+let priceUpdateCalls: { id: string; active: boolean }[] = [];
+let priceUpdateFails = false;
 mock.module("@f/payments/payment", () => ({
   getPaymentProcessor: () => ({
+    prices: {
+      update: async (id: string, params: { active: boolean }) => {
+        if (priceUpdateFails) throw new Error("Stripe is down");
+        priceUpdateCalls.push({ id, active: params.active });
+        return { id, active: params.active };
+      },
+    },
     checkout: {
       sessions: {
         create: async (args: Record<string, unknown>) => {
@@ -576,6 +586,66 @@ describe("PATCH /plans/:id", () => {
   beforeEach(async () => {
     await resetDb();
     await resetRedis();
+    priceUpdateCalls = [];
+    priceUpdateFails = false;
+  });
+
+  const patch = (id: number, body: Record<string, unknown>) =>
+    app.request(`/plans/${id}`, {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify(body),
+    });
+
+  test("retiring a plan archives its Stripe prices, so nothing outside the app can sell it", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({
+      type: "recurring",
+      interval: "month",
+      durationDays: null,
+      stripePriceId: "price_monthly",
+      annualDiscountPriceId: "price_annual",
+    });
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+
+    expect((await patch(plan.id, { active: false })).status).toBe(204);
+    expect(priceUpdateCalls).toEqual([
+      { id: "price_monthly", active: false },
+      { id: "price_annual", active: false },
+    ]);
+  });
+
+  test("reactivating a plan restores its Stripe prices", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ active: false, stripePriceId: "price_one_time" });
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+
+    expect((await patch(plan.id, { active: true })).status).toBe(204);
+    expect(priceUpdateCalls).toEqual([{ id: "price_one_time", active: true }]);
+  });
+
+  test("an edit that doesn't touch active makes no Stripe call", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+
+    expect((await patch(plan.id, { limits: { seats: 3 } })).status).toBe(204);
+    expect(priceUpdateCalls).toEqual([]);
+  });
+
+  test("a Stripe failure 500s, and repeating the same change completes it", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ stripePriceId: "price_one_time" });
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+
+    priceUpdateFails = true;
+    const failed = await patch(plan.id, { active: false });
+    expect(failed.status).toBe(500);
+    expect(((await failed.json()) as { message: string }).message).toContain("Retry");
+
+    priceUpdateFails = false;
+    expect((await patch(plan.id, { active: false })).status).toBe(204);
+    expect(priceUpdateCalls).toEqual([{ id: "price_one_time", active: false }]);
   });
 
   test("422s setting durationDays on a recurring plan", async () => {

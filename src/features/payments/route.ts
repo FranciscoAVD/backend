@@ -457,9 +457,29 @@ const app = new Hono<PinoLoggerEnv>()
         );
       }
 
-      return !res
-        ? c.json({ message: "Plan not found" }, HTTP.NotFound)
-        : c.body(null, HTTP.NoContent);
+      if (!res) return c.json({ message: "Plan not found" }, HTTP.NotFound);
+
+      // retiring/reactivating also archives/restores the plan's Stripe prices, so it can't be
+      // sold through anything outside this app (the Customer Portal, a Payment Link, ...).
+      // Idempotent, so repeating the same PATCH completes a sync that failed here
+      if (data.active !== undefined) {
+        const [, syncError] = await tryCatch(paymentsRepo.plan.syncPricesActive(res));
+        if (syncError) {
+          c.var.logger.error(
+            { err: syncError, user: user.id, plan: id },
+            "payments.plan.sync_prices",
+          );
+          return c.json(
+            {
+              message:
+                "Plan updated, but its Stripe prices couldn't be updated. Retry the same change.",
+            },
+            HTTP.InternalServerError,
+          );
+        }
+      }
+
+      return c.body(null, HTTP.NoContent);
     },
   )
   .post(

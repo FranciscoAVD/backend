@@ -610,6 +610,16 @@ Stripe's own list of statuses that never change again.
 Deactivating a plan (`PATCH /plans/:id { active: false }`) stops new purchases
 and keeps existing ones working:
 
+- **In Stripe, for both types:** the plan's price(s) are archived
+  (`syncPlanPricesActive`), and restored on reactivation. The app's own guards
+  below only cover the app's own endpoints; Stripe has other ways in - a
+  Customer Portal configured to allow plan switching, a Payment Link, the
+  Dashboard - and an archived price can't start a new purchase or be switched
+  to, while subscriptions already on it keep billing. If the Stripe call fails,
+  the plan is already updated in the database and the PATCH answers 500; the
+  sync is idempotent, so repeating the same PATCH completes it. (A plan retired
+  before this existed still has active prices - PATCH `{ active: false }` again.)
+
 - **One-time:** `POST /checkout` already 404s an inactive plan. Existing
   purchases keep their access per `RETIRED_PLANS_KEEP_ACCESS`.
 - **Recurring:** `getSubscriptionPlans` hands the stripe plugin *every*
