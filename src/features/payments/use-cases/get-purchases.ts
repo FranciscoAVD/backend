@@ -1,7 +1,7 @@
 import { db } from "@d/connection";
-import { purchase as purchaseTable } from "@d/schemas/payment-schema";
+import { plan as planTable, purchase as purchaseTable } from "@d/schemas/payment-schema";
 import type { Payment } from "@f/payments/lib/types";
-import { isPurchaseAccessActive } from "@f/payments/lib/utils";
+import { isPurchaseAccessActive, purchaseAccessWindows } from "@f/payments/lib/utils";
 import { eq, and, ne, asc, desc, lt, inArray } from "drizzle-orm";
 import {
   PURCHASE_ACCESS_STATUSES,
@@ -26,6 +26,58 @@ export async function getAllPurchases(
     .from(purchaseTable)
     .where(eq(purchaseTable.userId, purchase.userId));
   return res;
+}
+
+export type PurchaseWithAccess = Payment.Purchase & {
+  // the access this purchase actually grants, chained per `overlapping` - unlike `expiresAt`, which
+  // is the purchase's own unchained window. Null for a purchase that grants none (refunded or
+  // disputed); `accessEndsAt` null alone means it never expires
+  accessStartsAt: Date | null;
+  accessEndsAt: Date | null;
+};
+
+/**
+ * @description The caller's purchases, each with the access window it actually grants - for
+ * `GET /purchases`. A non-overlapping purchase bought while an earlier one is still running starts
+ * where that one ends, so its stored `expiresAt` understates what the buyer has; these fields come
+ * from `purchaseAccessWindows`, the same chaining the access checks use, so what a client shows
+ * always matches what the user can actually use. Assumes validation. Operation must be wrapped in
+ * try-catch
+ * @param purchase object of the caller's own user ID
+ * @returns Array of Purchases with their access windows, oldest first.
+ */
+export async function getAllPurchasesWithAccess(
+  purchase: { userId: string },
+): Promise<PurchaseWithAccess[]> {
+  const rows = await db
+    .select({ purchase: purchaseTable, overlapping: planTable.overlapping })
+    .from(purchaseTable)
+    .innerJoin(planTable, eq(purchaseTable.planId, planTable.id))
+    .where(eq(purchaseTable.userId, purchase.userId))
+    .orderBy(asc(purchaseTable.createdAt), asc(purchaseTable.id));
+
+  const windows = new Map<number, { start: Date; end: Date | null }>();
+  const grantsAccess = (status: Payment.Purchase["status"]) =>
+    (PURCHASE_ACCESS_STATUSES as readonly string[]).includes(status);
+  const byPlan = new Map<number, typeof rows>();
+  for (const row of rows) {
+    if (!grantsAccess(row.purchase.status)) continue;
+    const group = byPlan.get(row.purchase.planId) ?? [];
+    group.push(row);
+    byPlan.set(row.purchase.planId, group);
+  }
+  for (const group of byPlan.values()) {
+    const planWindows = purchaseAccessWindows(
+      group.map((r) => r.purchase),
+      { overlapping: group[0]!.overlapping },
+    );
+    group.forEach((r, i) => windows.set(r.purchase.id, planWindows[i]!));
+  }
+
+  return rows.map(({ purchase: p }) => {
+    const w = windows.get(p.id);
+    return { ...p, accessStartsAt: w?.start ?? null, accessEndsAt: w?.end ?? null };
+  });
 }
 
 /**

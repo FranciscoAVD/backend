@@ -10,6 +10,7 @@ import {
   encodeDurationDays,
   decodeDurationDays,
   isPurchaseAccessActive,
+  purchaseAccessWindows,
 } from "@f/payments/lib/utils";
 
 describe("isCheckoutSessionId", () => {
@@ -207,5 +208,43 @@ describe("isPurchaseAccessActive", () => {
 
   test("no purchases, no access", () => {
     expect(isPurchaseAccessActive([], { overlapping: false }, now)).toBe(false);
+  });
+});
+
+describe("purchaseAccessWindows", () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const at = (d: number) => new Date(Date.UTC(2026, 0, 1) + d * DAY);
+  const p = (createdDay: number, durationDays: number | null, overlapping: boolean | null) => ({
+    createdAt: at(createdDay),
+    durationDays,
+    expiresAt: durationDays == null ? null : at(createdDay + durationDays),
+    overlapping,
+  });
+
+  test("a non-overlapping purchase chains on after the earlier window", () => {
+    const windows = purchaseAccessWindows([p(0, 30, false), p(10, 30, false)], { overlapping: false });
+    expect(windows).toEqual([
+      { start: at(0), end: at(30) },
+      { start: at(30), end: at(60) },
+    ]);
+  });
+
+  test("an overlapping purchase runs alongside", () => {
+    const windows = purchaseAccessWindows([p(0, 30, true), p(10, 30, true)], { overlapping: true });
+    expect(windows[1]).toEqual({ start: at(10), end: at(40) });
+  });
+
+  test("a perpetual purchase never ends and doesn't push later ones back", () => {
+    const windows = purchaseAccessWindows([p(0, null, false), p(10, 30, false)], { overlapping: false });
+    expect(windows).toEqual([
+      { start: at(0), end: null },
+      { start: at(10), end: at(40) },
+    ]);
+  });
+
+  test("isPurchaseAccessActive agrees with the windows", () => {
+    const rows = [p(0, 30, false), p(10, 30, false)];
+    expect(isPurchaseAccessActive(rows, { overlapping: false }, at(45))).toBe(true);
+    expect(isPurchaseAccessActive(rows, { overlapping: false }, at(61))).toBe(false);
   });
 });

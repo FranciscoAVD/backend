@@ -7,6 +7,9 @@ export const ALLOWED_EVENTS = [
   "checkout.session.async_payment_failed",
   "checkout.session.expired",
   "charge.refunded",
+  // a refund that later fails (or is canceled) lowers the charge's amount_refunded again without a
+  // second charge.refunded - only this event says so
+  "charge.refund.updated",
   "charge.dispute.created",
   "charge.dispute.closed",
 ] as const satisfies readonly Stripe.Event.Type[];

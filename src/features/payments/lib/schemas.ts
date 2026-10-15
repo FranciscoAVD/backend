@@ -15,6 +15,17 @@ import {
 } from "@f/payments/lib/constants";
 
 export const insertPlanSchema = createInsertSchema(plan, {
+  // NFKC-normalized only: plan names are matched case-insensitively (the stripe plugin with JS's
+  // toLowerCase, the unique index with Postgres's lower()), and compatibility characters like the
+  // Kelvin sign fold differently in each - normalized, a name can't look distinct to one and
+  // identical to the other
+  name: (s) =>
+    s
+      .trim()
+      .min(1)
+      .refine((name) => name === name.normalize("NFKC"), {
+        message: "Plan names must be NFKC-normalized (no compatibility characters).",
+      }),
   amount: (s) => s.positive(),
   annualAmount: (s) => s.positive(),
   trialDays: (s) => s.positive().max(MAX_TRIAL_DAYS),

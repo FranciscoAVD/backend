@@ -11,6 +11,7 @@ import { updatePlan } from "@f/payments/use-cases/update-plan";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import {
   getAllPurchases,
+  getAllPurchasesWithAccess,
   getAllPurchasesAdmin,
   getPurchasesByUserAdmin,
   getPurchaseBySession,
@@ -71,6 +72,7 @@ export const paymentsRepo = {
   purchase: {
     add: addPurchase,
     getAll: getAllPurchases,
+    getAllWithAccess: getAllPurchasesWithAccess,
     getAllAdmin: getAllPurchasesAdmin,
     getByUserAdmin: getPurchasesByUserAdmin,
     getBySession: getPurchaseBySession,

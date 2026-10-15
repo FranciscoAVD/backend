@@ -154,6 +154,7 @@ function fallbackPaidAt(session: Stripe.Checkout.Session): Date {
 // charge.* entries, so the reconciler replays exactly what a lost webhook would have done
 const CHARGE_EVENTS = [
   "charge.refunded",
+  "charge.refund.updated",
   "charge.dispute.created",
   "charge.dispute.closed",
 ] as const satisfies readonly (typeof ALLOWED_EVENTS)[number][];
@@ -173,7 +174,7 @@ async function getChargeEventIntents(sinceSec: number): Promise<Set<string>> {
     limit: 100,
   });
   for await (const event of events) {
-    const object = event.data.object as Stripe.Charge | Stripe.Dispute;
+    const object = event.data.object as Stripe.Charge | Stripe.Dispute | Stripe.Refund;
     const intent = object.payment_intent;
     const id = typeof intent === "string" ? intent : intent?.id;
     if (id) intents.add(id);

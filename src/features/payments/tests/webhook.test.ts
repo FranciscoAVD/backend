@@ -733,3 +733,40 @@ describe("duplicate charges confirmed concurrently", () => {
     }
   });
 });
+
+describe("charge.refund.updated", () => {
+  beforeEach(async () => {
+    await resetDb();
+    await resetRedis();
+  });
+
+  // a failed refund lowers amount_refunded again without another charge.refunded
+  test("a refund that later failed hands access back", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    await addPurchase(
+      { userId },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_refund_failed",
+        stripePaymentIntentId: "pi_refund_failed",
+        amountTotal: plan.amount,
+        currency: plan.currency,
+      },
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
+    fakeLatestCharge = { amount_refunded: plan.amount, refunded: true, disputed: false };
+    await handleStripeEvent(event("charge.refunded", { payment_intent: "pi_refund_failed" }));
+    expect((await getAllPurchases({ userId }))[0]?.status).toBe("refunded");
+
+    fakeLatestCharge = { amount_refunded: 0, refunded: false, disputed: false };
+    await handleStripeEvent(
+      event("charge.refund.updated", { payment_intent: "pi_refund_failed", status: "failed" }),
+    );
+
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase?.status).toBe("paid");
+    expect(purchase?.amountRefunded).toBe(0);
+  });
+});

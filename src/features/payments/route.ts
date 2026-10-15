@@ -33,6 +33,16 @@ import { rateLimiter } from "@/lib/rate-limit";
 import { paymentsRepo } from "@f/payments/repo";
 import { CheckoutSlotLostError } from "@f/payments/lib/pending-checkout";
 
+// every route, reads included: better-auth's own limiter only covers /api/auth, so without this
+// the GETs below (a DB and Redis round trip each, and GET /purchases unpaginated) had no limit at
+// all. Generous enough for a client polling GET /checkout/:sessionId every second
+const readRateLimit = rateLimiter<RequireSessionEnv>({
+  keyPrefix: "payments-read",
+  windowSec: 60,
+  max: 120,
+  by: (c) => c.get("session").user.id,
+});
+
 const writeRateLimit = rateLimiter<RequireSessionEnv>({
   keyPrefix: "payments-write",
   windowSec: 60,
@@ -81,6 +91,7 @@ const purchasesQueryValidator = validator("query", (value, c) => {
 const app = new Hono<PinoLoggerEnv>()
   .use(sessionMiddleware)
   .use(requireSessionMiddleware)
+  .use(readRateLimit)
   .get(
     "/plans",
     requirePermissionMiddleware({ plan: ["read:active"] }),
@@ -263,7 +274,7 @@ const app = new Hono<PinoLoggerEnv>()
   )
   .get("/purchases", async (c) => {
     const { user } = c.get("session");
-    const [res, error] = await tryCatch(paymentsRepo.purchase.getAll({ userId: user.id }));
+    const [res, error] = await tryCatch(paymentsRepo.purchase.getAllWithAccess({ userId: user.id }));
     if (error) {
       c.var.logger.error({ err: error, user: user.id }, "payments.purchase.getAll");
       return c.json(
@@ -467,6 +478,11 @@ const app = new Hono<PinoLoggerEnv>()
         }
       }
 
+      // the terms a checkout snapshots onto its session (see createCheckout): if either changes,
+      // sessions already open keep selling the old terms - and POST /checkout's resume path would
+      // keep handing them out - for up to 24h, so they're expired below
+      const touchesTerms = data.durationDays !== undefined || data.overlapping !== undefined;
+
       const [res, error] = await tryCatch(paymentsRepo.plan.update({ id }, data));
 
       if (error) {
@@ -501,6 +517,26 @@ const app = new Hono<PinoLoggerEnv>()
             {
               message:
                 "Plan updated, but Stripe couldn't be fully updated. Retry the same change.",
+            },
+            HTTP.InternalServerError,
+          );
+        }
+      }
+
+      // on every PATCH that sets either field, not only when the value changed: that's what lets
+      // repeating the same PATCH finish an expiry that failed part-way, the same as the price sync
+      // above. A retired plan's open sessions were already expired there
+      if (touchesTerms && res.type === "one_time" && res.active) {
+        const [, expireError] = await tryCatch(paymentsRepo.plan.expireOpenCheckouts(res));
+        if (expireError) {
+          c.var.logger.error(
+            { err: expireError, user: user.id, plan: id },
+            "payments.plan.expire_stale_checkouts",
+          );
+          return c.json(
+            {
+              message:
+                "Plan updated, but checkouts opened under the old terms couldn't all be closed. Retry the same change.",
             },
             HTTP.InternalServerError,
           );

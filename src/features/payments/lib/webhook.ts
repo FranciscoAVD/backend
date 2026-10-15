@@ -245,6 +245,12 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
         await updateByCharge(charge.payment_intent);
         return;
       }
+      case "charge.refund.updated": {
+        // re-syncs from the charge's live state, so a failed or canceled refund hands access back
+        const refund = event.data.object;
+        await updateByCharge(refund.payment_intent);
+        return;
+      }
       case "charge.dispute.created": {
         const dispute = event.data.object;
         await updateByCharge(dispute.payment_intent);

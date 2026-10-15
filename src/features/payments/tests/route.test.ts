@@ -1358,3 +1358,153 @@ describe("plan day counts are capped", () => {
     expect((await patch(oneTime.id, { durationDays: MAX_DURATION_DAYS })).status).toBe(204);
   });
 });
+
+describe("low-severity fixes", () => {
+  beforeEach(async () => {
+    await resetDb();
+    await resetRedis();
+    openSessions = [];
+    expiredSessions = [];
+    expireFails = false;
+  });
+
+  test("GET /purchases reports the chained access window, not the unchained expiresAt", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...regularUser });
+    const plan = await seedPlan({ repeatable: true, durationDays: 30, overlapping: false });
+    const day = 24 * 60 * 60 * 1000;
+    const first = new Date(Date.now() - 10 * day);
+    const second = new Date(Date.now() - 5 * day);
+    for (const [i, at] of [first, second].entries())
+      await addPurchase(
+        { userId },
+        {
+          planId: plan.id,
+          stripeCheckoutSessionId: `cs_chain_${i}`,
+          stripePaymentIntentId: `pi_chain_${i}`,
+          amountTotal: plan.amount,
+          currency: plan.currency,
+        },
+        { durationDays: 30, overlapping: false },
+        at,
+      );
+
+    const res = await app.request("/purchases");
+    const { data } = (await res.json()) as {
+      data: { expiresAt: string; accessStartsAt: string; accessEndsAt: string }[];
+    };
+
+    expect(new Date(data[1]!.expiresAt).getTime()).toBe(second.getTime() + 30 * day);
+    expect(new Date(data[1]!.accessStartsAt).getTime()).toBe(first.getTime() + 30 * day);
+    expect(new Date(data[1]!.accessEndsAt).getTime()).toBe(first.getTime() + 60 * day);
+  });
+
+  test("GET /purchases gives a refunded purchase no access window", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...regularUser });
+    const plan = await seedPlan();
+    const row = await addPurchase(
+      { userId },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_refunded",
+        stripePaymentIntentId: "pi_refunded",
+        amountTotal: plan.amount,
+        currency: plan.currency,
+      },
+      { durationDays: null },
+      new Date(),
+    );
+    await paymentsRepo.purchase.syncCharge({ stripePaymentIntentId: "pi_refunded" }, async () => ({
+      status: "refunded",
+      amountRefunded: row!.amountTotal,
+    }));
+
+    const { data } = (await (await app.request("/purchases")).json()) as {
+      data: { accessStartsAt: string | null; accessEndsAt: string | null }[];
+    };
+    expect(data[0]).toMatchObject({ accessStartsAt: null, accessEndsAt: null });
+  });
+
+  test("PATCH /plans/:id expires checkouts opened under the old terms", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+    const plan = await seedPlan({ durationDays: 30 });
+    const other = await seedPlan();
+    openSessions = [
+      { id: "cs_old_terms", status: "open", metadata: { planId: String(plan.id) } },
+      { id: "cs_other_plan", status: "open", metadata: { planId: String(other.id) } },
+    ];
+
+    const res = await app.request(`/plans/${plan.id}`, {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify({ durationDays: 7 }),
+    });
+
+    expect(res.status).toBe(204);
+    expect(expiredSessions).toEqual(["cs_old_terms"]);
+  });
+
+  test("PATCH /plans/:id leaves open checkouts alone when the terms aren't touched", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+    const plan = await seedPlan();
+    openSessions = [{ id: "cs_keep", status: "open", metadata: { planId: String(plan.id) } }];
+
+    const res = await app.request(`/plans/${plan.id}`, {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify({ limits: { seats: 3 } }),
+    });
+
+    expect(res.status).toBe(204);
+    expect(expiredSessions).toEqual([]);
+  });
+
+  test("PATCH /plans/:id answers 500 if the stale checkouts couldn't be expired", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+    const plan = await seedPlan();
+    openSessions = [{ id: "cs_stuck", status: "open", metadata: { planId: String(plan.id) } }];
+    expireFails = true;
+
+    const res = await app.request(`/plans/${plan.id}`, {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify({ overlapping: false }),
+    });
+
+    expect(res.status).toBe(500);
+  });
+
+  test("POST /plans rejects a name with compatibility characters", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...admin }, { plan: ["create"] });
+
+    const res = await app.request("/plans", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        name: "Pac\u212A",
+        type: "one_time",
+        amount: 500,
+        currency: "usd",
+      }),
+    });
+
+    expect(res.status).toBe(422);
+    expect(JSON.stringify(await res.json())).toContain("NFKC");
+  });
+
+  test("reads are rate limited per user", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...regularUser });
+
+    const statuses: number[] = [];
+    for (let i = 0; i < 121; i++) statuses.push((await app.request("/purchases")).status);
+
+    expect(statuses.slice(0, 120).every((s) => s === 200)).toBe(true);
+    expect(statuses[120]).toBe(429);
+  });
+});

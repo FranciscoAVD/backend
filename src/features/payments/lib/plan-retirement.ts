@@ -28,8 +28,15 @@ export async function rejectRetiredPlanUpgrade(ctx: {
   // anything malformed is left to the plugin's own body validation
   if (typeof name !== "string") return;
 
-  const plan = await paymentsRepo.plan.getByName({ name });
-  if (plan && plan.type === "recurring" && !plan.active)
+  // matched with JS's toLowerCase, exactly as the plugin matches it, rather than Postgres's lower():
+  // the two disagree on some characters (e.g. the Kelvin sign U+212A lowercases to "k" in JS but is
+  // left alone by lower() under a C collation), and a name only the plugin recognizes would slip
+  // past this check and still subscribe to the retired plan
+  const wanted = name.toLowerCase();
+  const plan = (await paymentsRepo.plan.getAllIncludingInactive()).find(
+    (p) => p.type === "recurring" && p.name.toLowerCase() === wanted,
+  );
+  if (plan && !plan.active)
     throw new APIError("BAD_REQUEST", {
       message: "Subscription plan not found",
       code: "SUBSCRIPTION_PLAN_NOT_FOUND",
