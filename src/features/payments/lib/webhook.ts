@@ -82,19 +82,6 @@ export async function confirmCheckout(
     throw new Error("Purchased plan no longer exists");
   }
 
-  // the realistic "two tabs" race is already blocked before a Checkout Session is even created
-  // (see paymentsRepo.checkout.reserve in route.ts); this re-check catches the narrower one it can't -
-  // two webhook deliveries confirming two separately-started sessions for the same plan. The
-  // money is already taken either way, so the purchase is still recorded (never silently dropped,
-  // same reasoning as the FK-violation case in addPurchase) - it's just flagged for review below,
-  // once the insert shows this delivery is the one that recorded it
-  const blocking = plan.repeatable
-    ? null
-    : await paymentsRepo.purchase.getBlockingByPlan(
-        { userId: owner.userId, planId: owner.planId },
-        { stripeCheckoutSessionId: session.id },
-      );
-
   // the duration snapshotted at checkout time, so an admin edit made while this payment was
   // settling doesn't change what the buyer gets; sessions created before the snapshot existed
   // fall back to the plan's current setting (the old behavior)
@@ -124,9 +111,26 @@ export async function confirmCheckout(
     paidAt,
   );
 
-  // flagged only by the delivery that actually recorded the purchase: a redelivery of the same
-  // event, or the reconciler racing the webhook, finds the row already there and adds nothing - so
-  // one duplicate charge is one audit entry, however often Stripe retries it
+  // the realistic "two tabs" race is already blocked before a Checkout Session is even created
+  // (see paymentsRepo.checkout.reserve in route.ts); this catches the narrower one it can't - two
+  // separately-started sessions for the same non-repeatable plan both getting paid. The money is
+  // already taken either way, so the purchase is still recorded (never silently dropped, same
+  // reasoning as the FK-violation case in addPurchase) - it's just flagged for review.
+  //
+  // Checked *after* the insert, not before: two confirmations running concurrently (Stripe flushing
+  // retries after an outage, or the reconciler racing the webhook) would each check before the
+  // other's insert landed and both find nothing. Inserting first means whichever commits second
+  // always sees the first; both may see each other, so one duplicate pair can produce two entries -
+  // never zero. Only the delivery that actually inserted checks, so a redelivery of an
+  // already-recorded session adds nothing however often Stripe retries it
+  const blocking =
+    inserted && !plan.repeatable && inserted.userId !== null
+      ? await paymentsRepo.purchase.getBlockingByPlan(
+          { userId: owner.userId, planId: owner.planId },
+          { stripeCheckoutSessionId: session.id },
+        )
+      : null;
+
   if (blocking && inserted) {
     logger.error(
       {

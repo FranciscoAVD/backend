@@ -692,3 +692,44 @@ describe("duplicate_purchase_confirmed is written once per duplicate charge", ()
     expect(await getAllPurchases({ userId })).toHaveLength(2);
   });
 });
+
+describe("duplicate charges confirmed concurrently", () => {
+  beforeEach(async () => {
+    await resetDb();
+    await resetRedis();
+  });
+
+  const paidSession = (id: string, userId: string, planId: number) =>
+    ({
+      id,
+      mode: "payment",
+      payment_status: "paid",
+      created: Math.floor(Date.now() / 1000),
+      amount_total: 1000,
+      currency: "usd",
+      payment_intent: `pi_${id}`,
+      metadata: { userId, planId: String(planId), durationDays: "none", overlapping: "true" },
+    }) as unknown as Stripe.Checkout.Session;
+
+  // both confirmations used to check for an owned purchase before either had inserted, so neither
+  // saw the other and the second charge went unflagged
+  test("two sessions for a non-repeatable plan confirmed at once always leave an audit entry", async () => {
+    for (let i = 0; i < 20; i++) {
+      await resetDb();
+      const userId = await seedUser();
+      const plan = await seedPlan({ repeatable: false });
+
+      await Promise.all([
+        confirmCheckout(paidSession(`cs_a${i}`, userId, plan.id)),
+        confirmCheckout(paidSession(`cs_b${i}`, userId, plan.id)),
+      ]);
+
+      expect(await getAllPurchases({ userId })).toHaveLength(2);
+      const audits = await db
+        .select()
+        .from(paymentAuditLogTable)
+        .where(eq(paymentAuditLogTable.type, "duplicate_purchase_confirmed"));
+      expect(audits.length).toBeGreaterThanOrEqual(1);
+    }
+  });
+});

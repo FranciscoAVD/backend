@@ -345,7 +345,11 @@ export async function reconcileSubscription(
     if (plan) target.plan = plan.name.toLowerCase();
   }
 
-  if (!subscriptionFieldsDiffer(row, target)) return { updated: false };
+  // a row the plugin created but never linked to its Stripe subscription (see runSubscriptions)
+  if (row.stripeSubscriptionId !== current.id) target.stripeSubscriptionId = current.id;
+
+  if (!target.stripeSubscriptionId && !subscriptionFieldsDiffer(row, target))
+    return { updated: false };
 
   if (!dryRun) {
     // only if the row still holds what was read: a webhook that landed since may be newer than
@@ -394,8 +398,15 @@ export async function runSubscriptions(
   const rows = await paymentsRepo.subscription.getReconcilable();
 
   const byStripeId = new Map<string, Subscription>();
+  // rows the plugin created at checkout but never linked to a Stripe subscription: its
+  // checkout.session.completed handler swallows its own errors and still answers 200, so a
+  // transient failure there is never redelivered, and customer.subscription.created skips a row
+  // that already exists. Matched below by the row id the plugin stamps on the subscription's
+  // metadata - an internal field the plugin always sets last, so a user can't forge it
+  const unlinked = new Map<string, Subscription>();
   for (const row of rows) {
     if (row.stripeSubscriptionId) byStripeId.set(row.stripeSubscriptionId, row);
+    else unlinked.set(row.id, row);
   }
 
   const check = async (row: Subscription, current: Stripe.Subscription) => {
@@ -413,9 +424,33 @@ export async function runSubscriptions(
   const matched = new Set<string>();
   for await (const current of stripe.subscriptions.list({ limit: 100 })) {
     const row = byStripeId.get(current.id);
-    if (!row) continue;
-    matched.add(current.id);
-    await check(row, current);
+    if (row) {
+      matched.add(current.id);
+      await check(row, current);
+      continue;
+    }
+
+    const orphanId = current.metadata?.subscriptionId;
+    const orphan = orphanId ? unlinked.get(orphanId) : undefined;
+    if (!orphan) continue;
+    const customerId =
+      typeof current.customer === "string" ? current.customer : current.customer?.id;
+    // the row and the Stripe subscription must agree on who it belongs to before they're linked
+    if (
+      current.metadata?.referenceId !== orphan.referenceId ||
+      (orphan.stripeCustomerId && customerId !== orphan.stripeCustomerId)
+    ) {
+      summary.checked++;
+      summary.failed++;
+      logger.error(
+        { subscription: current.id, row: orphan.id },
+        "payments.reconcile.subscription_link_mismatch",
+      );
+      continue;
+    }
+    unlinked.delete(orphan.id);
+    logger.warn({ subscription: current.id, row: orphan.id }, "payments.reconcile.subscription_link");
+    await check(orphan, current);
   }
 
   // not in the default list: canceled since the row was last written (a lost webhook), or

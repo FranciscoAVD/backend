@@ -13,11 +13,13 @@ import { getPaymentProcessor } from "@f/payments/payment";
 import { paymentsRepo } from "@f/payments/repo";
 import { handleStripeEvent } from "@f/payments/lib/webhook";
 import {
+  assertNoSettlingPayments,
   cancelSubscriptionsForDeletedUser,
   expireCheckoutsForDeletedUser,
 } from "@f/payments/lib/user-deletion";
 import { paymentsBeforeHook, paymentsAfterHook } from "@f/payments/lib/auth-hooks";
 import { markUserDeleting, clearUserDeleting } from "@f/payments/lib/deletion-guard";
+import { withholdTrialFromUnverified } from "@f/payments/lib/trial-eligibility";
 import tryCatch from "@vicstack/try-catch";
 
 export const auth = betterAuth({
@@ -70,6 +72,8 @@ export const auth = betterAuth({
           await markUserDeleting(user.id);
           try {
             await expireCheckoutsForDeletedUser(user);
+            // after the expiry pass, so a checkout completed while it ran is caught here
+            await assertNoSettlingPayments(user);
             await cancelSubscriptionsForDeletedUser(user);
           } catch (error) {
             const [, clearError] = await tryCatch(clearUserDeleting(user.id));
@@ -97,6 +101,8 @@ export const auth = betterAuth({
       subscription: {
         enabled: true,
         plans: paymentsRepo.plan.getSubscriptions,
+        // free trials only for verified emails, so throwaway accounts can't farm them
+        getCheckoutSessionParams: withholdTrialFromUnverified,
       },
       onEvent: handleStripeEvent,
     }),

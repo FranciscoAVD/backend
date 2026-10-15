@@ -4,6 +4,9 @@ import {
   SUBSCRIPTION_TERMINAL_STATUSES,
 } from "@f/payments/lib/access-policy";
 import { logger } from "@/lib/logger";
+import { APIError } from "better-auth/api";
+import type Stripe from "stripe";
+import { PROCESSING_TTL_SEC } from "@f/payments/lib/pending-checkout";
 
 type DeletedUser = { id: string; stripeCustomerId?: string | null };
 
@@ -102,4 +105,54 @@ export async function expireCheckoutsForDeletedUser(user: DeletedUser): Promise<
   if (expired.length)
     logger.info({ user: user.id, sessions: expired }, "payments.user_delete.expired_checkouts");
   return expired;
+}
+
+/**
+ * Thrown (as better-auth's APIError, so the deletion request answers 409 instead of 500) when the
+ * user still has a one-time payment settling.
+ */
+export const paymentSettlingError = () =>
+  new APIError("CONFLICT", {
+    message: "A payment on this account is still settling. Try again once it has completed.",
+    code: "PAYMENT_SETTLING",
+  });
+
+/**
+ * @description Refuses a user's deletion while one of their one-time payments is still settling (a
+ * delayed method such as a bank debit: the Checkout Session is `complete` but its payment intent is
+ * still `processing`). `expireCheckoutsForDeletedUser` can't stop these - the session is no longer
+ * open, and Stripe can't cancel a processing payment intent - so without this the money would
+ * still move days after the account was gone, recorded as a purchase with no owner that nobody can
+ * use. Run after the expiry pass, so a session that completed while that pass ran is seen here.
+ *
+ * Fails closed, like the other deletion passes: a Stripe error aborts the deletion. Only looks back
+ * `PROCESSING_TTL_SEC`, the longest a delayed payment is tracked as settling anywhere else.
+ * @param user the user row about to be deleted
+ * @throws APIError (409) if a payment is still settling
+ */
+export async function assertNoSettlingPayments(user: DeletedUser): Promise<void> {
+  if (!user.stripeCustomerId) return;
+
+  const stripe = getPaymentProcessor();
+  for await (const session of stripe.checkout.sessions.list({
+    customer: user.stripeCustomerId,
+    status: "complete",
+    created: { gte: Math.floor(Date.now() / 1000) - PROCESSING_TTL_SEC },
+    expand: ["data.payment_intent"],
+    limit: 100,
+  })) {
+    if (session.mode !== "payment") continue;
+    const intent = session.payment_intent as Stripe.PaymentIntent | string | null;
+    const status =
+      typeof intent === "string"
+        ? (await stripe.paymentIntents.retrieve(intent)).status
+        : intent?.status;
+    if (status !== "processing") continue;
+
+    logger.warn(
+      { user: user.id, session: session.id },
+      "payments.user_delete.payment_settling",
+    );
+    throw paymentSettlingError();
+  }
 }

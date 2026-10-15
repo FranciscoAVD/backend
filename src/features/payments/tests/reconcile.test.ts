@@ -811,3 +811,74 @@ describe("runSubscriptions", () => {
     expect(row?.plan).toBe("basic");
   });
 });
+
+describe("runSubscriptions: rows never linked to their Stripe subscription", () => {
+  // the plugin's own checkout.session.completed handler swallows its errors, so a transient
+  // failure leaves the row `incomplete` with no stripeSubscriptionId while Stripe bills the user
+  test("links the row via the plugin's metadata and corrects its status", async () => {
+    const userId = await seedUser();
+    const row = await seedSubscription({
+      referenceId: userId,
+      plan: "pro",
+      status: "incomplete",
+      stripeCustomerId: "cus_1",
+    });
+    fakeSubscriptions = [
+      fakeSubscription({
+        id: "sub_live",
+        customer: "cus_1",
+        metadata: { subscriptionId: row.id, referenceId: userId, userId },
+      }),
+    ];
+
+    const summary = await runSubscriptions(false);
+
+    expect(summary).toEqual({ checked: 1, updated: 1, failed: 0 });
+    const [after] = await db
+      .select()
+      .from(subscriptionTable)
+      .where(eq(subscriptionTable.id, row.id));
+    expect(after?.stripeSubscriptionId).toBe("sub_live");
+    expect(after?.status).toBe("active");
+  });
+
+  test("refuses to link when the subscription belongs to someone else", async () => {
+    const userId = await seedUser();
+    const otherId = await seedUser();
+    const row = await seedSubscription({ referenceId: userId, plan: "pro", status: "incomplete" });
+    fakeSubscriptions = [
+      fakeSubscription({
+        id: "sub_live",
+        metadata: { subscriptionId: row.id, referenceId: otherId, userId: otherId },
+      }),
+    ];
+
+    const summary = await runSubscriptions(false);
+
+    expect(summary).toEqual({ checked: 1, updated: 0, failed: 1 });
+    const [after] = await db
+      .select()
+      .from(subscriptionTable)
+      .where(eq(subscriptionTable.id, row.id));
+    expect(after?.stripeSubscriptionId).toBeNull();
+    expect(after?.status).toBe("incomplete");
+  });
+
+  test("a dry run reports the link without writing it", async () => {
+    const userId = await seedUser();
+    const row = await seedSubscription({ referenceId: userId, plan: "pro", status: "incomplete" });
+    fakeSubscriptions = [
+      fakeSubscription({
+        id: "sub_live",
+        metadata: { subscriptionId: row.id, referenceId: userId },
+      }),
+    ];
+
+    expect(await runSubscriptions(true)).toEqual({ checked: 1, updated: 1, failed: 0 });
+    const [after] = await db
+      .select()
+      .from(subscriptionTable)
+      .where(eq(subscriptionTable.id, row.id));
+    expect(after?.stripeSubscriptionId).toBeNull();
+  });
+});
