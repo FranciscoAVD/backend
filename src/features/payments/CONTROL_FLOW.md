@@ -871,7 +871,11 @@ either way - a failed expiry answers 500 with a message asking for a retry,
 but doesn't roll that back - so failing just means some checkouts opened under
 the old terms stay open (and resumable) until the `PATCH` is retried and the
 expiry succeeds. A retired plan's open sessions are already expired by the
-retirement path itself, so this doesn't double up on that case. Flipping `repeatable` from `false` to `true` is rejected
+retirement path itself, so this doesn't double up on that case. Each session it
+expires is also marked `expired` in Redis on the spot (`markExpired`), rather than
+waiting for Stripe's `checkout.session.expired` webhook: until that lands, the
+pending entry would still say `open`, and `POST /checkout`'s resume path would
+hand the buyer the dead session's URL instead of creating a new one. Flipping `repeatable` from `false` to `true` is rejected
 (409) while any user still has a blocking purchase of the plan
 (`paymentsRepo.purchase.hasAnyBlocking`) - otherwise it would silently reopen a
 once-only/trial plan to every past purchaser, not just whoever's buying it next.

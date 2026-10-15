@@ -1508,3 +1508,52 @@ describe("low-severity fixes", () => {
     expect(statuses[120]).toBe(429);
   });
 });
+
+describe("checkouts expired by a plan edit can't be resumed", () => {
+  beforeEach(async () => {
+    await resetDb();
+    await resetRedis();
+    openSessions = [];
+    expiredSessions = [];
+    expireFails = false;
+    sessionCreateCalls = [];
+  });
+
+  // Stripe's checkout.session.expired webhook can lag (or be retried for days in an outage); until
+  // it lands, the pending entry used to still say `open` and resume handed back a dead URL
+  for (const repeatable of [false, true])
+    test(`${repeatable ? "repeatable" : "non-repeatable"}: the next POST /checkout creates a new session`, async () => {
+      const adminId = await seedUser();
+      const userId = await seedUser({ stripeCustomerId: "cus_test" });
+      const plan = await seedPlan({ type: "one_time", repeatable, durationDays: 30 });
+      await savePendingCheckout(
+        "cs_old_terms",
+        { userId, planId: plan.id, status: "open", url: "https://checkout.stripe.com/c/old" },
+        PENDING_CHECKOUT_TTL_SEC,
+      );
+      openSessions = [{ id: "cs_old_terms", status: "open", metadata: { planId: String(plan.id) } }];
+
+      setSession({ id: adminId, ...admin }, { plan: ["update"] });
+      const patch = await app.request(`/plans/${plan.id}`, {
+        method: "PATCH",
+        headers: jsonHeaders,
+        body: JSON.stringify({ durationDays: 7 }),
+      });
+      expect(patch.status).toBe(204);
+      expect((await getPendingCheckout("cs_old_terms"))?.status).toBe("expired");
+      expect(await getResumableCheckout(userId, plan.id)).toBeNull();
+
+      setSession({ id: userId, ...regularUser });
+      const res = await app.request("/checkout", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({ planId: plan.id }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        data: { sessionId: "cs_test_fake" },
+        message: "Checkout created",
+      });
+      expect(sessionCreateCalls).toHaveLength(1);
+    });
+});
