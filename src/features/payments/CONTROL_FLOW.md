@@ -228,9 +228,10 @@ sequenceDiagram
 
 `ALLOWED_EVENTS` (`lib/constants.ts`): `checkout.session.completed`,
 `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`,
-`checkout.session.expired`, `charge.refunded`, `charge.dispute.created`,
-`charge.dispute.closed`. Everything else (including every subscription event) is
-a no-op for this feature - the plugin already dealt with it above.
+`checkout.session.expired`, `charge.refunded`, `charge.refund.updated`,
+`charge.dispute.created`, `charge.dispute.closed`. Everything else (including every
+subscription event) is a no-op for this feature - the plugin already dealt with
+it above.
 
 ### `handleStripeEvent`'s switch
 
@@ -245,6 +246,7 @@ flowchart TD
     E --> Exp["checkout.session.expired\n(mode: payment)"] --> MarkExpired["paymentsRepo.checkout.markExpired(session.id)\n(same, status: expired)"]
 
     E --> Ref["charge.refunded"] --> UpdByCharge1["updateByCharge(payment_intent)"]
+    E --> RefU["charge.refund.updated\n(a refund later failed/canceled,\nlowering amount_refunded again\nwith no second charge.refunded)"] --> UpdByCharge1
     E --> DispC["charge.dispute.created"] --> UpdByCharge2["updateByCharge(payment_intent)"]
     E --> DispX["charge.dispute.closed"] --> UpdByCharge2
 ```
@@ -285,28 +287,35 @@ flowchart TD
     Owner --> FetchPlan["paymentsRepo.plan.get(planId)"]
     FetchPlan --> PlanFound{"plan still exists?"}
     PlanFound -- no --> Throw2["throw\n(logged first: payments.webhook.plan_missing)"]
-    PlanFound -- yes --> RepeatCheck{"!plan.repeatable?"}
-
-    RepeatCheck -- no --> AddPurchase
-    RepeatCheck -- yes --> Blocking["paymentsRepo.purchase.getBlockingByPlan(\n{ userId, planId },\nexclude: { stripeCheckoutSessionId: session.id })"]
-    Blocking --> AlreadyOwns{"a blocking purchase\nfor a DIFFERENT session\nalready exists?"}
-    AlreadyOwns -- no --> AddPurchase
-    AlreadyOwns -- yes --> AddPurchase
+    PlanFound -- yes --> AddPurchase
 
     AddPurchase["paymentsRepo.purchase.add:\npurchasedAt = paidAt: when Stripe recorded\nthe payment as succeeded (not session\ncreation, not insert time)\ndurationDays = session.metadata snapshot\n(plan's current value only for older sessions)\nexpiresAt = durationDays ? purchasedAt + durationDays : null\nINSERT ... ON CONFLICT (stripeCheckoutSessionId) DO NOTHING\n(on a user_id FK violation - the user was deleted\nmid-checkout - retries once with userId: null)"]
-    AddPurchase --> Flag{"a blocking purchase was found\nAND this call inserted the row?"}
-    Flag -- yes --> LogDup["log error: payments.webhook.duplicate_purchase\n+ audit log: duplicate_purchase_confirmed\n(best-effort; the money's already taken,\nand the purchase was recorded regardless -\nthe financial record must never be dropped)"]
-    LogDup --> RemovePending
-    Flag -- no --> RemovePending["paymentsRepo.checkout.removePending(session.id)\n(best-effort; a leftover key just expires via its TTL)"]
+    AddPurchase --> Blocking{"inserted a row,\nplan isn't repeatable,\nand it kept its owner\n(not retried to userId: null)?"}
+    Blocking -- no --> RemovePending
+    Blocking -- yes --> CheckBlocking["paymentsRepo.purchase.getBlockingByPlan(\n{ userId, planId },\nexclude: { stripeCheckoutSessionId: session.id })"]
+    CheckBlocking --> AlreadyOwns{"a blocking purchase\nfor a DIFFERENT session\nalready exists?"}
+    AlreadyOwns -- no --> RemovePending
+    AlreadyOwns -- yes --> LogDup["log error: payments.webhook.duplicate_purchase\n+ audit log: duplicate_purchase_confirmed\n(best-effort; the money's already taken,\nand the purchase was recorded regardless -\nthe financial record must never be dropped)"]
+    LogDup --> RemovePending["paymentsRepo.checkout.removePending(session.id)\n(best-effort; a leftover key just expires via its TTL)"]
 ```
 
-The `exclude` on `getBlockingByPlan` matters for a Stripe redelivery of the *same*
-session: without it, the second delivery would find the purchase row the first
-delivery just wrote and wrongly flag it as `duplicate_purchase_confirmed` - the
-blocking check only looks for a *different* session's purchase. The audit entry
-is also written only by the call that actually inserted the row, so redeliveries
-of a genuine duplicate (or the reconciler racing the webhook) don't add more
-entries: one duplicate charge, one entry to review.
+Checked **after** the insert, not before: two confirmations of two separately-
+started sessions for the same non-repeatable plan running concurrently (Stripe
+flushing retries after an outage, or the reconciler racing the webhook) would
+each check before the other's insert landed and both find nothing blocking. The
+money is already taken either way, so both purchases are still recorded (never
+silently dropped, same reasoning as the FK-violation case in `addPurchase`) -
+checking after the insert just makes sure at least one of them gets flagged:
+inserting first means whichever confirmation commits second always sees the
+first's row already there, so one duplicate pair can produce two audit
+entries - never zero. Only the delivery that actually inserted the row runs the
+check at all, so a plain redelivery of an already-recorded session (Stripe
+retrying the same event) never checks and never adds a second entry. The
+`exclude` on `getBlockingByPlan` is what makes that check find a *different*
+session's purchase rather than the one this call just inserted. The check is
+skipped (not merely free of a blocking row) when the insert retried with
+`userId: null` - the user was deleted mid-checkout, so there's no owner left to
+check "already owns this plan" against.
 
 `addPurchase` is idempotent on `stripeCheckoutSessionId`, so a retried
 `checkout.session.completed` (Stripe's at-least-once delivery) is a no-op the
@@ -404,10 +413,10 @@ late settlement whose webhook was lost needs to still fall inside the window.
 That window is about *sessions*, though, and refunds and disputes don't keep to
 it: chargebacks typically land 30-120 days after the purchase. So after the
 session scan, `run` also lists the window's `charge.refunded`,
-`charge.dispute.created` and `charge.dispute.closed` events - the same charge
-events the webhook acts on - and re-syncs each one's purchase from Stripe's live
-state (`resolveChargeState`, as `updateByCharge` does), whatever the purchase's
-own age. A payment intent with no purchase row (a subscription invoice, or a
+`charge.refund.updated`, `charge.dispute.created` and `charge.dispute.closed`
+events - the same charge events the webhook acts on - and re-syncs each one's
+purchase from Stripe's live state (`resolveChargeState`, as `updateByCharge`
+does), whatever the purchase's own age. A payment intent with no purchase row (a subscription invoice, or a
 checkout the session scan handles) is skipped; one the session scan already
 synced isn't fetched twice. Changes count toward `updated`, errors toward
 `failed`. Stripe keeps events for 30 days, so a `--days` beyond that only widens
@@ -453,8 +462,22 @@ reconcilable row the list didn't return is then retrieved individually
 normally none, so this costs nothing in the common case, unlike listing with
 `status: "all"`, which would page through the account's whole cancellation
 history on every run. Each listed subscription is matched
-back to a reconcilable row by `stripeSubscriptionId`; unmatched rows are
-handled after the loop (see below).
+back to a reconcilable row by `stripeSubscriptionId`. A listed subscription
+that matches no row this way is checked against the reconcilable rows that
+have *no* `stripeSubscriptionId` yet at all, by the row id the plugin stamps
+on its own subscription's `metadata.subscriptionId` (an internal field the
+plugin always sets last, so a user can't forge it): the plugin's own
+`checkout.session.completed` handler creates the row and the Stripe
+subscription in the same pass but swallows its own errors and still answers
+Stripe 200, so a transient failure linking the two is never redelivered, and
+`customer.subscription.created` skips a row that already exists - leaving the
+row stuck with no `stripeSubscriptionId` while Stripe keeps billing it. Before
+linking, the row and the listed subscription must agree on who it belongs to
+(`metadata.referenceId` against the row's `referenceId`, and the Stripe
+customer against the row's `stripeCustomerId` if it has one) - a mismatch is
+counted as `failed` (`payments.reconcile.subscription_link_mismatch`) rather
+than linked. Rows still unmatched after both passes are handled after the loop
+(see below).
 
 For each matched row, `reconcileSubscription` diffs the listed subscription
 against the stored row and - unless it's a dry run - corrects it via
@@ -471,9 +494,14 @@ mirrors that same price-matching lookup
 (`stripePriceId`/`annualDiscountPriceId`), and `plan` is only corrected when
 a configured plan actually matches the current price - left untouched
 otherwise, mirroring the plugin's own "no match -> no update" behavior,
-rather than guessing or nulling it out. `referenceId`, `stripeCustomerId`
-and `stripeSubscriptionId` itself remain the only genuine identity fields,
-set once at creation and never rewritten here. `periodStart`/`periodEnd` are
+rather than guessing or nulling it out. `referenceId` and `stripeCustomerId`
+remain genuine identity fields, set once at creation and never rewritten
+here. `stripeSubscriptionId` is the one exception to "never rewritten": it's
+only ever *filled in* on a row that has none yet (the orphaned-row linking
+above), never changed once set - `updateSubscriptionFields`'s own `WHERE`
+either matches the row's current `stripeSubscriptionId` or requires it to
+still be `NULL`, so a row already linked to one Stripe subscription can never
+be re-pointed at another. `periodStart`/`periodEnd` are
 read from `sub.items.data[0]`, not the subscription object's own top-level
 fields, matching exactly where the plugin itself reads them from (Stripe
 moved period fields to the item level) - same simplification applies to the
@@ -494,11 +522,13 @@ under its own message (`payments.reconcile.subscription_not_found`), the
 same visibility a failed per-row lookup would have given; switching to
 bulk-listing must not make a genuinely broken row go silently unnoticed.
 
-Not covered: a subscription that exists in Stripe but has no row at all.
-Unlike one-time purchases (which only ever exist once an async webhook
-confirms them), the plugin creates the row synchronously as part of its own
-checkout/upgrade flow, before any webhook fires - a genuinely missing row is
-a much rarer failure mode than a stale one, and isn't what this pass targets.
+The orphaned-row linking above only covers a row the plugin already created
+but never tied to its Stripe subscription. Not covered: a subscription that
+exists in Stripe but has no row *at all*. Unlike one-time purchases (which
+only ever exist once an async webhook confirms them), the plugin creates the
+row synchronously as part of its own checkout/upgrade flow, before any
+webhook fires - a genuinely missing row is a much rarer failure mode than a
+stale or unlinked one, and isn't what this pass targets.
 
 `scripts/reconcile.ts` runs both passes every invocation and logs them under
 separate messages (`payments.reconcile.summary` for the existing one-time
@@ -581,6 +611,20 @@ flowchart TD
     Advance --> Walk
     Walk -->|no purchases left| False3["false"]
 ```
+
+`isPurchaseAccessActive` is a thin wrapper (`now >= start && (end === null || now < end)`
+over at least one window) around `purchaseAccessWindows`, the function that
+actually walks the chain above and returns one `{ start, end }` window per
+purchase, in order - the access check only needs "any window covers now",
+but `GET /purchases` needs the window itself: it reports each purchase's
+chained `accessStartsAt`/`accessEndsAt` (via `getAllPurchasesWithAccess`,
+grouping the caller's purchases by plan and feeding each group through
+`purchaseAccessWindows`) alongside its own unchained `expiresAt`, so a
+non-overlapping purchase bought while an earlier one was still running shows
+the buyer when their access *actually* starts and ends, not the
+understated value `expiresAt` alone would suggest. Both fields are `null` for
+a purchase that currently grants no access at all (refunded, disputed);
+`accessEndsAt` alone being `null` means the window just never expires.
 
 ### `recurring`: `hasActiveSubscription`
 
@@ -717,7 +761,18 @@ and keeps existing ones working:
   `customer.subscription.updated` handler stopped syncing the row at all. The
   hook also blocks switching an existing subscription of a retired plan
   between monthly and annual (same endpoint) - retiring means no new
-  commitments. Cancel, restore and the billing portal don't consult the plan
+  commitments. It matches the requested plan name against every plan
+  (`paymentsRepo.plan.getAllIncludingInactive`, not just the retired ones) with
+  JS's own `toLowerCase`, exactly how the plugin itself resolves a plan name -
+  rather than a case-insensitive DB lookup (Postgres's `lower()`), since the
+  two disagree on some characters (e.g. the Kelvin sign `U+212A` lowercases to
+  `"k"` in JS but is left alone by `lower()` under a C collation), and a name
+  only the plugin recognizes as the retired plan would otherwise slip past
+  this check. `insertPlanSchema` closes the other half of that gap at plan
+  creation, rejecting any plan name that isn't already NFKC-normalized, so two
+  names that look identical to a user can't normalize to different strings
+  and fool one of the two lookups into treating them as different plans.
+  Cancel, restore and the billing portal don't consult the plan
   list and keep working either way.
 
 Changing a price for existing subscribers isn't covered: create a new plan,
@@ -742,6 +797,20 @@ billing a user who no longer exists. It runs first so no new subscription can
 appear after the cancellation pass has listed them, and fails closed the same
 way (a session the user completed at that very moment fails the expiry, and a
 retry then finds it no longer open).
+
+Right after that, `assertNoSettlingPayments` (same file) refuses the deletion
+(better-auth's `APIError("CONFLICT")`, so the request answers 409 instead of
+500) if a one-time payment is still *settling* - a delayed method (e.g. a bank
+debit) whose Checkout Session is already `complete` but whose payment intent
+is still `processing`. The expiry pass above can't stop these: the session
+isn't `open` any more, and Stripe can't cancel a payment intent that's already
+processing - so without this check the money would still move days after the
+account is gone, landing as a purchase with no owner that nobody can use. It
+runs *after* the expiry pass specifically so a session that completed while
+that pass was running is still caught here, and only looks back
+`PROCESSING_TTL_SEC` (the same window `markProcessing` uses elsewhere) for a
+`complete`, `mode: "payment"` session on the user's Stripe customer. Fails
+closed like the other deletion passes: a Stripe error aborts the deletion too.
 
 Both passes run behind a deleting flag (`lib/deletion-guard.ts`), raised before
 the expiry pass lists anything. The user's session stays valid until the row is
@@ -785,7 +854,21 @@ snapshots on the purchase row, so an edit never rewrites history for purchases
 already made or still settling. (Rows from before the `overlapping` snapshot
 existed have none and follow the plan's current value; backfill them once, before
 the next edit, with `UPDATE purchase p SET overlapping = pl.overlapping FROM plan pl
-WHERE p.plan_id = pl.id AND p.overlapping IS NULL`.) Flipping `repeatable` from `false` to `true` is rejected
+WHERE p.plan_id = pl.id AND p.overlapping IS NULL`.) "Started after it" is enforced,
+not just true by default: when a `PATCH` sets either field on an `active`,
+`one_time` plan, it also expires every open Checkout Session for that plan
+(`paymentsRepo.plan.expireOpenCheckouts`, the same one-time-only expiry
+`expireOpenCheckoutsForPlan` does on retirement - see below). Without it, a
+session opened under the old terms stays payable for up to 24h, and - because
+`POST /checkout`'s resume path hands a repeatable plan's caller back their own
+still-`open` session rather than creating a new one - could keep selling the
+old terms to anyone who resumes it, even though the plan now advertises
+something else. Runs on every `PATCH` that sets the field, not only when the
+value actually changed, so repeating the same `PATCH` finishes an expiry that
+failed part-way (same idempotency as the Stripe price sync below); failing it
+answers 500 with a message asking for a retry rather than leaving the plan
+update rolled back. A retired plan's open sessions are already expired by the
+retirement path itself, so this doesn't double up on that case. Flipping `repeatable` from `false` to `true` is rejected
 (409) while any user still has a blocking purchase of the plan
 (`paymentsRepo.purchase.hasAnyBlocking`) - otherwise it would silently reopen a
 once-only/trial plan to every past purchaser, not just whoever's buying it next.
@@ -813,8 +896,17 @@ Two unrelated things both get called "trial" here - don't confuse them:
 - **Subscription trial** (e.g. 14 days of Pro, then it bills): `trialDays`
   on a `recurring` plan, handled entirely by `@better-auth/stripe` - it
   grants the trial, auto-bills when it ends, and only grants one per account
-  by checking the user's subscription history before creating another. None
-  of this feature's code is involved.
+  by checking the user's subscription history before creating another. The
+  one piece of this feature's own code involved is `withholdTrialFromUnverified`
+  (`lib/trial-eligibility.ts`, wired as the plugin's own
+  `subscription.getCheckoutSessionParams` hook in `auth.ts`): since sign-up
+  needs no email verification, and the plugin's "one trial per account" check
+  is keyed on the account rather than the mailbox, every throwaway account
+  would otherwise get the trial again. It strips `trial_period_days` from the
+  checkout session's params when the subscribing user's email isn't verified
+  (read live from the DB, not the caller's possibly-cached session user) -
+  tying the trial to one verified mailbox instead. An unverified user can
+  still subscribe; they just pay from day one.
 
 A genuinely *free*, one-time (non-subscription) plan can't be created
 directly - `insertPlanSchema` requires `amount` to be positive. A $0 checkout
