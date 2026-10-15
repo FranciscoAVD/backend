@@ -38,7 +38,7 @@ The webhook (`/api/auth/stripe/webhook` → `handleStripeEvent` in `lib/webhook.
 
 **Adding Stripe params** (promo codes, tax, different line items, ...) to the one-time checkout: implement `getCheckoutSessionParams` in `lib/checkout-extensions.ts` — a no-op by default, mirroring `@better-auth/stripe`'s own `subscription.getCheckoutSessionParams` option for the subscription flow. See that file and `CONTROL_FLOW.md` for exactly which fields always win over what it returns, and note that changing `line_items` changes what's charged, not what's granted: one checkout is one purchase with one access window, whatever the quantity.
 
-**Running the reconciler on a schedule.** The `Dockerfile`'s `cron` stage is a separate image, built from the same source, whose only job is running `payments:reconcile` daily via busybox `crond` (see the `cron` stage's comments for why it runs as root, and why the crontab redirects to `/proc/1/fd/1-2`). Build and run it like:
+**Running the reconciler on a schedule.** The `Dockerfile`'s `cron` stage is a separate image, built from the same source, whose only job is running `payments:reconcile` daily via busybox `crond` - `crond` itself runs as root (it has to, to manage `/etc/crontabs`), but drops to the unprivileged `bun` user for the scheduled job itself, so the reconciler - which holds the Stripe secret key and database credentials - never runs as root (see the `cron` stage's comments for why, and why the crontab redirects to `/proc/1/fd/1-2`). Build and run it like:
 
 ```sh
 docker build --target cron -t backend-reconcile-cron .

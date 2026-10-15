@@ -860,14 +860,17 @@ not just true by default: when a `PATCH` sets either field on an `active`,
 (`paymentsRepo.plan.expireOpenCheckouts`, the same one-time-only expiry
 `expireOpenCheckoutsForPlan` does on retirement - see below). Without it, a
 session opened under the old terms stays payable for up to 24h, and - because
-`POST /checkout`'s resume path hands a repeatable plan's caller back their own
-still-`open` session rather than creating a new one - could keep selling the
-old terms to anyone who resumes it, even though the plan now advertises
-something else. Runs on every `PATCH` that sets the field, not only when the
-value actually changed, so repeating the same `PATCH` finishes an expiry that
-failed part-way (same idempotency as the Stripe price sync below); failing it
-answers 500 with a message asking for a retry rather than leaving the plan
-update rolled back. A retired plan's open sessions are already expired by the
+`POST /checkout`'s resume path hands a caller back their own still-`open`
+session rather than creating a new one, for a repeatable or non-repeatable
+plan alike - could keep selling the old terms to anyone who resumes it, even
+though the plan now advertises something else. Runs on every `PATCH` that sets
+the field, not only when the value actually changed, so repeating the same
+`PATCH` finishes an expiry that failed part-way (same idempotency as the
+Stripe price sync below). The plan row itself is already saved by this point
+either way - a failed expiry answers 500 with a message asking for a retry,
+but doesn't roll that back - so failing just means some checkouts opened under
+the old terms stay open (and resumable) until the `PATCH` is retried and the
+expiry succeeds. A retired plan's open sessions are already expired by the
 retirement path itself, so this doesn't double up on that case. Flipping `repeatable` from `false` to `true` is rejected
 (409) while any user still has a blocking purchase of the plan
 (`paymentsRepo.purchase.hasAnyBlocking`) - otherwise it would silently reopen a
