@@ -8,6 +8,7 @@ import { createSecondaryStorage } from "@vicstack/secondary-storage";
 import { redis, incrementWithTTL } from "@/lib/redis";
 import { logger } from "@/lib/logger";
 import { ac, user, admin } from "@f/auth/lib/permissions";
+import { sendVerificationEmail } from "@f/auth/lib/verification-email";
 import { stripe } from "@better-auth/stripe";
 import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
 import { paymentsRepo } from "@f/payments/repo";
@@ -53,6 +54,11 @@ export const auth = betterAuth({
   },
   emailAndPassword: {
     enabled: true,
+  },
+  emailVerification: {
+    sendVerificationEmail,
+    // must be explicit - otherwise this follows requireEmailVerification, which stays off
+    sendOnSignUp: true,
   },
   databaseHooks: {
     user: {
