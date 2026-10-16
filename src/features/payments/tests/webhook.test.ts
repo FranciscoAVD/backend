@@ -15,7 +15,7 @@ let fakeDispute: Record<string, unknown> | null = null;
 // Since updateByCharge now always re-fetches live state (never trusts a webhook event's own
 // embedded payload - see charge-state.ts), these fakes, not the fired event's payload, are
 // what actually determines the resulting purchase state in every test below.
-mock.module("@f/payments/payment", () => ({
+mock.module("@f/payments/lib/stripe/client", () => ({
   getPaymentProcessor: () => ({
     paymentIntents: {
       retrieve: async (id: string, options?: { expand?: string[] }) => ({
@@ -34,14 +34,15 @@ mock.module("@f/payments/payment", () => ({
   }),
 }));
 
-import { confirmCheckout, handleStripeEvent } from "@f/payments/lib/webhook";
+import { confirm as confirmCheckout } from "@f/payments/services/fulfillment";
+import { handleStripeEvent } from "@f/payments/lib/webhook";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import { getAllPurchases } from "@f/payments/use-cases/get-purchases";
 import {
   savePendingCheckout,
   getPendingCheckout,
   PENDING_CHECKOUT_TTL_SEC,
-} from "@f/payments/lib/pending-checkout";
+} from "@f/payments/lib/state/pending-checkout";
 
 const session = (
   overrides: Partial<Stripe.Checkout.Session> = {},

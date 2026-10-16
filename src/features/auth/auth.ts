@@ -9,16 +9,11 @@ import { redis, incrementWithTTL } from "@/lib/redis";
 import { logger } from "@/lib/logger";
 import { ac, user, admin } from "@f/auth/lib/permissions";
 import { stripe } from "@better-auth/stripe";
-import { getPaymentProcessor } from "@f/payments/payment";
+import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
 import { paymentsRepo } from "@f/payments/repo";
+import { paymentsServices } from "@f/payments/services";
 import { handleStripeEvent } from "@f/payments/lib/webhook";
-import {
-  assertNoSettlingPayments,
-  cancelSubscriptionsForDeletedUser,
-  expireCheckoutsForDeletedUser,
-} from "@f/payments/lib/user-deletion";
 import { paymentsBeforeHook, paymentsAfterHook } from "@f/payments/lib/auth-hooks";
-import { markUserDeleting, clearUserDeleting } from "@f/payments/lib/deletion-guard";
 import { withholdTrialFromUnverified } from "@f/payments/lib/trial-eligibility";
 import tryCatch from "@vicstack/try-catch";
 
@@ -69,14 +64,9 @@ export const auth = betterAuth({
         // up before either pass, so a checkout started while this runs is expired too (see
         // payments/lib/deletion-guard.ts); it comes down again only if the deletion is aborted
         before: async (user) => {
-          await markUserDeleting(user.id);
-          try {
-            await expireCheckoutsForDeletedUser(user);
-            // after the expiry pass, so a checkout completed while it ran is caught here
-            await assertNoSettlingPayments(user);
-            await cancelSubscriptionsForDeletedUser(user);
-          } catch (error) {
-            const [, clearError] = await tryCatch(clearUserDeleting(user.id));
+          const [, error] = await tryCatch(paymentsServices.account.prepareDeletion(user));
+          if (error) {
+            const [, clearError] = await tryCatch(paymentsServices.account.abortDeletion(user.id));
             if (clearError)
               logger.warn({ err: clearError, user: user.id }, "payments.deletion_guard.clear");
             throw error;
@@ -100,7 +90,7 @@ export const auth = betterAuth({
       createCustomerOnSignUp: true,
       subscription: {
         enabled: true,
-        plans: paymentsRepo.plan.getSubscriptions,
+        plans: paymentsRepo.plan.get.subscriptions,
         // free trials only for verified emails, so throwaway accounts can't farm them
         getCheckoutSessionParams: withholdTrialFromUnverified,
       },

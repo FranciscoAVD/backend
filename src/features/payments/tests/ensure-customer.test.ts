@@ -7,8 +7,8 @@ import { resetDb, seedUser } from "@/test-helpers/db";
 let customersCreateCalls: { args: Record<string, unknown>; options: unknown }[] = [];
 
 // no free local "real Stripe" to run against, unlike Postgres — so the SDK
-// surface ensureStripeCustomer actually calls is faked here via bun:test's mock.module
-mock.module("@f/payments/payment", () => ({
+// surface ensureCustomer actually calls is faked here via bun:test's mock.module
+mock.module("@f/payments/lib/stripe/client", () => ({
   getPaymentProcessor: () => ({
     customers: {
       create: async (args: Record<string, unknown>, options: unknown) => {
@@ -20,11 +20,11 @@ mock.module("@f/payments/payment", () => ({
 }));
 
 import {
-  ensureStripeCustomer,
+  ensureCustomer,
   customerIdempotencyKey,
-} from "@f/payments/use-cases/ensure-customer";
+} from "@f/payments/services/account";
 
-describe("ensureStripeCustomer", () => {
+describe("ensureCustomer", () => {
   beforeEach(async () => {
     await resetDb();
     customersCreateCalls = [];
@@ -33,8 +33,8 @@ describe("ensureStripeCustomer", () => {
   test("returns the existing Stripe customer id without calling Stripe, even when the caller doesn't know it", async () => {
     const userId = await seedUser({ stripeCustomerId: "cus_existing" });
     // simulates a stale cached session that never learned about the customer id -
-    // ensureStripeCustomer must re-read the live row itself, not trust the caller
-    const res = await ensureStripeCustomer({
+    // ensureCustomer must re-read the live row itself, not trust the caller
+    const res = await ensureCustomer({
       id: userId,
       name: "Test User",
       email: "test@example.test",
@@ -46,7 +46,7 @@ describe("ensureStripeCustomer", () => {
 
   test("creates a Stripe customer and persists it when the user has none", async () => {
     const userId = await seedUser({ stripeCustomerId: null });
-    const res = await ensureStripeCustomer({
+    const res = await ensureCustomer({
       id: userId,
       name: "Test User",
       email: "test@example.test",
@@ -68,7 +68,7 @@ describe("ensureStripeCustomer", () => {
 
   test("passes a deterministic idempotency key scoped to the user", async () => {
     const userId = await seedUser({ stripeCustomerId: null });
-    await ensureStripeCustomer({
+    await ensureCustomer({
       id: userId,
       name: "Test User",
       email: "test@example.test",

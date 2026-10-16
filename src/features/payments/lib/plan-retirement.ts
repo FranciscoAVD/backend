@@ -33,7 +33,7 @@ export async function rejectRetiredPlanUpgrade(ctx: {
   // left alone by lower() under a C collation), and a name only the plugin recognizes would slip
   // past this check and still subscribe to the retired plan
   const wanted = name.toLowerCase();
-  const plan = (await paymentsRepo.plan.getAllIncludingInactive()).find(
+  const plan = (await paymentsRepo.plan.get.all()).find(
     (p) => p.type === "recurring" && p.name.toLowerCase() === wanted,
   );
   if (plan && !plan.active)

@@ -26,58 +26,43 @@ import {
   getSubscriptionsByIds,
 } from "@f/payments/use-cases/get-subscription";
 import { updateSubscriptionFields } from "@f/payments/use-cases/update-subscription";
-import {
-  createCheckout,
-  expireCheckout,
-  isUserDeleting,
-  getCheckoutStatus,
-  getPendingCheckout,
-  getResumableCheckout,
-  reservePendingCheckout,
-  releaseReservation,
-  acquireCreateLock,
-  releaseCreateLock,
-  markProcessing,
-  markFailed,
-  markExpired,
-  removePendingCheckout,
-} from "@f/payments/use-cases/checkout";
-import { syncPlanPricesActive } from "@f/payments/use-cases/sync-plan-prices";
 import { syncPurchaseCharge } from "@f/payments/use-cases/sync-purchase-charge";
-import { expireOpenCheckoutsForPlan } from "@f/payments/use-cases/expire-plan-checkouts";
-import { ensureStripeCustomer } from "@f/payments/use-cases/ensure-customer";
 import { addAuditLog } from "@f/payments/use-cases/add-audit-log";
 import { getActivePlans } from "@f/payments/use-cases/get-active-plans";
 import {
   getAuditLogByUser,
   getAllAuditLog,
 } from "@f/payments/use-cases/get-audit-log";
+import {
+  getEmailVerified,
+  getForCustomer,
+  setStripeCustomerId,
+} from "@f/payments/use-cases/user";
 
 export const paymentsRepo = {
-  customer: {
-    ensure: ensureStripeCustomer,
-  },
   plan: {
     add: addPlan,
-    get: getPlan,
-    getByName: getPlanByName,
-    getAll: getPlans,
-    getAllIncludingInactive: getAllPlansIncludingInactive,
-    getByPriceId: getPlanByPriceId,
-    getSubscriptions: getSubscriptionPlans,
+    get: {
+      one: getPlan,
+      byName: getPlanByName,
+      byPriceId: getPlanByPriceId,
+      active: getPlans,
+      all: getAllPlansIncludingInactive,
+      subscriptions: getSubscriptionPlans,
+    },
     update: updatePlan,
-    syncPricesActive: syncPlanPricesActive,
-    expireOpenCheckouts: expireOpenCheckoutsForPlan,
   },
   purchase: {
     add: addPurchase,
-    getAll: getAllPurchases,
-    getAllWithAccess: getAllPurchasesWithAccess,
-    getAllAdmin: getAllPurchasesAdmin,
-    getByUserAdmin: getPurchasesByUserAdmin,
-    getBySession: getPurchaseBySession,
-    getBySessionAnyUser: getPurchaseBySessionAnyUser,
-    getBlockingByPlan: getBlockingPurchaseByPlan,
+    get: {
+      mine: getAllPurchases,
+      mineWithAccess: getAllPurchasesWithAccess,
+      bySession: getPurchaseBySession,
+      bySessionAnyUser: getPurchaseBySessionAnyUser,
+      allAdmin: getAllPurchasesAdmin,
+      byUserAdmin: getPurchasesByUserAdmin,
+    },
+    getBlocking: getBlockingPurchaseByPlan,
     hasAnyBlocking: hasAnyBlockingPurchase,
     hasActive: hasActivePurchase,
     syncCharge: syncPurchaseCharge,
@@ -88,28 +73,19 @@ export const paymentsRepo = {
     getByIds: getSubscriptionsByIds,
     updateFields: updateSubscriptionFields,
   },
-  checkout: {
-    create: createCheckout,
-    expire: expireCheckout,
-    isUserDeleting,
-    getStatus: getCheckoutStatus,
-    getPending: getPendingCheckout,
-    getResumable: getResumableCheckout,
-    reserve: reservePendingCheckout,
-    releaseReservation,
-    acquireCreateLock,
-    releaseCreateLock,
-    markProcessing,
-    markFailed,
-    markExpired,
-    removePending: removePendingCheckout,
+  user: {
+    getEmailVerified,
+    getForCustomer,
+    setStripeCustomerId,
   },
   access: {
-    getActivePlans,
+    activePlans: getActivePlans,
   },
   audit: {
     add: addAuditLog,
-    getByUser: getAuditLogByUser,
-    getAll: getAllAuditLog,
+    get: {
+      all: getAllAuditLog,
+      byUser: getAuditLogByUser,
+    },
   },
 };
