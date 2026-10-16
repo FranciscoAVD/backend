@@ -5,6 +5,7 @@ import { ensureCustomer } from "@f/payments/services/account";
 import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
 import {
   PENDING_CHECKOUT_TTL_SEC,
+  CHECKOUT_SESSION_EXPIRY_SEC,
   getPendingCheckout,
   savePendingCheckout,
   removePendingCheckout,
@@ -70,7 +71,7 @@ export async function createCheckout(
     payment_intent_data: { ...extraPID, metadata: { ...extraPID?.metadata, ...metadata } },
     success_url: `${env.CLIENT_URL}/checkout/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${env.CLIENT_URL}/checkout/cancel`,
-    expires_at: Math.floor(Date.now() / 1000) + PENDING_CHECKOUT_TTL_SEC,
+    expires_at: Math.floor(Date.now() / 1000) + CHECKOUT_SESSION_EXPIRY_SEC,
   });
 
   const saved = await savePendingCheckout(

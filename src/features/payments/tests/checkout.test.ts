@@ -194,6 +194,18 @@ describe("createCheckout", () => {
     expect(sessionCreateCalls[0]).toMatchObject({ mode: "payment", customer: "cus_abc" });
     expect(sessionCreateCalls[0]?.expires_at).toBeGreaterThan(1);
   });
+
+  test("expires_at leaves a margin before the Redis entry's own TTL, and stays above Stripe's minimum", async () => {
+    const plan = await seedPlan();
+    const before = Math.floor(Date.now() / 1000);
+
+    await createCheckout({ userId: "u1", stripeCustomerId: "cus_abc" }, plan);
+
+    const expiresAt = sessionCreateCalls[0]?.expires_at as number;
+    const STRIPE_MIN_EXPIRY_SEC = 30 * 60;
+    expect(expiresAt).toBeLessThanOrEqual(before + 24 * 60 * 60 - 10 * 60);
+    expect(expiresAt).toBeGreaterThanOrEqual(before + STRIPE_MIN_EXPIRY_SEC);
+  });
 });
 
 describe("getCheckoutStatus", () => {
