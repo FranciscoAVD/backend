@@ -26,6 +26,8 @@ For a feature whose use-cases include anything beyond plain Postgres reads/write
 
 A feature can also be pure infra with no DB-backed resource at all (see `features/email`: `lib/client.ts` for the third-party client singleton, `templates/` with one `.tsx` file per message type — a React Email component (`@react-email/components`), exported as an async function that renders it via `@react-email/render` into `{ subject, html, text }` — and `send.ts` as the feature's one public entry point). No `repo.ts`/`services.ts`/`route.ts` for a feature like this; other features import its entry point directly (`features/auth/lib/verification-email.ts` imports `@f/email/send` and a specific template) rather than it depending on them.
 
+An email template needing an image takes the URL as a prop (e.g. `templates/verification.tsx`'s `logoUrl?: string`, rendering no image at all when omitted) rather than hardcoding one - email clients fetch images from a URL, never a local path, so whatever hosts it has to be genuinely public (not this server's own `localhost` in dev). The hook/hander that calls a template (`features/auth/lib/verification-email.ts`) is where a real URL gets wired in once one exists.
+
 # Logging
 
 When something needs logging (a caught error, a noteworthy state), don't reach for `console.log`/`console.error`.
