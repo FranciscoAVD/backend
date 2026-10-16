@@ -11,22 +11,43 @@ const idOf = (ref: string | { id: string } | null) =>
   typeof ref === "string" ? ref : (ref?.id ?? null);
 
 /**
- * @description Who bought what: the pending Redis entry, falling back to the session
- * metadata set at checkout time so a confirmed payment is never dropped.
+ * @description Who bought what: Stripe's own session metadata, set once at checkout time -
+ * the source of truth, since it's what Stripe itself guarantees for this session. The pending
+ * Redis entry is still read, but only to cross-check: if it exists and disagrees with the
+ * metadata on `userId` or `planId`, that's suspicious enough to refuse rather than silently pick
+ * one (see `confirm`). Redis is never used to supply or override the owner - a session with no
+ * resolvable metadata returns null regardless of whether a pending entry exists.
  */
 async function resolveOwner(
   session: Stripe.Checkout.Session,
 ): Promise<{ userId: string; planId: number } | null> {
-  const [pending, error] = await tryCatch(getPendingCheckout(session.id));
-  if (pending) return { userId: pending.userId, planId: pending.planId };
-
-  logger.warn(
-    { err: error ?? undefined, session: session.id },
-    "payments.webhook.pending_missing",
-  );
   const userId = session.metadata?.userId;
   const planId = Number(session.metadata?.planId);
-  return userId && Number.isInteger(planId) ? { userId, planId } : null;
+  const fromMetadata = userId && Number.isInteger(planId) ? { userId, planId } : null;
+
+  const [pending, error] = await tryCatch(getPendingCheckout(session.id));
+  if (!pending && error)
+    logger.warn({ err: error, session: session.id }, "payments.webhook.pending_lookup_failed");
+
+  if (
+    pending &&
+    fromMetadata &&
+    (pending.userId !== fromMetadata.userId || pending.planId !== fromMetadata.planId)
+  ) {
+    logger.error(
+      {
+        session: session.id,
+        metadataOwner: fromMetadata,
+        pendingOwner: { userId: pending.userId, planId: pending.planId },
+      },
+      "payments.webhook.owner_mismatch",
+    );
+    throw new Error(
+      "Checkout session owner mismatch between Stripe metadata and the pending Redis entry",
+    );
+  }
+
+  return fromMetadata;
 }
 
 /**

@@ -7,16 +7,18 @@
  * (this flow always passes `customer`), and `ui_mode: "embedded"` (which takes `return_url`, not
  * the `success_url`/`cancel_url` this flow sets). Mirrors `@better-auth/stripe`'s own
  * `subscription.getCheckoutSessionParams` option for the subscription flow - same idea, for
- * `createCheckout` (`use-cases/checkout.ts`). The default here does nothing; an app wanting any
+ * `createCheckout` (`services/checkout.ts`). The default here does nothing; an app wanting any
  * of this implements the function directly - same "change it here, not where it's read"
  * convention `access-policy.ts` already established.
  *
  * What always wins over whatever this returns, and why (see `createCheckout` for where):
  * - `mode`, `customer`, `client_reference_id`, `success_url`, `cancel_url` - this flow's own
  *   identity, not something an extension has a reason to change.
- * - `expires_at` - kept in lockstep with `PENDING_CHECKOUT_TTL_SEC` (the Redis entry's own TTL);
- *   letting it drift would open a window where Stripe still accepts the session but Redis has
- *   already forgotten it.
+ * - `expires_at` - set from `CHECKOUT_SESSION_EXPIRY_SEC`, deliberately shorter than the Redis
+ *   entry's own TTL (`PENDING_CHECKOUT_TTL_SEC`) by a margin, so the Redis entry always outlives
+ *   the Stripe session rather than matching it: `checkout.session.expired`'s webhook can lag, and
+ *   without the margin a session Stripe has already expired but whose webhook hasn't landed yet
+ *   would still show `open` in Redis.
  * - the `userId`/`planId`/`durationDays`/`overlapping` keys of `metadata` and `payment_intent_data.metadata` -
  *   `confirmCheckout` and the reconciler depend on these to resolve a session back to a purchase
  *   at all. Additional keys *are* merged in, so an app can still tag a session with its own data

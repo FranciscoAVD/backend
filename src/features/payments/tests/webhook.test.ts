@@ -80,7 +80,7 @@ beforeEach(async () => {
 });
 
 describe("confirmCheckout", () => {
-  test("resolves the owner from the pending Redis entry and records the purchase", async () => {
+  test("a matching Redis entry still records the purchase", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();
     await savePendingCheckout(
@@ -89,7 +89,11 @@ describe("confirmCheckout", () => {
       PENDING_CHECKOUT_TTL_SEC,
     );
 
-    await confirmCheckout(session({ id: "cs_1" }));
+    // a real session always carries metadata too (set at checkout time) - this is what
+    // confirmCheckout actually resolves the owner from; the pending entry just cross-checks it
+    await confirmCheckout(
+      session({ id: "cs_1", metadata: { userId, planId: String(plan.id) } }),
+    );
 
     const [purchase] = await getAllPurchases({ userId });
     expect(purchase?.stripeCheckoutSessionId).toBe("cs_1");
@@ -270,7 +274,11 @@ describe("confirmCheckout", () => {
 
     // the money's already taken for this second session - must not throw or drop it
     await confirmCheckout(
-      session({ id: "cs_dup", payment_intent: "pi_dup" }),
+      session({
+        id: "cs_dup",
+        payment_intent: "pi_dup",
+        metadata: { userId, planId: String(plan.id) },
+      }),
     );
 
     const purchases = await getAllPurchases({ userId });
@@ -287,6 +295,51 @@ describe("confirmCheckout", () => {
     expect(audit?.type).toBe("duplicate_purchase_confirmed");
     expect(audit?.planId).toBe(plan.id);
     expect(audit?.stripeCheckoutSessionId).toBe("cs_dup");
+  });
+
+  test("a mismatched userId between the pending entry and the metadata throws and inserts nothing", async () => {
+    const userA = await seedUser();
+    const userB = await seedUser();
+    const plan = await seedPlan();
+    await savePendingCheckout(
+      "cs_mismatch_user",
+      { userId: userA, planId: plan.id, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+
+    await expect(
+      confirmCheckout(
+        session({
+          id: "cs_mismatch_user",
+          metadata: { userId: userB, planId: String(plan.id) },
+        }),
+      ),
+    ).rejects.toThrow();
+
+    expect(await getAllPurchases({ userId: userA })).toEqual([]);
+    expect(await getAllPurchases({ userId: userB })).toEqual([]);
+  });
+
+  test("a mismatched planId between the pending entry and the metadata throws and inserts nothing", async () => {
+    const userId = await seedUser();
+    const planA = await seedPlan();
+    const planB = await seedPlan();
+    await savePendingCheckout(
+      "cs_mismatch_plan",
+      { userId, planId: planA.id, status: "open" },
+      PENDING_CHECKOUT_TTL_SEC,
+    );
+
+    await expect(
+      confirmCheckout(
+        session({
+          id: "cs_mismatch_plan",
+          metadata: { userId, planId: String(planB.id) },
+        }),
+      ),
+    ).rejects.toThrow();
+
+    expect(await getAllPurchases({ userId })).toEqual([]);
   });
 });
 
@@ -335,7 +388,10 @@ describe("handleStripeEvent", () => {
     );
 
     await handleStripeEvent(
-      event("checkout.session.completed", session({ payment_status: "paid" })),
+      event(
+        "checkout.session.completed",
+        session({ payment_status: "paid", metadata: { userId, planId: String(plan.id) } }),
+      ),
     );
 
     const [purchase] = await getAllPurchases({ userId });

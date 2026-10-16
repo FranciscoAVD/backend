@@ -19,8 +19,17 @@ export type PendingCheckout = {
   url?: string;
 };
 
-/** Matches the Checkout Session `expires_at` set in `createCheckout`. */
+/** The Redis entry's own TTL - no longer matches the Stripe session's `expires_at` (see below). */
 export const PENDING_CHECKOUT_TTL_SEC = 60 * 60 * 24;
+/**
+ * The Stripe Checkout Session's own `expires_at`, kept 10 minutes shorter than
+ * `PENDING_CHECKOUT_TTL_SEC` so the Redis entry always outlives the Stripe session, never the
+ * other way around. `checkout.session.expired`'s webhook can lag; without this margin, a session
+ * Stripe has already expired but whose webhook hasn't landed yet still shows `open` in Redis, and
+ * `getResumableCheckout` could hand a buyer back a session Stripe will no longer accept. Still
+ * comfortably above Stripe's own 30-minute minimum for `expires_at`.
+ */
+export const CHECKOUT_SESSION_EXPIRY_SEC = PENDING_CHECKOUT_TTL_SEC - 60 * 10;
 /** Delayed payment methods (e.g. bank debits) can take several days to settle. */
 export const PROCESSING_TTL_SEC = 60 * 60 * 24 * 14;
 /** How long a failed/expired checkout's terminal status stays visible to a polling client. */
