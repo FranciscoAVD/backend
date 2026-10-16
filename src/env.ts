@@ -25,6 +25,9 @@ export const env = createEnv({
     // Payments
     STRIPE_SECRET_KEY: z.string(),
     STRIPE_WEBHOOK_SECRET: z.string(),
+    // Email
+    RESEND_API_KEY: z.string(),
+    EMAIL_FROM: z.string(),
     // Database: either DB_URL, or every discrete field below - never both, never a mix
     DB_PROVIDER: z.string().optional(),
     DB_USER: z.string().optional(),
