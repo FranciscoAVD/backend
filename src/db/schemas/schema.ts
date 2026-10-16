@@ -19,8 +19,10 @@ export const todo = pgTable(
       .notNull(),
     name: varchar("name", { length: 50 }).notNull(),
     isComplete: boolean("is_complete").notNull().default(false),
-    createdAt: timestamp("created_at").notNull().defaultNow(),
-    updatedAt: timestamp("updated_at")
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow()
       .$onUpdate(() => new Date()),

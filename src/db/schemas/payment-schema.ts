@@ -54,8 +54,10 @@ export const plan = pgTable("plan", {
   stripePriceId: text("stripe_price_id").notNull().unique(),
   annualDiscountPriceId: text("annual_discount_price_id"),
   active: boolean("active").notNull().default(true),
-  createdAt: timestamp("created_at").notNull().defaultNow(),
-  updatedAt: timestamp("updated_at")
+  createdAt: timestamp("created_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
     .notNull()
     .defaultNow()
     .$onUpdate(() => new Date()),
@@ -90,7 +92,7 @@ export const purchase = pgTable(
     currency: varchar("currency", { length: 3 }).notNull(),
     // from the plan's durationDays at the time of purchase; null means it never expires.
     // Each purchase's window is independent, so two purchases of the same plan can overlap.
-    expiresAt: timestamp("expires_at"),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
     // snapshot of the plan's durationDays at purchase time, so a later edit to the plan
     // doesn't rewrite history for purchases already made (used to re-derive chained windows)
     durationDays: integer("duration_days"),
@@ -99,8 +101,10 @@ export const purchase = pgTable(
     // reason as durationDays - flipping the plan's flag later mustn't rewrite access already sold.
     // null on rows written before this column existed, which fall back to the plan's current value
     overlapping: boolean("overlapping"),
-    createdAt: timestamp("created_at").notNull().defaultNow(),
-    updatedAt: timestamp("updated_at")
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
       .defaultNow()
       .$onUpdate(() => new Date()),
@@ -127,7 +131,9 @@ export const paymentAuditLog = pgTable(
     // only set for duplicate_purchase_confirmed
     stripeCheckoutSessionId: text("stripe_checkout_session_id"),
     details: jsonb("details").$type<Record<string, unknown>>(),
-    createdAt: timestamp("created_at").notNull().defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (t) => [index("payment_audit_log_user_idx").on(t.userId)],
 );
