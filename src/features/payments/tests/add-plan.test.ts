@@ -21,8 +21,8 @@ let productsUpdateCalls: { id: string; active: boolean }[] = [];
 let failPricesCreate = false;
 
 // no free local "real Stripe" to run against, unlike Postgres/Redis — so the
-// SDK surface addPlan actually calls is faked here via bun:test's mock.module
-mock.module("@f/payments/payment", () => ({
+// SDK surface services/plan.ts's create actually calls is faked here via bun:test's mock.module
+mock.module("@f/payments/lib/stripe/client", () => ({
   getPaymentProcessor: () => ({
     products: {
       create: async (args: { name: string }) => {
@@ -44,9 +44,10 @@ mock.module("@f/payments/payment", () => ({
   }),
 }));
 
+import { create } from "@f/payments/services/plan";
 import { addPlan } from "@f/payments/use-cases/add-plan";
 
-describe("addPlan", () => {
+describe("services/plan.ts create", () => {
   beforeEach(async () => {
     await resetDb();
     productsCreateCalls = [];
@@ -56,17 +57,18 @@ describe("addPlan", () => {
   });
 
   test("creates a Stripe product + price and inserts the plan", async () => {
-    const res = await addPlan(onePlan({ name: "Pro" }));
+    const res = await create(onePlan({ name: "Pro" }));
 
-    expect(res?.name).toBe("Pro");
-    expect(res?.stripeProductId).toBe("prod_1");
-    expect(res?.stripePriceId).toBe("price_1");
-    expect(res?.annualDiscountPriceId).toBeNull();
+    if (res.kind !== "created") throw new Error(`expected created, got ${res.kind}`);
+    expect(res.plan.name).toBe("Pro");
+    expect(res.plan.stripeProductId).toBe("prod_1");
+    expect(res.plan.stripePriceId).toBe("price_1");
+    expect(res.plan.annualDiscountPriceId).toBeNull();
     expect(pricesCreateCalls).toHaveLength(1);
   });
 
   test("creates a second, annual price when annualAmount is given", async () => {
-    const res = await addPlan(
+    const res = await create(
       onePlan({
         name: "Pro Annual",
         type: "recurring",
@@ -75,29 +77,31 @@ describe("addPlan", () => {
       }),
     );
 
+    if (res.kind !== "created") throw new Error(`expected created, got ${res.kind}`);
     expect(pricesCreateCalls).toHaveLength(2);
-    expect(res?.stripePriceId).toBe("price_1");
-    expect(res?.annualDiscountPriceId).toBe("price_2");
+    expect(res.plan.stripePriceId).toBe("price_1");
+    expect(res.plan.annualDiscountPriceId).toBe("price_2");
   });
 
   test("archives the Stripe product and rethrows when price creation fails", async () => {
     failPricesCreate = true;
 
-    await expect(addPlan(onePlan({ name: "Broken" }))).rejects.toThrow(
+    await expect(create(onePlan({ name: "Broken" }))).rejects.toThrow(
       "stripe price creation failed",
     );
 
     expect(productsUpdateCalls).toEqual([{ id: "prod_1", active: false }]);
   });
 
-  test("archives the Stripe product and rethrows when the DB insert fails", async () => {
-    await addPlan(onePlan({ name: "Duplicate" }));
+  test("reports duplicate_name (after archiving the Stripe product) when the name is already taken", async () => {
+    await create(onePlan({ name: "Duplicate" }));
     productsUpdateCalls = [];
 
-    // same name again -> unique constraint violation on the DB insert
-    await expect(addPlan(onePlan({ name: "Duplicate" }))).rejects.toThrow();
+    const res = await create(onePlan({ name: "Duplicate" }));
 
-    expect(productsUpdateCalls).toEqual([{ id: "prod_2", active: false }]);
+    expect(res).toEqual({ kind: "duplicate_name" });
+    // the pre-check already catches this case before touching Stripe at all
+    expect(productsUpdateCalls).toEqual([]);
   });
 });
 
@@ -110,14 +114,52 @@ describe("plan names are unique regardless of case", () => {
     failPricesCreate = false;
   });
 
-  test("a name differing only in case is refused by the database, and its product archived", async () => {
-    await addPlan(onePlan({ name: "Pro" }));
+  test("the pre-check itself is case-insensitive - a differently-cased duplicate never reaches Stripe", async () => {
+    await create(onePlan({ name: "Pro" }));
 
-    const error = await addPlan(onePlan({ name: "PRO" })).catch((e: unknown) => e);
+    const res = await create(onePlan({ name: "PRO" }));
 
-    const { isUniqueViolation } = await import("@f/payments/lib/utils");
-    expect(isUniqueViolation(error)).toBe(true);
-    // the second product was created in Stripe before the insert failed - and then archived
-    expect(productsUpdateCalls).toEqual([{ id: "prod_2", active: false }]);
+    expect(res).toEqual({ kind: "duplicate_name" });
+    expect(productsCreateCalls).toHaveLength(1);
+  });
+
+  test("a same-name plan landing between the pre-check and the insert is still refused, and its product archived", async () => {
+    const { paymentsRepo } = await import("@f/payments/repo");
+    const realGetByName = paymentsRepo.plan.get.byName;
+    let injected = false;
+    paymentsRepo.plan.get.byName = async (...args) => {
+      const res = await realGetByName(...args);
+      if (!injected) {
+        injected = true;
+        await create(onePlan({ name: "Pro" }));
+      }
+      return res;
+    };
+    try {
+      const res = await create(onePlan({ name: "PRO" }));
+      expect(res).toEqual({ kind: "duplicate_name" });
+      expect(productsUpdateCalls).toEqual([{ id: "prod_2", active: false }]);
+    } finally {
+      paymentsRepo.plan.get.byName = realGetByName;
+    }
+  });
+});
+
+describe("addPlan (use-cases/add-plan.ts, DB-only)", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  test("inserts a plan row given pre-made Stripe ids", async () => {
+    const res = await addPlan({
+      ...onePlan({ name: "Pro" }),
+      stripeProductId: "prod_x",
+      stripePriceId: "price_x",
+      annualDiscountPriceId: null,
+    });
+
+    expect(res?.name).toBe("Pro");
+    expect(res?.stripeProductId).toBe("prod_x");
+    expect(res?.stripePriceId).toBe("price_x");
   });
 });

@@ -1,11 +1,12 @@
 /**
- * @description CLI wrapper for `lib/reconcile.ts`'s `run`. See that file for the actual logic.
+ * @description CLI wrapper for `services/reconcile.ts`'s `purchases`. See that file for the
+ * actual logic.
  *
  * Usage: bun run payments:reconcile [--days 14] [--dry-run]
  */
 import { parseArgs } from "node:util";
-import { run, runSubscriptions } from "@f/payments/lib/reconcile";
-import { PROCESSING_TTL_SEC } from "@f/payments/lib/pending-checkout";
+import { paymentsServices } from "@f/payments/services";
+import { PROCESSING_TTL_SEC } from "@f/payments/lib/state/pending-checkout";
 import { logger } from "@/lib/logger";
 import tryCatch from "@vicstack/try-catch";
 
@@ -28,7 +29,7 @@ if (!Number.isInteger(days) || days <= 0) {
 
 // setup or listing failures (bad key, Stripe down) end the run; per-session/per-subscription
 // ones don't - each pass counts its own failures instead
-const [summary, runError] = await tryCatch(run(days, dryRun));
+const [summary, runError] = await tryCatch(paymentsServices.reconcile.purchases(days, dryRun));
 const result = summary ?? { scanned: 0, inserted: 0, updated: 0, failed: 0 };
 if (runError) {
   result.failed++;
@@ -38,7 +39,9 @@ logger.info({ ...result, days, dryRun }, "payments.reconcile.summary");
 
 // a second, independent pass - catches subscription rows a webhook left stale (see
 // lib/reconcile.ts's runSubscriptions), not one-time purchases
-const [subscriptionSummary, subscriptionRunError] = await tryCatch(runSubscriptions(dryRun));
+const [subscriptionSummary, subscriptionRunError] = await tryCatch(
+  paymentsServices.reconcile.subscriptions(dryRun),
+);
 const subscriptionResult = subscriptionSummary ?? { checked: 0, updated: 0, failed: 0 };
 if (subscriptionRunError) {
   subscriptionResult.failed++;

@@ -6,7 +6,7 @@ import { resetRedis } from "@/test-helpers/redis";
 // returns what was true *before* a refund; every later fetch sees the refund. The interleaving two
 // near-simultaneous events (e.g. charge.refunded and charge.dispute.closed for one charge) produce.
 let retrieveCalls = 0;
-mock.module("@f/payments/payment", () => ({
+mock.module("@f/payments/lib/stripe/client", () => ({
   getPaymentProcessor: () => ({
     paymentIntents: {
       retrieve: async (id: string) => {

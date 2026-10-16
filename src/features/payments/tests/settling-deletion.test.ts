@@ -4,7 +4,7 @@ let fakeSessions: Record<string, unknown>[] = [];
 let listParams: Record<string, unknown> | undefined;
 const intentStatuses: Record<string, string> = {};
 
-mock.module("@f/payments/payment", () => ({
+mock.module("@f/payments/lib/stripe/client", () => ({
   getPaymentProcessor: () => ({
     checkout: {
       sessions: {
@@ -20,7 +20,7 @@ mock.module("@f/payments/payment", () => ({
   }),
 }));
 
-import { assertNoSettlingPayments } from "@f/payments/lib/user-deletion";
+import { assertNoSettlingPayments } from "@f/payments/services/account";
 
 const user = { id: "user_1", stripeCustomerId: "cus_1" };
 

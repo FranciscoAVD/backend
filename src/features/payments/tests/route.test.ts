@@ -38,8 +38,8 @@ mock.module("@f/auth/middleware", () => ({
 }));
 
 // Fakes Stripe for POST /checkout's happy path (checkout.sessions.create only - every test
-// seeds the user with a stripeCustomerId already set, so ensureStripeCustomer's own
-// customers.create branch, per use-cases/ensure-customer.ts, never runs). Mirrors the fake
+// seeds the user with a stripeCustomerId already set, so ensureCustomer's own
+// customers.create branch, per services/account.ts, never runs). Mirrors the fake
 // checkout.test.ts already uses for the same Stripe call. Unlike the auth mock above, this
 // one needs no dynamic-import treatment: every caller of getPaymentProcessor() calls it
 // fresh at request time, not eagerly at module-evaluation time.
@@ -58,7 +58,7 @@ let openSessions: { id: string; status: string; metadata: Record<string, string>
 let expiredSessions: string[] = [];
 let expireFails = false;
 let productsCreated = 0;
-mock.module("@f/payments/payment", () => ({
+mock.module("@f/payments/lib/stripe/client", () => ({
   getPaymentProcessor: () => ({
     products: {
       create: async () => ({ id: `prod_route_${++productsCreated}` }),
@@ -100,11 +100,11 @@ import {
   getPendingCheckout,
   getResumableCheckout,
   PENDING_CHECKOUT_TTL_SEC,
-} from "@f/payments/lib/pending-checkout";
+} from "@f/payments/lib/state/pending-checkout";
 import { paymentsRepo } from "@f/payments/repo";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import { redis } from "@/lib/redis";
-import { markUserDeleting } from "@f/payments/lib/deletion-guard";
+import { markUserDeleting } from "@f/payments/lib/state/deletion-guard";
 // dynamic, not static - route.ts calls .use(sessionMiddleware) at module-evaluation
 // time, capturing the function by value into Hono's middleware chain immediately.
 // A static import is hoisted above the mock.module call above regardless of its
@@ -616,8 +616,8 @@ describe("POST /plans", () => {
     const userId = await seedUser();
     setSession({ id: userId, ...admin }, { plan: ["create"] });
     // the concurrent create lands right after this request's own name check
-    const realGetByName = paymentsRepo.plan.getByName;
-    paymentsRepo.plan.getByName = async (...args) => {
+    const realGetByName = paymentsRepo.plan.get.byName;
+    paymentsRepo.plan.get.byName = async (...args) => {
       const res = await realGetByName(...args);
       await seedPlan({ name: "Pro" });
       return res;
@@ -630,7 +630,7 @@ describe("POST /plans", () => {
       });
       expect(res.status).toBe(409);
     } finally {
-      paymentsRepo.plan.getByName = realGetByName;
+      paymentsRepo.plan.get.byName = realGetByName;
     }
   });
 });
@@ -1044,9 +1044,9 @@ describe("POST /checkout", () => {
     // the interleaving: the first ownership check runs before the user's earlier checkout is
     // confirmed, and the webhook then inserts the purchase and clears the slot before this
     // request reserves it
-    const realGetBlocking = paymentsRepo.purchase.getBlockingByPlan;
+    const realGetBlocking = paymentsRepo.purchase.getBlocking;
     let calls = 0;
-    paymentsRepo.purchase.getBlockingByPlan = async (...args) => {
+    paymentsRepo.purchase.getBlocking = async (...args) => {
       if (calls++ === 0) {
         const first = await realGetBlocking(...args);
         await addPurchase(
@@ -1073,13 +1073,13 @@ describe("POST /checkout", () => {
       });
       expect(res.status).toBe(409);
     } finally {
-      paymentsRepo.purchase.getBlockingByPlan = realGetBlocking;
+      paymentsRepo.purchase.getBlocking = realGetBlocking;
     }
 
     // no second checkout for an already-owned plan, and the slot isn't left held
     expect(sessionCreateCalls).toHaveLength(0);
     expect(await getResumableCheckout(userId, plan.id)).toBeNull();
-    const { reservePendingCheckout } = await import("@f/payments/lib/pending-checkout");
+    const { reservePendingCheckout } = await import("@f/payments/lib/state/pending-checkout");
     expect(await reservePendingCheckout(userId, plan.id)).not.toBeNull();
     const auditRows = await db.select().from(paymentAuditLog);
     expect(auditRows.map((row) => row.type)).toEqual(["checkout_blocked_existing_purchase"]);
@@ -1196,7 +1196,7 @@ describe("POST /checkout: reservations, deletion and repeatable plans", () => {
     const plan = await seedPlan({ type: "one_time", repeatable: false });
     setSession({ id: userId, ...regularUser });
     const pointer = `checkout:active:${userId}:${plan.id}`;
-    const { reservePendingCheckout } = await import("@f/payments/lib/pending-checkout");
+    const { reservePendingCheckout } = await import("@f/payments/lib/state/pending-checkout");
     let otherReservation: string | null = null;
     // this request's reservation expires mid-call, and another request claims the slot
     onSessionCreate = async () => {

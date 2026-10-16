@@ -4,7 +4,7 @@ import { resetRedis } from "@/test-helpers/redis";
 
 let sessionCreateCalls: Record<string, unknown>[] = [];
 
-mock.module("@f/payments/payment", () => ({
+mock.module("@f/payments/lib/stripe/client", () => ({
   getPaymentProcessor: () => ({
     checkout: {
       sessions: {
@@ -27,12 +27,9 @@ mock.module("@f/payments/lib/checkout-extensions", () => ({
   getCheckoutSessionParams: async () => extensionParams,
 }));
 
-import {
-  createCheckout,
-  getCheckoutStatus,
-} from "@f/payments/use-cases/checkout";
+import { createCheckout, status as getCheckoutStatus } from "@f/payments/services/checkout";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
-import { getPendingCheckout } from "@f/payments/lib/pending-checkout";
+import { getPendingCheckout } from "@f/payments/lib/state/pending-checkout";
 
 // The session's metadata and the payment intent's, from the last Stripe call. Asserted
 // separately with toEqual, not through one toMatchObject on the whole call: Bun's toMatchObject

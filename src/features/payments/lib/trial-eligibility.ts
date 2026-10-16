@@ -1,6 +1,4 @@
-import { eq } from "drizzle-orm";
-import { db } from "@d/connection";
-import { user as userTable } from "@d/schemas/auth-schema";
+import { paymentsRepo } from "@f/payments/repo";
 import { logger } from "@/lib/logger";
 
 /**
@@ -22,10 +20,7 @@ export async function withholdTrialFromUnverified(data: {
 }): Promise<{ params?: { subscription_data?: { trial_period_days?: number } } }> {
   if (!data.plan.freeTrial) return {};
 
-  const [row] = await db
-    .select({ emailVerified: userTable.emailVerified })
-    .from(userTable)
-    .where(eq(userTable.id, data.user.id));
+  const row = await paymentsRepo.user.getEmailVerified({ userId: data.user.id });
   if (row?.emailVerified) return {};
 
   logger.info({ user: data.user.id, plan: data.plan.name }, "payments.trial.withheld_unverified");

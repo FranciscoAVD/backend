@@ -5,7 +5,7 @@ import { user as userTable } from "@d/schemas/auth-schema";
 import { resetDb, seedUser, seedPlan } from "@/test-helpers/db";
 import { resetRedis } from "@/test-helpers/redis";
 import { env } from "@/env";
-import { isUserDeleting, markUserDeleting } from "@f/payments/lib/deletion-guard";
+import { isUserDeleting, markUserDeleting } from "@f/payments/lib/state/deletion-guard";
 
 // Exercises the payments hooks through better-auth itself (its real internal adapter and HTTP
 // handler), not by calling them directly - what matters is that auth.ts actually wires them in.
@@ -34,7 +34,7 @@ const listOf = <T>(items: T[]) =>
     },
   });
 
-mock.module("@f/payments/payment", () => ({
+mock.module("@f/payments/lib/stripe/client", () => ({
   getPaymentProcessor: () => ({
     customers: {
       create: async () => {
@@ -270,8 +270,8 @@ describe("a Stripe customer created at checkout reaches the cached session", () 
     customerCreateFails = false;
 
     // ...then a one-time checkout creates the customer
-    const { ensureStripeCustomer } = await import("@f/payments/use-cases/ensure-customer");
-    const customerId = await ensureStripeCustomer({ id: session!.user.id, name: "Test", email });
+    const { ensureCustomer } = await import("@f/payments/services/account");
+    const customerId = await ensureCustomer({ id: session!.user.id, name: "Test", email });
     expect(customerCreateCalls).toBe(1);
 
     // the session the stripe plugin reads now carries it

@@ -5,7 +5,7 @@ let retrieveCalls = 0;
 let fakeLatestCharge: Record<string, unknown> | null = null;
 let fakeDispute: Record<string, unknown> | null = null;
 
-mock.module("@f/payments/payment", () => ({
+mock.module("@f/payments/lib/stripe/client", () => ({
   getPaymentProcessor: () => ({
     paymentIntents: {
       retrieve: async (id: string, _options?: { expand?: string[] }) => {
@@ -21,7 +21,7 @@ mock.module("@f/payments/payment", () => ({
   }),
 }));
 
-import { resolveChargeState } from "@f/payments/lib/charge-state";
+import { resolveChargeState } from "@f/payments/lib/stripe/charge-state";
 
 describe("resolveChargeState", () => {
   beforeEach(() => {

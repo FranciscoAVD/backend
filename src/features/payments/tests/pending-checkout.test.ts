@@ -13,7 +13,7 @@ import {
   PENDING_CHECKOUT_TTL_SEC,
   PROCESSING_TTL_SEC,
   RESERVATION_TTL_SEC,
-} from "@f/payments/lib/pending-checkout";
+} from "@f/payments/lib/state/pending-checkout";
 import { redis } from "@/lib/redis";
 import { resetRedis } from "@/test-helpers/redis";
 

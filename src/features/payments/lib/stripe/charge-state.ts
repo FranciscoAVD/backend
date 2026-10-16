@@ -1,5 +1,5 @@
 import type Stripe from "stripe";
-import { getPaymentProcessor } from "@f/payments/payment";
+import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
 import { purchaseUpdateFromCharge, purchaseStatusFromDispute } from "@f/payments/lib/utils";
 import type { Payment } from "@f/payments/lib/types";
 

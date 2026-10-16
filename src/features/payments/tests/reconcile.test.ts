@@ -20,7 +20,7 @@ let retrieved: string[] = [];
 
 // no free local "real Stripe" to run against — the SDK surface run()/reconcile() actually call
 // is faked here via bun:test's mock.module
-mock.module("@f/payments/payment", () => ({
+mock.module("@f/payments/lib/stripe/client", () => ({
   getPaymentProcessor: () => ({
     checkout: { sessions: { list: () => fakeSessions } },
     events: {
@@ -67,7 +67,7 @@ mock.module("@f/payments/payment", () => ({
   }),
 }));
 
-import { run, runSubscriptions } from "@f/payments/lib/reconcile";
+import { purchases as run, subscriptions as runSubscriptions } from "@f/payments/services/reconcile";
 import { getAllPurchases, getPurchaseBySessionAnyUser } from "@f/payments/use-cases/get-purchases";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 

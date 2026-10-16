@@ -3,7 +3,8 @@ import { describe, expect, test } from "bun:test";
 // Spawns the real CLI script as a subprocess, rather than importing it - it's a top-level
 // script that calls process.exit() directly, which would kill the test runner itself if
 // imported in-process. Only the argument-validation branch is covered here: it returns
-// before ever calling run() (lib/reconcile.ts, already unit-tested), so this stays fully
+// before ever calling paymentsServices.reconcile.purchases (services/reconcile.ts, already
+// unit-tested), so this stays fully
 // deterministic and network-free, unlike exercising a real Stripe call would be.
 async function runScript(...args: string[]) {
   const proc = Bun.spawn(
