@@ -1,13 +1,6 @@
-import { Resend } from "resend";
 import { env } from "@/env";
 import { logger } from "@/lib/logger";
-
-let client: Resend | undefined;
-
-function getEmailClient(): Resend {
-  if (!client) client = new Resend(env.RESEND_API_KEY);
-  return client;
-}
+import { getEmailClient } from "@f/email/lib/client";
 
 export type Email = {
   to: string;
