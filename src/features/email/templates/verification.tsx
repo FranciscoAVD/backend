@@ -5,6 +5,7 @@ import {
   Head,
   Heading,
   Html,
+  Img,
   Preview,
   Text,
 } from "@react-email/components";
@@ -19,15 +20,26 @@ import { render } from "@react-email/render";
 type VerificationEmailProps = {
   name: string;
   url: string;
+  /** A public (not localhost) URL - email clients fetch images remotely, never a local path. */
+  logoUrl?: string;
 };
 
-function VerificationEmail({ name, url }: VerificationEmailProps) {
+function VerificationEmail({ name, url, logoUrl }: VerificationEmailProps) {
   return (
     <Html>
       <Head />
       <Preview>Verify your email</Preview>
       <Body>
         <Container>
+          {logoUrl && (
+            <Img
+              src={logoUrl}
+              width="200"
+              height="69"
+              alt="@vicstack/backend"
+              style={{ margin: "0 auto" }}
+            />
+          )}
           <Heading>Verify your email</Heading>
           <Text>{`Hi ${name},`}</Text>
           <Text>Confirm your email address to finish setting up your account.</Text>

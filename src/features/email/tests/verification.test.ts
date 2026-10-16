@@ -23,4 +23,23 @@ describe("verificationEmail", () => {
     expect(html).not.toContain("<img src=x");
     expect(html).toContain("&lt;img");
   });
+
+  test("renders no image when logoUrl is omitted", async () => {
+    const { html } = await verificationEmail({
+      name: "Ada",
+      url: "https://example.test/verify",
+    });
+
+    expect(html).not.toContain("<img");
+  });
+
+  test("renders the logo when logoUrl is given", async () => {
+    const { html } = await verificationEmail({
+      name: "Ada",
+      url: "https://example.test/verify",
+      logoUrl: "https://example.test/logo.png",
+    });
+
+    expect(html).toContain('src="https://example.test/logo.png"');
+  });
 });
