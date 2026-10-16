@@ -50,3 +50,37 @@ describe("rate limiting behind a proxy", () => {
     expect(await buckets(undefined)).toEqual({ floodedGot429: true, otherClient: 429 });
   });
 });
+
+async function envCheck(nodeEnv: string, trustedProxies: string | undefined) {
+  const proc = Bun.spawn(["bun", "run", "src/lib/tests/fixtures/env-check.ts"], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, NODE_ENV: nodeEnv, TRUSTED_PROXIES: trustedProxies ?? "" },
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { stdout, stderr, exitCode };
+}
+
+describe("TRUSTED_PROXIES required in production", () => {
+  test("production without it refuses to start", async () => {
+    const { exitCode, stderr } = await envCheck("production", undefined);
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("TRUSTED_PROXIES must be set in production");
+  });
+
+  test("production with it set starts fine", async () => {
+    const { exitCode, stdout } = await envCheck("production", "10.0.0.0/8");
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("ok");
+  });
+
+  test("development without it is unaffected", async () => {
+    const { exitCode, stdout } = await envCheck("development", undefined);
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("ok");
+  });
+});

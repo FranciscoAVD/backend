@@ -75,3 +75,12 @@ if (!env.DB_URL && setDiscreteDbFields.length < DISCRETE_DB_FIELDS.length) {
     `Set either DB_URL or all of ${DISCRETE_DB_FIELDS.join(", ")} (missing ${missing.join(", ")})`,
   );
 }
+
+if (env.NODE_ENV === "production" && !env.TRUSTED_PROXIES) {
+  throw new Error(
+    "TRUSTED_PROXIES must be set in production: unset, rate limiting trusts a single-value " +
+      "X-Forwarded-For header unconditionally (a client can spoof a new IP per request to dodge " +
+      "sign-in rate limits) and falls back to one shared bucket on a multi-hop header (one " +
+      "client's flood 429s everyone else). Set it to your reverse proxy's IP/CIDR.",
+  );
+}
