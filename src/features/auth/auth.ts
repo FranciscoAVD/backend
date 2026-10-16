@@ -9,6 +9,7 @@ import { redis, incrementWithTTL } from "@/lib/redis";
 import { logger } from "@/lib/logger";
 import { ac, user, admin } from "@f/auth/lib/permissions";
 import { sendVerificationEmail } from "@f/auth/lib/verification-email";
+import { authLoggerBridge } from "@f/auth/lib/log-bridge";
 import { stripe } from "@better-auth/stripe";
 import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
 import { paymentsRepo } from "@f/payments/repo";
@@ -28,6 +29,7 @@ export const auth = betterAuth({
     // lets the rate limiter see the real client through this app's own proxies (see env.ts)
     ipAddress: { trustedProxies: env.TRUSTED_PROXIES },
   },
+  logger: authLoggerBridge,
   // without a `verification.storeInDatabase: true` override, having secondaryStorage
   // set means verification records (email verification, password reset, OAuth state)
   // live only in Redis, never in the DB `verification` table
