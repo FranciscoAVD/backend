@@ -192,9 +192,10 @@ export async function assertNoSettlingPayments(user: DeletedUser): Promise<void>
 }
 
 /**
- * @description The `user.delete.before` hook body: raises the deletion flag, expires open
- * checkouts, refuses the deletion if a payment is still settling, then cancels subscriptions - in
- * that exact order, matching the original inline hook (see `features/auth/auth.ts`).
+ * @description The `user.delete.before` hook body (wired in `features/auth/auth.ts`): raises the
+ * deletion flag, expires open checkouts, refuses the deletion if a payment is still settling, then
+ * cancels subscriptions - in that exact order; see CONTROL_FLOW.md's "Deleting a user" for why each
+ * step depends on the one before it.
  */
 export async function prepareDeletion(user: DeletedUser): Promise<void> {
   await markUserDeleting(user.id);

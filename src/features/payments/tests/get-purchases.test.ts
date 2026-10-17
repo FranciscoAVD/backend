@@ -370,9 +370,9 @@ describe("hasActivePurchase", () => {
     });
 
     // real "now" stands in for "day 45": inside the chained day-30-to-day-60 window.
-    // The old, buggy chaining (comparing against each purchase's own precomputed
-    // expiresAt instead of recomputing from the chain-adjusted start) would end
-    // access at day 40 and report false here.
+    // Comparing against each purchase's own precomputed expiresAt instead of recomputing
+    // from the chain-adjusted start would incorrectly end access at day 40 and report
+    // false here.
     expect(
       await hasActivePurchase({ userId, planId: plan.id }, { overlapping: false }),
     ).toBe(true);
@@ -437,10 +437,10 @@ describe("hasActivePurchase", () => {
     ).toBe(true);
   });
 
-  test("overlapping: false - a pre-migration row (durationDays null, expiresAt already past) isn't treated as lifetime access", async () => {
+  test("overlapping: false - a row with no durationDays snapshot but expiresAt already past isn't treated as lifetime access", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();
-    // durationDays column added after this row existed - never backfilled
+    // no durationDays snapshot at all, and never backfilled with one
     await insertPaidPurchase({
       userId,
       planId: plan.id,

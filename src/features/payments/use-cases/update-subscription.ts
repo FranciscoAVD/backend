@@ -41,8 +41,8 @@ const CORRECTED_FIELDS = [
  * `customer.subscription.updated`, so it's just as mutable as status/period). Never touches
  * `referenceId` or `stripeCustomerId` - those genuinely are identity fields the plugin sets once
  * at creation. `stripeSubscriptionId` is only ever filled in, never changed: a row the plugin
- * created but whose checkout webhook failed has none yet (see `runSubscriptions`), and one that
- * already has an id only matches if it's still that same id.
+ * created but whose checkout webhook failed has none yet (see `services/reconcile.ts`'s
+ * `subscriptions`), and one that already has an id only matches if it's still that same id.
  *
  * A compare-and-set: the row is only written if it still holds exactly what the caller read
  * (`expected`). The reconciler's Stripe snapshot is fetched in bulk, and the plugin writes this

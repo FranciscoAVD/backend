@@ -181,8 +181,8 @@ export type PurchaseAccessWindow = { start: Date; end: Date | null };
  * starts where the earlier ones end, if that's later than its own createdAt (gaps aren't
  * backfilled), and its end is recomputed as `(chain-adjusted start) + its own durationDays` rather
  * than trusting its unchained `expiresAt` - a purchase bought before an earlier one lapses must
- * extend access, not shorten it. A row with no snapshot (written before the column existed) uses
- * the plan's current `overlapping`, which was the old, all-or-nothing behavior. A perpetual
+ * extend access, not shorten it. A row with no snapshot (written before the column existed) falls
+ * back to the plan's current `overlapping`. A perpetual
  * purchase grants access from its own createdAt and doesn't move anything chained after it. Pure,
  * so the access checks and `GET /purchases` share one definition.
  * @param purchases the purchases to evaluate, all of one plan, already filtered to
@@ -203,8 +203,8 @@ export function purchaseAccessWindows(
     const overlapping = p.overlapping ?? plan.overlapping;
     const start: Date =
       !overlapping && chainEnd && chainEnd > p.createdAt ? chainEnd : p.createdAt;
-    // no duration snapshot but an expiry: a pre-migration row written before durationDays
-    // existed - trust its own expiresAt rather than treating a null duration as "never expires"
+    // no duration snapshot but an expiry already set: trust the row's own expiresAt rather than
+    // treating a null duration as "never expires"
     const end =
       p.durationDays == null
         ? (p.expiresAt as Date)

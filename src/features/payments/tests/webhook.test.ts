@@ -94,7 +94,7 @@ beforeEach(async () => {
 });
 
 describe("confirmCheckout", () => {
-  test("a matching Redis entry still records the purchase", async () => {
+  test("a matching checkout row still records the purchase", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();
     await seedCheckout({
@@ -104,7 +104,7 @@ describe("confirmCheckout", () => {
     });
 
     // a real session always carries metadata too (set at checkout time) - this is what
-    // confirmCheckout actually resolves the owner from; the pending entry just cross-checks it
+    // confirmCheckout actually resolves the owner from; the checkout row just cross-checks it
     await confirmCheckout(
       session({ id: "cs_1", metadata: { userId, planId: String(plan.id) } }),
     );
@@ -119,7 +119,7 @@ describe("confirmCheckout", () => {
     ).toBe("completed");
   });
 
-  test("falls back to session metadata when there's no pending Redis entry", async () => {
+  test("falls back to session metadata when there's no checkout row", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();
 
@@ -313,7 +313,7 @@ describe("confirmCheckout", () => {
     expect(audit?.stripeCheckoutSessionId).toBe("cs_dup");
   });
 
-  test("a mismatched userId between the pending entry and the metadata throws and inserts nothing", async () => {
+  test("a mismatched userId between the checkout row and the metadata throws and inserts nothing", async () => {
     const userA = await seedUser();
     const userB = await seedUser();
     const plan = await seedPlan();
@@ -336,7 +336,7 @@ describe("confirmCheckout", () => {
     expect(await getAllPurchases({ userId: userB })).toEqual([]);
   });
 
-  test("a mismatched planId between the pending entry and the metadata throws and inserts nothing", async () => {
+  test("a mismatched planId between the checkout row and the metadata throws and inserts nothing", async () => {
     const userId = await seedUser();
     const planA = await seedPlan();
     const planB = await seedPlan();
@@ -585,7 +585,7 @@ describe("handleStripeEvent", () => {
     expect(await getAllPurchases({ userId })).toEqual([]);
   });
 
-  test("checkout.session.async_payment_failed marks the pending entry failed, not gone", async () => {
+  test("checkout.session.async_payment_failed marks the checkout row failed, not gone", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();
     await seedCheckout({
@@ -601,7 +601,7 @@ describe("handleStripeEvent", () => {
     expect((await paymentsRepo.checkout.get.bySession({ stripeCheckoutSessionId: "cs_1" }))?.status).toBe("failed");
   });
 
-  test("checkout.session.expired marks the pending entry expired, not gone", async () => {
+  test("checkout.session.expired marks the checkout row expired, not gone", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();
     await seedCheckout({
@@ -886,8 +886,9 @@ describe("duplicate charges confirmed concurrently", () => {
       metadata: { userId, planId: String(planId), durationDays: "none", overlapping: "true" },
     }) as unknown as Stripe.Checkout.Session;
 
-  // both confirmations used to check for an owned purchase before either had inserted, so neither
-  // saw the other and the second charge went unflagged
+  // confirm checks for an existing blocking purchase only after its own insert, not before - a
+  // check before the insert would let two concurrent confirmations each see nothing blocking and
+  // both record the duplicate purchase, unflagged
   test("two sessions for a non-repeatable plan confirmed at once always leave an audit entry", async () => {
     for (let i = 0; i < 20; i++) {
       await resetDb();

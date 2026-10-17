@@ -13,7 +13,8 @@ describe("rejectRetiredPlanUpgrade", () => {
   });
 
   // the plugin matches with JS's toLowerCase, under which the Kelvin sign folds to "k" -
-  // a Postgres lower() under a C collation leaves it alone, so it used to slip through
+  // a Postgres lower() under a C collation leaves it alone, so matching that way would let
+  // this name slip past the check
   test("blocks a name that only JS's case folding maps onto the retired plan", async () => {
     await seedPlan({ name: "Pack", type: "recurring", interval: "month", active: false });
     expect(rejectRetiredPlanUpgrade(upgrade("PACK"))).rejects.toThrow();

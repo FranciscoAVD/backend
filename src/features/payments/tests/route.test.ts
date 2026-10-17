@@ -162,8 +162,8 @@ const fakeStripeClient = () => ({
 mock.module("@f/payments/lib/stripe/client", () => ({
   getPaymentProcessor: fakeStripeClient,
   // ensureCustomer dynamically imports @f/auth/auth, which hands this to the stripe plugin at
-  // module-evaluation time - previously never exercised here, since every test seeded a
-  // stripeCustomerId already set (see the comment above). None of this file's tests reach the
+  // module-evaluation time - exercised only by the handful of tests below that don't seed a
+  // stripeCustomerId already (see the comment above). None of this file's tests reach the
   // plugin's own checkout.session.completed subscription lookup, so the same fake client is
   // enough; getPaymentProcessorForAuthPlugin's own short-circuit behavior is covered directly
   // against the real implementation in stripe-client.test.ts
@@ -195,7 +195,6 @@ import { eq } from "drizzle-orm";
 import { paymentsRepo } from "@f/payments/repo";
 import { RESERVATION_TTL_SEC } from "@f/payments/lib/constants";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
-import { redis } from "@/lib/redis";
 import { markUserDeleting } from "@f/payments/lib/state/deletion-guard";
 // dynamic, not static - route.ts calls .use(sessionMiddleware) at module-evaluation
 // time, capturing the function by value into Hono's middleware chain immediately.
@@ -1671,7 +1670,7 @@ describe("checkouts expired by a plan edit can't be resumed", () => {
   });
 
   // Stripe's checkout.session.expired webhook can lag (or be retried for days in an outage); until
-  // it lands, the pending entry used to still say `open` and resume handed back a dead URL
+  // it lands, the checkout row would still say `open` and resume would hand back a dead URL
   for (const repeatable of [false, true])
     test(`${repeatable ? "repeatable" : "non-repeatable"}: the next POST /checkout creates a new session`, async () => {
       const adminId = await seedUser();

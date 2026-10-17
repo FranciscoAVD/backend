@@ -120,7 +120,7 @@ export const purchase = pgTable(
       .$onUpdate(() => new Date()),
   },
   // (user_id, plan_id) serves the per-plan lookups (access checks, the repeat-purchase guard)
-  // and, as its leading column, every user_id-only lookup the old single-column index did
+  // and, as its leading column, every user_id-only lookup too
   (t) => [index("purchase_user_plan_idx").on(t.userId, t.planId)],
 );
 

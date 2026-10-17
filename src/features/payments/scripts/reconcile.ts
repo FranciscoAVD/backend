@@ -38,7 +38,7 @@ if (runError) {
 logger.info({ ...result, days, dryRun }, "payments.reconcile.summary");
 
 // a second, independent pass - catches subscription rows a webhook left stale (see
-// lib/reconcile.ts's runSubscriptions), not one-time purchases
+// services/reconcile.ts's `subscriptions`), not one-time purchases
 const [subscriptionSummary, subscriptionRunError] = await tryCatch(
   paymentsServices.reconcile.subscriptions(dryRun),
 );

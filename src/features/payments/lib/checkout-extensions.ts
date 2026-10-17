@@ -14,11 +14,11 @@
  * What always wins over whatever this returns, and why (see `createCheckout` for where):
  * - `mode`, `customer`, `client_reference_id`, `success_url`, `cancel_url` - this flow's own
  *   identity, not something an extension has a reason to change.
- * - `expires_at` - set from `CHECKOUT_SESSION_EXPIRY_SEC`, deliberately shorter than the Redis
- *   entry's own TTL (`PENDING_CHECKOUT_TTL_SEC`) by a margin, so the Redis entry always outlives
- *   the Stripe session rather than matching it: `checkout.session.expired`'s webhook can lag, and
+ * - `expires_at` - set from `CHECKOUT_SESSION_EXPIRY_SEC`, deliberately shorter than the checkout
+ *   row's own deadline (`PENDING_CHECKOUT_TTL_SEC`) by a margin, so the row always outlives the
+ *   Stripe session rather than matching it: `checkout.session.expired`'s webhook can lag, and
  *   without the margin a session Stripe has already expired but whose webhook hasn't landed yet
- *   would still show `open` in Redis.
+ *   would still read `open`.
  * - the `userId`/`planId`/`durationDays`/`overlapping` keys of `metadata` and `payment_intent_data.metadata` -
  *   `confirmCheckout` and the reconciler depend on these to resolve a session back to a purchase
  *   at all. Additional keys *are* merged in, so an app can still tag a session with its own data
