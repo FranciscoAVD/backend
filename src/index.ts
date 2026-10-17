@@ -6,7 +6,7 @@ import { secureHeaders } from "hono/secure-headers";
 import { bodyLimit } from "hono/body-limit";
 import { HTTPException } from "hono/http-exception";
 import { env } from "@/env";
-import { logger } from "@/lib/logger";
+import { logger, httpLoggerOptions } from "@/lib/logger";
 import HTTP from "@vicstack/http";
 import authRoute from "@f/auth/route";
 import todoRoute from "@f/todo/route";
@@ -27,7 +27,7 @@ const apiApp = new Hono<PinoLoggerEnv>()
   .basePath("/api")
   // before pinoLogger, so every request/response log line carries this request's id
   .use(requestId())
-  .use(pinoLogger({ pino: logger }))
+  .use(pinoLogger({ pino: logger, http: httpLoggerOptions }))
   .use(secureHeaders())
   .use(
     "*",

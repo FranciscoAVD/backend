@@ -2,7 +2,7 @@ import { describe, expect, test, beforeEach, mock } from "bun:test";
 import { Hono } from "hono";
 import { pinoLogger, type Env as PinoLoggerEnv } from "hono-pino";
 import { requestId } from "hono/request-id";
-import { logger } from "@/lib/logger";
+import { logger, httpLoggerOptions } from "@/lib/logger";
 import { resetDb, seedUser, seedPlan, seedSubscription } from "@/test-helpers/db";
 import { resetRedis } from "@/test-helpers/redis";
 
@@ -163,7 +163,7 @@ const { default: paymentsApp } = await import("@f/payments/route");
 // src/index.ts's root app, which does. Re-wire the same thing here so c.var.logger exists.
 const app = new Hono<PinoLoggerEnv>()
   .use(requestId())
-  .use(pinoLogger({ pino: logger }))
+  .use(pinoLogger({ pino: logger, http: httpLoggerOptions }))
   .route("/", paymentsApp);
 
 const jsonHeaders = { "Content-Type": "application/json" };
