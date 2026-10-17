@@ -68,7 +68,10 @@ resolution, session creation, and the final deletion recheck - is one function,
 `services.checkout.start` (`services/checkout.ts`), called by `route.ts`'s
 `POST /checkout` handler. The handler itself only translates `start`'s returned
 `{ kind }` into the right HTTP status/message - it holds no business logic of
-its own.
+its own. Everything from the reservation/lock onward runs in one `try`, with a
+`finally` that always releases it - a DB or Stripe call failing anywhere past
+that point frees the slot immediately rather than leaving it locked for the
+rest of its 5-minute TTL.
 
 ```mermaid
 flowchart TD
@@ -104,10 +107,10 @@ flowchart TD
     Recheck -- "owned" --> Release409["release the reservation,\naudit log + { kind: owned } -> route.ts: 409"]
     Recheck -- "not owned" --> EnsureCustomer
 
-    EnsureCustomer["services.account.ensureCustomer(id, name, email)\n(always re-reads the live user row itself -\nnever trusts a caller-supplied id, which can\nbe a stale cached session - see below)"] -->|stripe/db error| Err500c["throws -> route.ts: 500\n(releases the reservation)"]
+    EnsureCustomer["services.account.ensureCustomer(id, name, email)\n(always re-reads the live user row itself -\nnever trusts a caller-supplied id, which can\nbe a stale cached session - see below)"] -->|stripe/db error| Err500c["throws -> route.ts: 500\n(releases the reservation/create-lock)"]
     EnsureCustomer --> CreateSession
 
-    CreateSession["createCheckout (services/checkout.ts):\nstripe.checkout.sessions.create\n(mode: payment, customer: stripeCustomerId,\nmetadata: userId, planId, durationDays snapshot)"] -->|stripe error| Err500d["throws -> route.ts: 500\n(releases the reservation)"]
+    CreateSession["createCheckout (services/checkout.ts):\nstripe.checkout.sessions.create\n(mode: payment, customer: stripeCustomerId,\nmetadata: userId, planId, durationDays snapshot)"] -->|stripe error| Err500d["throws -> route.ts: 500\n(releases the reservation/create-lock)"]
     CreateSession --> SavePending["savePendingCheckout (lib/state/pending-checkout.ts)\n(Redis key checkout:sessionId + a\ncheckout:active:userId:planId pointer,\nreplacing the reservation - only if the\nslot still holds it;\nstatus: open, the session url, TTL 24h)"]
     SavePending -->|redis error| Err500f["throws -> route.ts: 500\n(harmless - the Stripe session\nstill expires on its own)"]
     SavePending -- "reservation lapsed,\nslot taken" --> Lost["expire the new session,\n{ kind: slot_taken } -> route.ts: 409"]
