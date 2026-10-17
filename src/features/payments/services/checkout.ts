@@ -180,12 +180,6 @@ export async function start(
       return { kind: "slot_taken" };
     }
     reservation = token;
-
-    const blockedAfterReserve = await blockIfOwned();
-    if (blockedAfterReserve) {
-      await release();
-      return blockedAfterReserve;
-    }
   } else {
     const resumed = await resume();
     if (resumed) return resumed;
@@ -195,48 +189,56 @@ export async function start(
     createLock = token;
   }
 
-  const stripeCustomerId = await ensureCustomer({
-    id: user.userId,
-    name: user.name,
-    email: user.email,
-  });
-
-  const [res, error] = await tryCatch(
-    createCheckout(
-      { userId: user.userId, stripeCustomerId },
-      plan,
-      { reservation: reservation ?? undefined },
-    ),
-  );
-
-  if (error) {
-    if (error instanceof CheckoutSlotLostError) {
-      logger.warn({ user: user.userId, plan: plan.id }, "payments.checkout.slot_lost");
-      await release();
-      return { kind: "slot_taken" };
+  // everything below holds the reservation/create-lock, which must always be released - on a
+  // thrown error (a DB/Stripe call failing) just as much as on a normal return, or the slot sits
+  // locked until RESERVATION_TTL_SEC expires it
+  try {
+    if (!plan.repeatable) {
+      const blockedAfterReserve = await blockIfOwned();
+      if (blockedAfterReserve) return blockedAfterReserve;
     }
+
+    const stripeCustomerId = await ensureCustomer({
+      id: user.userId,
+      name: user.name,
+      email: user.email,
+    });
+
+    const [res, error] = await tryCatch(
+      createCheckout(
+        { userId: user.userId, stripeCustomerId },
+        plan,
+        { reservation: reservation ?? undefined },
+      ),
+    );
+
+    if (error) {
+      if (error instanceof CheckoutSlotLostError) {
+        logger.warn({ user: user.userId, plan: plan.id }, "payments.checkout.slot_lost");
+        return { kind: "slot_taken" };
+      }
+      throw error;
+    }
+
+    // the deletion flag again, now the session exists: a deletion that started after the check
+    // above may have listed the user's open sessions before this one existed
+    const [deletingNow, recheckError] = await tryCatch(isUserDeleting(user.userId));
+    if (recheckError)
+      logger.warn({ err: recheckError, user: user.userId }, "payments.checkout.deletion_guard");
+    if (deletingNow) {
+      const [, expireError] = await tryCatch(expire(res.sessionId));
+      if (expireError)
+        logger.error(
+          { err: expireError, user: user.userId, session: res.sessionId },
+          "payments.checkout.deletion_guard.expire",
+        );
+      return { kind: "deleting" };
+    }
+
+    return { kind: "created", sessionId: res.sessionId, url: res.url };
+  } finally {
     await release();
-    throw error;
   }
-  reservation = null;
-  await release();
-
-  // the deletion flag again, now the session exists: a deletion that started after the check
-  // above may have listed the user's open sessions before this one existed
-  const [deletingNow, recheckError] = await tryCatch(isUserDeleting(user.userId));
-  if (recheckError)
-    logger.warn({ err: recheckError, user: user.userId }, "payments.checkout.deletion_guard");
-  if (deletingNow) {
-    const [, expireError] = await tryCatch(expire(res.sessionId));
-    if (expireError)
-      logger.error(
-        { err: expireError, user: user.userId, session: res.sessionId },
-        "payments.checkout.deletion_guard.expire",
-      );
-    return { kind: "deleting" };
-  }
-
-  return { kind: "created", sessionId: res.sessionId, url: res.url };
 }
 
 /**

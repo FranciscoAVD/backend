@@ -38,17 +38,20 @@ mock.module("@f/auth/middleware", () => ({
     },
 }));
 
-// Fakes Stripe for POST /checkout's happy path (checkout.sessions.create only - every test
-// seeds the user with a stripeCustomerId already set, so ensureCustomer's own
-// customers.create branch, per services/account.ts, never runs). Mirrors the fake
-// checkout.test.ts already uses for the same Stripe call. Unlike the auth mock above, this
-// one needs no dynamic-import treatment: every caller of getPaymentProcessor() calls it
-// fresh at request time, not eagerly at module-evaluation time.
+// Fakes Stripe for POST /checkout's happy path (checkout.sessions.create, and - for the handful
+// of tests below that don't seed a stripeCustomerId - customers.create via ensureCustomer, per
+// services/account.ts). Mirrors the fake checkout.test.ts already uses for the same Stripe call.
+// Unlike the auth mock above, this one needs no dynamic-import treatment: every caller of
+// getPaymentProcessor() calls it fresh at request time, not eagerly at module-evaluation time.
 let sessionCreateCalls: Record<string, unknown>[] = [];
 // knobs for POST /checkout's concurrency/failure tests: a delay widens the window between the
 // guard and the Stripe call, as a real network round-trip would; a failure exercises cleanup
 let sessionCreateDelayMs = 0;
 let sessionCreateFails = false;
+// ensureCustomer's own customers.create, for a user with no stripeCustomerId yet - most of
+// POST /checkout's tests avoid this branch entirely by seeding one, see the comment above
+let customerCreateCalls = 0;
+let customerCreateFails = false;
 // runs inside checkout.sessions.create, to interleave another request's work with this one's
 let onSessionCreate: (() => Promise<void>) | null = null;
 // PATCH /plans/:id's retire/reactivate mirroring onto the plan's Stripe prices
@@ -75,74 +78,90 @@ let refundsByIdempotencyKey: Record<string, { id: string }> = {};
 // makes paymentIntents.retrieve throw, simulating refund()'s post-refund sync step failing after
 // the Stripe refund itself already succeeded
 let syncFails = false;
-mock.module("@f/payments/lib/stripe/client", () => ({
-  getPaymentProcessor: () => ({
-    products: {
-      create: async () => ({ id: `prod_route_${++productsCreated}` }),
-      update: async (id: string) => ({ id }),
+const fakeStripeClient = () => ({
+  customers: {
+    create: async () => {
+      if (customerCreateFails) throw new Error("Stripe is down");
+      customerCreateCalls++;
+      return { id: "cus_route_fake" };
     },
-    prices: {
-      create: async () => ({ id: `price_route_${crypto.randomUUID()}` }),
-      update: async (id: string, params: { active: boolean }) => {
-        if (priceUpdateFails) throw new Error("Stripe is down");
-        priceUpdateCalls.push({ id, active: params.active });
-        return { id, active: params.active };
+  },
+  products: {
+    create: async () => ({ id: `prod_route_${++productsCreated}` }),
+    update: async (id: string) => ({ id }),
+  },
+  prices: {
+    create: async () => ({ id: `price_route_${crypto.randomUUID()}` }),
+    update: async (id: string, params: { active: boolean }) => {
+      if (priceUpdateFails) throw new Error("Stripe is down");
+      priceUpdateCalls.push({ id, active: params.active });
+      return { id, active: params.active };
+    },
+  },
+  checkout: {
+    sessions: {
+      list: (params: { status?: string }) =>
+        openSessions.filter((s) => !params.status || s.status === params.status),
+      expire: async (id: string) => {
+        if (expireFails) throw new Error("Stripe is down");
+        expiredSessions.push(id);
+        return { id, status: "expired" };
+      },
+      create: async (args: Record<string, unknown>) => {
+        sessionCreateCalls.push(args);
+        if (sessionCreateDelayMs) await Bun.sleep(sessionCreateDelayMs);
+        if (sessionCreateFails) throw new Error("Stripe is down");
+        await onSessionCreate?.();
+        return { id: "cs_test_fake", url: "https://checkout.stripe.com/fake" };
       },
     },
-    checkout: {
-      sessions: {
-        list: (params: { status?: string }) =>
-          openSessions.filter((s) => !params.status || s.status === params.status),
-        expire: async (id: string) => {
-          if (expireFails) throw new Error("Stripe is down");
-          expiredSessions.push(id);
-          return { id, status: "expired" };
-        },
-        create: async (args: Record<string, unknown>) => {
-          sessionCreateCalls.push(args);
-          if (sessionCreateDelayMs) await Bun.sleep(sessionCreateDelayMs);
-          if (sessionCreateFails) throw new Error("Stripe is down");
-          await onSessionCreate?.();
-          return { id: "cs_test_fake", url: "https://checkout.stripe.com/fake" };
-        },
-      },
-    },
-    refunds: {
-      create: async (
-        params: { payment_intent: string; amount?: number; reason?: string },
-        options: { idempotencyKey: string },
-      ) => {
-        const cached = refundsByIdempotencyKey[options.idempotencyKey];
-        if (cached) return cached;
+  },
+  refunds: {
+    create: async (
+      params: { payment_intent: string; amount?: number; reason?: string },
+      options: { idempotencyKey: string },
+    ) => {
+      const cached = refundsByIdempotencyKey[options.idempotencyKey];
+      if (cached) return cached;
 
-        if (refundRejectError) throw refundRejectError;
-        if (refundFails) throw new Error("Stripe is down");
-        refundCalls.push({
-          paymentIntent: params.payment_intent,
-          amount: params.amount,
-          reason: params.reason,
-        });
-        const charge = fakeCharges[params.payment_intent];
-        if (charge) {
-          charge.amount_refunded = Math.min(
-            charge.amount,
-            charge.amount_refunded + (params.amount ?? charge.amount),
-          );
-          charge.refunded = charge.amount_refunded >= charge.amount;
-        }
-        const refund = { id: `re_${crypto.randomUUID()}` };
-        refundsByIdempotencyKey[options.idempotencyKey] = refund;
-        return refund;
-      },
+      if (refundRejectError) throw refundRejectError;
+      if (refundFails) throw new Error("Stripe is down");
+      refundCalls.push({
+        paymentIntent: params.payment_intent,
+        amount: params.amount,
+        reason: params.reason,
+      });
+      const charge = fakeCharges[params.payment_intent];
+      if (charge) {
+        charge.amount_refunded = Math.min(
+          charge.amount,
+          charge.amount_refunded + (params.amount ?? charge.amount),
+        );
+        charge.refunded = charge.amount_refunded >= charge.amount;
+      }
+      const refund = { id: `re_${crypto.randomUUID()}` };
+      refundsByIdempotencyKey[options.idempotencyKey] = refund;
+      return refund;
     },
-    paymentIntents: {
-      retrieve: async (id: string) => {
-        if (syncFails) throw new Error("Stripe is down");
-        return { id, latest_charge: fakeCharges[id] ?? null };
-      },
+  },
+  paymentIntents: {
+    retrieve: async (id: string) => {
+      if (syncFails) throw new Error("Stripe is down");
+      return { id, latest_charge: fakeCharges[id] ?? null };
     },
-    disputes: { list: () => ({ data: [] }) },
-  }),
+  },
+  disputes: { list: () => ({ data: [] }) },
+});
+
+mock.module("@f/payments/lib/stripe/client", () => ({
+  getPaymentProcessor: fakeStripeClient,
+  // ensureCustomer dynamically imports @f/auth/auth, which hands this to the stripe plugin at
+  // module-evaluation time - previously never exercised here, since every test seeded a
+  // stripeCustomerId already set (see the comment above). None of this file's tests reach the
+  // plugin's own checkout.session.completed subscription lookup, so the same fake client is
+  // enough; getPaymentProcessorForAuthPlugin's own short-circuit behavior is covered directly
+  // against the real implementation in stripe-client.test.ts
+  getPaymentProcessorForAuthPlugin: fakeStripeClient,
 }));
 
 // mocks @f/email/lib/client, not @f/email/send - see CLAUDE.md's testing section for why.
@@ -1262,6 +1281,8 @@ describe("POST /checkout: reservations, deletion and repeatable plans", () => {
     onSessionCreate = null;
     expiredSessions = [];
     expireFails = false;
+    customerCreateCalls = 0;
+    customerCreateFails = false;
   });
 
   const checkout = (planId: number) =>
@@ -1379,6 +1400,29 @@ describe("POST /checkout: reservations, deletion and repeatable plans", () => {
 
     expect((await checkout(plan.id)).status).toBe(500);
     sessionCreateFails = false;
+    expect((await checkout(plan.id)).status).toBe(200);
+  });
+
+  test("non-repeatable plan: a failed customer lookup frees the reservation for a retry", async () => {
+    // no stripeCustomerId, so ensureCustomer reaches customers.create
+    const userId = await seedUser();
+    const plan = await seedPlan({ type: "one_time", repeatable: false });
+    setSession({ id: userId, ...regularUser });
+    customerCreateFails = true;
+
+    expect((await checkout(plan.id)).status).toBe(500);
+    customerCreateFails = false;
+    expect((await checkout(plan.id)).status).toBe(200);
+  });
+
+  test("repeatable plan: a failed customer lookup frees the create-lock for a retry", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan({ type: "one_time", repeatable: true });
+    setSession({ id: userId, ...regularUser });
+    customerCreateFails = true;
+
+    expect((await checkout(plan.id)).status).toBe(500);
+    customerCreateFails = false;
     expect((await checkout(plan.id)).status).toBe(200);
   });
 });
