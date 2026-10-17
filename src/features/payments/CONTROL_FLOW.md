@@ -21,57 +21,96 @@ flowchart TD
 
 `route.ts`'s handler, in the order the checks actually run. The two guards under
 `plan.repeatable` close the realistic "two tabs" race (a user opening a second
-checkout before the first confirms). The second one is an atomic reservation
-(`SET NX` on the `checkout:active:userId:planId` pointer), not a check followed by
-a later write, so two concurrent requests can't both get past it and both reach
-Stripe. They still can't close every race - see `services.fulfillment.confirm`'s
-own re-check further down for the narrower one that reaches the webhook anyway.
+checkout before the first confirms). The second one is an atomic claim on the
+`checkout` table, not a check followed by a later write, so two concurrent
+requests can't both get past it and both reach Stripe. They still can't close
+every race - see `services.fulfillment.confirm`'s own re-check further down for
+the narrower one that reaches the webhook anyway.
 
-Ownership is checked twice for a non-repeatable plan: once before reserving,
-as a fast path, and again once the reservation is held. The second check closes
+### The slot: one `checkout` row per in-flight purchase
+
+An in-flight checkout is a row in the `checkout` table
+(`db/schemas/payment-schema.ts`), from the moment `POST /checkout` claims it
+until Stripe settles it. A `purchase` row is still only written once the payment
+confirms; the checkout row is what that confirmation supersedes.
+
+The invariant that matters - *one active checkout per (user, plan) slot* - is a
+partial unique index, `checkout_active_slot` on `(user_id, plan_id, slot)
+WHERE status IN ('reserving', 'open', 'processing')`, not something any code
+enforces by hand. Reaching a terminal status (`failed`, `expired`, `completed`)
+takes the row out of the predicate, which *is* how the slot is freed - there's
+nothing separate to clear.
+
+`slot` is `1` while a creation is in flight, for both plan types:
+
+| phase | non-repeatable | repeatable |
+| --- | --- | --- |
+| `reserving` | `slot = 1` | `slot = 1` - this is the creation lock |
+| `open` / `processing` | `slot = 1` | `slot = NULL` - released; buying again is the point |
+| terminal | outside the index predicate | outside the index predicate |
+
+So a repeatable plan is still held to one Stripe call per (user, plan) in flight
+(without that, every request created a new Checkout Session, and any number of
+sign-ups could spend the account's shared Stripe API rate limit, starving the
+webhook handler's own Stripe calls), but its *open* session doesn't block the
+next purchase, and a settling `processing` one doesn't either. Nulls never
+collide in a unique index, which is what makes one column do both jobs.
+
+`expires_at` carries the deadline for whatever status the row is in: minutes
+while `reserving` (`RESERVATION_TTL_SEC`), the session's own lifetime once `open`
+(`PENDING_CHECKOUT_TTL_SEC`), up to two weeks while `processing`
+(`PROCESSING_TTL_SEC`, for delayed payment methods). A row past its deadline -
+the request died mid-checkout, or Stripe's `checkout.session.expired` webhook
+never landed - would otherwise hold the slot forever, so `claimCheckoutSlot`
+sweeps that one slot's stale rows to `expired` before it inserts
+(`expireStaleCheckouts`). The insert itself is the gate: `INSERT ... ON CONFLICT
+DO NOTHING RETURNING id` against the partial index lets exactly one of any number
+of concurrent requests through, and no row back means the slot is genuinely held.
+
+The claimed row's own `id` is the reservation token. A claim can lapse while
+Stripe is slow and be swept by another request, which then inserts a *fresh* row
+with a different id - so `openCheckout` only ever opens a row still `reserving`
+under the claimed id. If it matches nothing, the new session is expired and
+withheld and the request answers 409 (`CheckoutSlotLostError`). The Stripe
+client's timeout and retries (`STRIPE_TIMEOUT_MS`, `STRIPE_MAX_NETWORK_RETRIES`
+in `lib/constants.ts`) are set so two calls fit inside `RESERVATION_TTL_SEC`
+anyway; a test pins that budget.
+
+### The two guards
+
+Ownership is checked twice for a non-repeatable plan: once before claiming,
+as a fast path, and again once the slot is held. The second check closes
 a gap the first leaves open - the user's earlier checkout confirming in between,
-which inserts the purchase and then frees the slot for this request to reserve.
+which inserts the purchase and then frees the slot for this request to claim.
 Because `services.fulfillment.confirm` writes the purchase *before* it frees the
-slot, any request that reserves a freed slot is guaranteed to see the purchase.
+slot (its `markCompleted` call is last), any request that claims a freed slot is
+guaranteed to see the purchase.
 
-When the slot is held by the same user's still-`open` session, the reservation
-fails but the request isn't refused: it gets that session's id and URL back
-(`getResumableCheckout`, from the url stored on the pending entry). That's the
+When the slot is held by the same user's still-`open` session, the claim fails
+but the request isn't refused: it gets that session's id and URL back
+(`paymentsRepo.checkout.get.resumable`, from the `url` on the row). That's the
 common case - a buyer who closed the Stripe tab and clicked buy again - and
 without it they'd be locked out until the session expired, up to 24h. It's still
 one session per (user, plan), so the guard isn't weakened. A `processing`
-session (already paid, settling) or an in-flight reservation (no session yet)
-still answers 409, as does a pending entry written before urls were stored.
-
-A repeatable plan has no reservation (buying it again is the point, and a
-settling `processing` purchase mustn't block the next one), but it still reuses
-the user's open session for that plan, and a short `checkout:creating:userId:planId`
-lock (`acquireCreateLock`) keeps concurrent requests for the same (user, plan) to
-a single Stripe call - the rest answer 409. Without both, every request created a
-new Checkout Session, so any number of sign-ups could spend the account's shared
-Stripe API rate limit, starving the webhook handler's own Stripe calls.
-
-The reservation is a TTL, so it can lapse while Stripe is slow - and another
-request can then claim the freed slot. `savePendingCheckout` is therefore a
-compare-and-set against the reservation token: if the slot no longer holds it,
-nothing is written, the new session is expired and withheld, and the request
-answers 409. The Stripe client's timeout and retries (`STRIPE_TIMEOUT_MS`,
-`STRIPE_MAX_NETWORK_RETRIES` in `lib/constants.ts`) are set so two calls fit
-inside the TTL anyway; a test pins that budget.
+session (already paid, settling), a row still `reserving` (no session yet), and
+one past its own `expires_at` all answer 409 instead. A repeatable plan checks
+for a resumable session *first*, before claiming, since its own open session no
+longer holds the slot.
 
 Finally, the handler checks the user-deletion flag (`lib/state/deletion-guard.ts`)
 twice: before doing anything, and again once the session exists, expiring and
 withholding it if the user's deletion started in between. See "Deleting a user".
 
-All of this - the plan fetch, both guards, the reservation/lock, customer
-resolution, session creation, and the final deletion recheck - is one function,
+All of this - the plan fetch, both guards, the claim, customer resolution,
+session creation, and the final deletion recheck - is one function,
 `services.checkout.start` (`services/checkout.ts`), called by `route.ts`'s
 `POST /checkout` handler. The handler itself only translates `start`'s returned
 `{ kind }` into the right HTTP status/message - it holds no business logic of
-its own. Everything from the reservation/lock onward runs in one `try`, with a
-`finally` that always releases it - a DB or Stripe call failing anywhere past
-that point frees the slot immediately rather than leaving it locked for the
-rest of its 5-minute TTL.
+its own. Everything from the claim onward runs in one `try`, with a `finally`
+that always releases it (`releaseCheckoutReservation` deletes the row while it's
+still `reserving`, and is a no-op once it's been opened) - a DB or Stripe call
+failing anywhere past that point frees the slot immediately rather than leaving
+it held until the next claim sweeps it 5 minutes later.
 
 ```mermaid
 flowchart TD
@@ -82,13 +121,13 @@ flowchart TD
     PlanExists -- yes --> IsOneTime{"plan.type === one_time?"}
     IsOneTime -- no --> Unprocessable["{ kind: wrong_type } -> route.ts: 422"]
     IsOneTime -- yes --> Deleting{"user's deletion\nunder way?"}
-    Deleting -->|redis error| Err500g["throws -> route.ts: 500"]
+    Deleting -->|redis error| Err500g["throws -> route.ts: 500\n(the deletion flag is the one piece\nof this flow still in Redis)"]
     Deleting -- yes --> Conflict3["{ kind: deleting } -> route.ts: 409"]
     Deleting -- no --> Repeatable{"plan.repeatable?"}
 
     Repeatable -- yes --> ResumeRep{"this user's open session\nfor this plan?"}
     ResumeRep -- yes --> Resume200b["{ kind: resumed } -> route.ts: 200"]
-    ResumeRep -- no --> Lock["acquireCreateLock(userId, planId)\n(lib/state/pending-checkout.ts;\nSET NX, TTL 5 min, freed after the call)"]
+    ResumeRep -- no --> Lock["paymentsRepo.checkout.claim(userId, planId)\n(the same claim as below - for a repeatable plan\nthe slot is only held while creating)"]
     Lock -- "held elsewhere" --> Conflict4["{ kind: slot_taken } -> route.ts: 409"]
     Lock -- acquired --> EnsureCustomer
     Repeatable -- no --> CheckOwned["paymentsRepo.purchase.getBlocking(userId, planId)\n(paid or disputed - only refunded frees the slot)"]
@@ -96,24 +135,24 @@ flowchart TD
     CheckOwned --> AlreadyOwns{"a blocking purchase\nalready exists?"}
     AlreadyOwns -- yes --> Audit1["audit log: checkout_blocked_existing_purchase\n(best-effort)"]
     Audit1 --> Conflict["{ kind: owned } -> route.ts: 409"]
-    AlreadyOwns -- no --> Reserve["reservePendingCheckout(userId, planId)\n(lib/state/pending-checkout.ts; atomic SET NX\nof the Redis pointer to a reserving:token\nplaceholder, TTL 5 min; clears a stale\npointer and retries)"]
-    Reserve -->|redis error| Err500e["throws -> route.ts: 500"]
-    Reserve --> Claimed{"slot claimed?\n(no open/processing checkout\nor other live reservation)"}
-    Claimed -- no --> Resumable{"getResumableCheckout:\nslot held by this user's own\nopen session (with a stored url)?"}
+    AlreadyOwns -- no --> Reserve["paymentsRepo.checkout.claim(userId, planId)\n(use-cases/claim-checkout.ts: sweeps this slot's\nrows past their expires_at, then INSERT a\nreserving row ... ON CONFLICT DO NOTHING\nagainst the checkout_active_slot index)"]
+    Reserve -->|db error| Err500e["throws -> route.ts: 500"]
+    Reserve --> Claimed{"row returned?\n(no open/processing checkout\nor other live claim)"}
+    Claimed -- no --> Resumable{"checkout.get.resumable:\nthis user's own open, unexpired\nsession for the plan (with a url)?"}
     Resumable -- yes --> Resume200["{ kind: resumed, sessionId, url }\n-> route.ts: 200\n(no new Stripe session, no audit entry)"]
-    Resumable -- "no (processing, a live reservation,\nor a pre-url entry)" --> Audit2["audit log: checkout_blocked_pending_checkout\n(best-effort)"]
+    Resumable -- "no (processing, still reserving,\nlapsed, or no url)" --> Audit2["audit log: checkout_blocked_pending_checkout\n(best-effort)"]
     Audit2 --> Conflict2["{ kind: slot_taken } -> route.ts: 409"]
-    Claimed -- yes --> Recheck["getBlocking again, now the slot is held\n(the user's earlier checkout may have confirmed\nbetween the first check and the reservation)"]
-    Recheck -- "owned" --> Release409["release the reservation,\naudit log + { kind: owned } -> route.ts: 409"]
+    Claimed -- yes --> Recheck["getBlocking again, now the slot is held\n(the user's earlier checkout may have confirmed\nbetween the first check and the claim)"]
+    Recheck -- "owned" --> Release409["release the claimed row,\naudit log + { kind: owned } -> route.ts: 409"]
     Recheck -- "not owned" --> EnsureCustomer
 
-    EnsureCustomer["services.account.ensureCustomer(id, name, email)\n(always re-reads the live user row itself -\nnever trusts a caller-supplied id, which can\nbe a stale cached session - see below)"] -->|stripe/db error| Err500c["throws -> route.ts: 500\n(releases the reservation/create-lock)"]
+    EnsureCustomer["services.account.ensureCustomer(id, name, email)\n(always re-reads the live user row itself -\nnever trusts a caller-supplied id, which can\nbe a stale cached session - see below)"] -->|stripe/db error| Err500c["throws -> route.ts: 500\n(releases the claimed row)"]
     EnsureCustomer --> CreateSession
 
-    CreateSession["createCheckout (services/checkout.ts):\nstripe.checkout.sessions.create\n(mode: payment, customer: stripeCustomerId,\nmetadata: userId, planId, durationDays snapshot)"] -->|stripe error| Err500d["throws -> route.ts: 500\n(releases the reservation/create-lock)"]
-    CreateSession --> SavePending["savePendingCheckout (lib/state/pending-checkout.ts)\n(Redis key checkout:sessionId + a\ncheckout:active:userId:planId pointer,\nreplacing the reservation - only if the\nslot still holds it;\nstatus: open, the session url, TTL 24h)"]
-    SavePending -->|redis error| Err500f["throws -> route.ts: 500\n(harmless - the Stripe session\nstill expires on its own)"]
-    SavePending -- "reservation lapsed,\nslot taken" --> Lost["expire the new session,\n{ kind: slot_taken } -> route.ts: 409"]
+    CreateSession["createCheckout (services/checkout.ts):\nstripe.checkout.sessions.create\n(mode: payment, customer: stripeCustomerId,\nmetadata: userId, planId, durationDays snapshot)"] -->|stripe error| Err500d["throws -> route.ts: 500\n(releases the claimed row)"]
+    CreateSession --> SavePending["paymentsRepo.checkout.open (use-cases/update-checkout.ts)\n(UPDATE the claimed row: the session id, its url,\nstatus: open, expires_at +24h, and slot -> null\nfor a repeatable plan - only WHERE the row is\nstill reserving under the claimed id)"]
+    SavePending -->|db error| Err500f["throws -> route.ts: 500\n(harmless - the Stripe session\nstill expires on its own)"]
+    SavePending -- "claim swept,\nslot reclaimed" --> Lost["expire the new session,\n{ kind: slot_taken } -> route.ts: 409"]
     SavePending --> Recheck2{"user's deletion started\nmeanwhile?"}
     Recheck2 -- yes --> Withhold["expire the session,\n{ kind: deleting } -> route.ts: 409"]
     Recheck2 -- no --> Return200["{ kind: created, sessionId, url }\n-> route.ts: 200"]
@@ -158,7 +197,7 @@ What always wins over whatever it returns, by object-literal ordering in
 params are spread first) - `mode`, `customer`, `client_reference_id`,
 `success_url`, `cancel_url`, and `expires_at` (kept in lockstep with
 `PENDING_CHECKOUT_TTL_SEC`; letting it drift would open a window where
-Stripe still accepts the session but Redis has already forgotten it). The
+Stripe still accepts the session but the checkout row has already lapsed). The
 `userId`/`planId`/`durationDays` keys of `metadata` and
 `payment_intent_data.metadata` also always win (merged rather than replaced
 wholesale, so an app can still tag a session with its own additional keys
@@ -176,11 +215,14 @@ days - use a 90-day plan, or a repeatable plan bought three times.
 
 `GET /checkout/:sessionId` (`services.checkout.status`) answers the client's polling: it
 reads the `purchase` row if one exists yet (`paid`/`refunded`/`disputed`), otherwise
-falls back to the pending Redis entry (`open`/`processing`/`failed`/`expired` - the
-last two are short-lived terminal states, see `markFailed`/`markExpired` below),
+falls back to the `checkout` row (`open`/`processing`/`failed`/`expired`/`completed`),
 otherwise `null` → 404. 404 is reserved for a session the user never had at all;
 `failed`/`expired` both answer with 200 so a polling client can tell "your payment
-failed" apart from "this session never existed."
+failed" apart from "this session never existed." An `open` (or `reserving`) row past
+its own `expires_at` reads as `expired`: nothing has swept it yet, but the session
+isn't payable any more. Terminal rows are kept indefinitely rather than aged out, so
+unlike the Redis entries this replaced, a failed checkout keeps answering `failed`
+instead of decaying into a 404 an hour later.
 
 ## Stripe webhook dispatch
 
@@ -252,11 +294,11 @@ it above.
 ```mermaid
 flowchart TD
     E["event.type"] --> CSC{"checkout.session.completed\n(mode: payment only)"}
-    CSC -- payment_status: unpaid --> MarkProcessing["paymentsServices.checkout.markProcessing(session.id)\n(forwards to lib/state/pending-checkout.ts;\nRedis TTL extended to 14 days, pointer too -\ndelayed payment methods, e.g. bank debits)"]
+    CSC -- payment_status: unpaid --> MarkProcessing["paymentsServices.checkout.markProcessing(session.id)\n(checkout row -> processing, expires_at extended\nto 14 days - delayed payment methods,\ne.g. bank debits; keeps holding the slot)"]
     CSC -- otherwise paid --> Confirm["paymentsServices.fulfillment.confirm(session)"]
 
     E --> APS["async_payment_succeeded\n(mode: payment)"] --> Confirm
-    E --> APF["async_payment_failed\n(mode: payment)"] --> MarkFailed["paymentsServices.checkout.markFailed(session.id)\n(short-lived terminal status,\nfrees the (user, plan) slot right away)"]
+    E --> APF["async_payment_failed\n(mode: payment)"] --> MarkFailed["paymentsServices.checkout.markFailed(session.id)\n(terminal status - leaves the index predicate,\nfreeing the (user, plan) slot right away)"]
     E --> Exp["checkout.session.expired\n(mode: payment)"] --> MarkExpired["paymentsServices.checkout.markExpired(session.id)\n(same, status: expired)"]
 
     E --> Ref["charge.refunded"] --> SyncCharge1["paymentsServices.fulfillment.syncCharge(payment_intent)"]
@@ -265,20 +307,25 @@ flowchart TD
     E --> DispX["charge.dispute.closed"] --> SyncCharge2
 ```
 
-`markProcessing`/`markFailed`/`markExpired` (`paymentsServices.checkout.*`, thin
-forwards onto `lib/state/pending-checkout.ts`) all go through that file's
-`transition`, which only moves a status forward (`open` → `processing` →
-`failed`/`expired`, ranked in that order) and never backward - a retried or
-out-of-order event for a status the session has already passed (e.g. a redelivered
-unpaid `completed` arriving after `async_payment_failed`) is a no-op. `transition`
-also never repoints the `checkout:active:userId:planId` pointer away from a newer
-session: `markFailed`/`markExpired` clear it only if it still points at this
-session, and `markProcessing` extends it to the same 14 days as the entry only if
-it still points at this session (or is free). The extension matters: without it
-the pointer kept its original 24h TTL, so for days 2-14 of a bank debit the guard
-stopped seeing the checkout and a second one could be opened. Both pointer
-operations are atomic Lua scripts, so a newer session written between the check
-and the write is never lost.
+`markProcessing`/`markFailed`/`markExpired` (`paymentsServices.checkout.*`) are
+thin wrappers over `paymentsRepo.checkout.transition`, a single `UPDATE ... WHERE
+stripe_checkout_session_id = ... AND status IN (<allowed predecessors>)`. The
+allowed predecessors live in `CHECKOUT_TRANSITIONS_FROM` (`lib/constants.ts`) and
+are what keeps a status from moving backward: a retried or out-of-order event for
+a status the session has already passed (e.g. a redelivered unpaid `completed`
+arriving after `async_payment_failed`) matches no row and is a no-op. `failed` and
+`expired` exclude each other, since neither is "later" than the other, and
+`completed` can't be left at all. Because the check and the write are one
+statement, two events landing together can't both read the old status and let the
+earlier one write last.
+
+Nothing separate has to be freed or kept alive. `markProcessing` extends the row's
+own `expires_at` to `PROCESSING_TTL_SEC`, so the slot keeps blocking for as long
+as a bank debit can still settle; `markFailed`/`markExpired` move the row out of
+the `checkout_active_slot` index's predicate, which frees the slot by itself. A
+retried transition for an old, superseded session only ever touches that session's
+own row, so a newer checkout for the same (user, plan) is untouched by
+construction.
 
 ### `services.fulfillment.confirm`: turning a paid session into a `purchase` row
 
@@ -289,10 +336,10 @@ otherwise miscount it as a successful insert - see the reconciler section).
 
 ```mermaid
 flowchart TD
-    Start(["services.fulfillment.confirm(session)"]) --> ResolveOwner["resolveOwner (private helper):\ngetPendingCheckout(session.id)\n(lib/state/pending-checkout.ts)"]
-    ResolveOwner --> HasPending{"pending entry\nfound in Redis?"}
+    Start(["services.fulfillment.confirm(session)"]) --> ResolveOwner["resolveOwner (private helper):\npaymentsRepo.checkout.get.bySession(session.id)"]
+    ResolveOwner --> HasPending{"checkout row\nfound?"}
     HasPending -- yes --> Owner["{ userId, planId }"]
-    HasPending -- no, or Redis error --> Metadata["fall back to\nsession.metadata\n(set on the session at createCheckout time)"]
+    HasPending -- no, or db error --> Metadata["fall back to\nsession.metadata\n(set on the session at createCheckout time)"]
     Metadata --> HasMetadata{"metadata has\nuserId + planId?"}
     HasMetadata -- yes --> Owner
     HasMetadata -- no --> HasPlanId{"metadata has\na planId at all?"}
@@ -311,7 +358,7 @@ flowchart TD
     CheckBlocking --> AlreadyOwns{"a blocking purchase\nfor a DIFFERENT session\nalready exists?"}
     AlreadyOwns -- no --> RemovePending
     AlreadyOwns -- yes --> LogDup["log error: payments.webhook.duplicate_purchase\n+ audit log: duplicate_purchase_confirmed\n(best-effort; the money's already taken,\nand the purchase was recorded regardless -\nthe financial record must never be dropped)"]
-    LogDup --> RemovePending["removePendingCheckout(session.id)\n(lib/state/pending-checkout.ts; best-effort -\na leftover key just expires via its TTL)"]
+    LogDup --> RemovePending["markCompleted(session.id)\n(the checkout row -> completed, freeing the slot;\nbest-effort, and last - after the insert, so any\nrequest claiming the freed slot sees the purchase.\nNo row to update for a session this table\npredates, which is correctly a no-op)"]
 ```
 
 Checked **after** the insert, not before: two confirmations of two separately-
@@ -331,6 +378,10 @@ session's purchase rather than the one this call just inserted. The check is
 skipped (not merely free of a blocking row) when the insert retried with
 `userId: null` - the user was deleted mid-checkout, so there's no owner left to
 check "already owns this plan" against.
+
+The `checkout` row is marked `completed` rather than deleted: it stays as a record
+of the checkout that led to the purchase, and `completed` sits outside the
+`checkout_active_slot` index's predicate, so marking it is what frees the slot.
 
 `addPurchase` is idempotent on `stripeCheckoutSessionId`, so a retried
 `checkout.session.completed` (Stripe's at-least-once delivery) is a no-op the
@@ -919,9 +970,9 @@ but doesn't roll that back - so failing just means some checkouts opened under
 the old terms stay open (and resumable) until the `PATCH` is retried and the
 expiry succeeds. A retired plan's open sessions are already expired by the
 retirement path itself, so this doesn't double up on that case. Each session it
-expires is also marked `expired` in Redis on the spot (`markExpired`), rather than
-waiting for Stripe's `checkout.session.expired` webhook: until that lands, the
-pending entry would still say `open`, and `POST /checkout`'s resume path would
+expires has its `checkout` row marked `expired` on the spot (`markExpired`), rather
+than waiting for Stripe's `checkout.session.expired` webhook: until that lands, the
+row would still say `open`, and `POST /checkout`'s resume path would
 hand the buyer the dead session's URL instead of creating a new one. Flipping `repeatable` from `false` to `true` is rejected
 (409) while any user still has a blocking purchase of the plan
 (`paymentsRepo.purchase.hasAnyBlocking`) - otherwise it would silently reopen a

@@ -2,7 +2,7 @@ import type Stripe from "stripe";
 import type { Payment } from "@f/payments/lib/types";
 import { paymentsRepo } from "@f/payments/repo";
 import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
-import { markExpired } from "@f/payments/lib/state/pending-checkout";
+import { markExpired } from "@f/payments/services/checkout";
 import { isUniqueViolation } from "@f/payments/lib/utils";
 import {
   RETIRED_PLANS_KEEP_ACCESS,
@@ -86,7 +86,7 @@ async function syncPlanPricesActive(
  * retired, since archiving its price stops new checkouts but not ones already created, which stay
  * payable for up to 24h. Covers both one-time checkouts (plan id in `metadata.planId`) and
  * subscription checkouts (the stripe plugin's pending `subscription` row, whose `plan` names the
- * plan). Each expired one-time session's pending entry is marked `expired` right away.
+ * plan). Each expired one-time session's checkout row is marked `expired` right away.
  */
 async function expireOpenCheckoutsForPlan(
   plan: Pick<Payment.Plan, "id" | "name" | "type">,

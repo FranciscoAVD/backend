@@ -1,4 +1,9 @@
-import { plan, purchase, paymentAuditLog } from "@d/schemas/payment-schema";
+import {
+  plan,
+  purchase,
+  checkout,
+  paymentAuditLog,
+} from "@d/schemas/payment-schema";
 import {
   createInsertSchema,
   createUpdateSchema,
@@ -95,6 +100,25 @@ export const updatePurchaseSchema = createUpdateSchema(purchase).pick({
   amountRefunded: true,
 });
 export const selectPurchaseSchema = createSelectSchema(purchase);
+
+// a checkout row is never built from client input - `userId`/`status`/`slot` are set by the claim
+// itself, so the insert variant only carries what the caller decides
+export const insertCheckoutSchema = createInsertSchema(checkout).omit({
+  userId: true,
+  status: true,
+  slot: true,
+  stripeCheckoutSessionId: true,
+  url: true,
+  createdAt: true,
+});
+// the fields `openCheckout` writes when the reserved row becomes a payable session
+export const updateCheckoutSchema = createUpdateSchema(checkout).pick({
+  stripeCheckoutSessionId: true,
+  url: true,
+  slot: true,
+  expiresAt: true,
+});
+export const selectCheckoutSchema = createSelectSchema(checkout);
 
 // GET /audit-log's query string - every value arrives as a string, hence the coercion
 export const auditLogQuerySchema = z.object({

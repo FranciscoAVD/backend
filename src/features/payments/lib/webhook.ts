@@ -11,7 +11,7 @@ const paidAtOf = (event: Stripe.Event) => new Date(event.created * 1000);
 
 /**
  * @description `onEvent` hook for better-auth's stripe plugin. Handles one-time payments:
- * in-flight checkouts live in Redis and a `purchase` row is only written once Stripe
+ * in-flight checkouts live in the `checkout` table and a `purchase` row is only written once Stripe
  * confirms the payment. Errors are rethrown so the plugin answers 400 and Stripe retries.
  */
 export async function handleStripeEvent(event: Stripe.Event): Promise<void> {

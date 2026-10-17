@@ -20,6 +20,14 @@ export const purchaseStatus = pgEnum("purchase_status", [
   "refunded",
   "disputed",
 ]);
+export const checkoutStatus = pgEnum("checkout_status", [
+  "reserving",
+  "open",
+  "processing",
+  "failed",
+  "expired",
+  "completed",
+]);
 export const paymentAuditType = pgEnum("payment_audit_type", [
   // 409 at POST /checkout: a non-repeatable plan is already owned
   "checkout_blocked_existing_purchase",
@@ -116,6 +124,52 @@ export const purchase = pgTable(
   (t) => [index("purchase_user_plan_idx").on(t.userId, t.planId)],
 );
 
+// an in-flight one-time checkout, from the moment POST /checkout claims the (user, plan) slot
+// until Stripe settles it. A `purchase` row is still only written once the payment confirms;
+// this is what that confirmation supersedes, and what keeps a second checkout for a
+// non-repeatable plan from being opened in the meantime
+export const checkout = pgTable(
+  "checkout",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    // set null on delete for the same reason `purchase` does it: the row is a record of what
+    // happened, and a deletion mid-checkout shouldn't block the delete or erase the trail
+    userId: text("user_id").references(() => user.id, { onDelete: "set null" }),
+    planId: integer("plan_id")
+      .references(() => plan.id)
+      .notNull(),
+    // null while `reserving` - the slot is claimed before Stripe is called, so there's no
+    // session id yet
+    stripeCheckoutSessionId: text("stripe_checkout_session_id").unique(),
+    status: checkoutStatus("status").notNull().default("reserving"),
+    // the (user, plan) checkout slot this row holds: 1 while a creation is in flight and, for a
+    // non-repeatable plan, for the session's whole life; released to null when a repeatable
+    // plan's session opens, since buying that again is allowed (nulls never collide in a
+    // unique index). Holding it during `reserving` for both plan types is what keeps concurrent
+    // POST /checkout calls to one Stripe session per (user, plan)
+    slot: integer("slot"),
+    // the Stripe-hosted page, so a buyer who closed the tab can be sent back to the same
+    // session instead of being locked out until it expires
+    url: text("url"),
+    // when this row's current status lapses: minutes while `reserving`, the session's own
+    // lifetime once `open`, up to two weeks while `processing` (delayed payment methods). A row
+    // past this is swept to `expired` by the next claim for the same slot, so a request that
+    // died mid-checkout can't hold the slot forever
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  // one active checkout per (user, plan) slot. Terminal rows fall outside the predicate, so
+  // confirming/failing/expiring a checkout frees the slot by itself. The predicate must stay in
+  // lockstep with CHECKOUT_ACTIVE_STATUSES in features/payments/lib/constants.ts
+  (t) => [
+    uniqueIndex("checkout_active_slot")
+      .on(t.userId, t.planId, t.slot)
+      .where(sql`status in ('reserving', 'open', 'processing')`),
+  ],
+);
+
 // a persistent, queryable trail of the race conditions around `plan.repeatable` - the two
 // checkout-blocked cases and the race that can't be fully closed, where money was already taken
 // for an already-owned non-repeatable plan and needs a human to review for a possible refund
@@ -151,6 +205,17 @@ export const purchaseRelations = relations(purchase, ({ one }) => ({
   }),
   plan: one(plan, {
     fields: [purchase.planId],
+    references: [plan.id],
+  }),
+}));
+
+export const checkoutRelations = relations(checkout, ({ one }) => ({
+  user: one(user, {
+    fields: [checkout.userId],
+    references: [user.id],
+  }),
+  plan: one(plan, {
+    fields: [checkout.planId],
     references: [plan.id],
   }),
 }));

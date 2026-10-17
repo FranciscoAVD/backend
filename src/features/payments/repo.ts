@@ -21,6 +21,16 @@ import {
   hasAnyBlockingPurchase,
   hasActivePurchase,
 } from "@f/payments/use-cases/get-purchases";
+import { claimCheckoutSlot } from "@f/payments/use-cases/claim-checkout";
+import {
+  getCheckoutBySession,
+  getResumableCheckout,
+} from "@f/payments/use-cases/get-checkouts";
+import {
+  openCheckout,
+  transitionCheckout,
+  releaseCheckoutReservation,
+} from "@f/payments/use-cases/update-checkout";
 import {
   hasActiveSubscription,
   getReconcilableSubscriptions,
@@ -69,6 +79,16 @@ export const paymentsRepo = {
     hasAnyBlocking: hasAnyBlockingPurchase,
     hasActive: hasActivePurchase,
     syncCharge: syncPurchaseCharge,
+  },
+  checkout: {
+    claim: claimCheckoutSlot,
+    get: {
+      bySession: getCheckoutBySession,
+      resumable: getResumableCheckout,
+    },
+    open: openCheckout,
+    transition: transitionCheckout,
+    release: releaseCheckoutReservation,
   },
   subscription: {
     hasActive: hasActiveSubscription,
