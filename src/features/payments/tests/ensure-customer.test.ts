@@ -8,15 +8,22 @@ let customersCreateCalls: { args: Record<string, unknown>; options: unknown }[] 
 
 // no free local "real Stripe" to run against, unlike Postgres — so the SDK
 // surface ensureCustomer actually calls is faked here via bun:test's mock.module
-mock.module("@f/payments/lib/stripe/client", () => ({
-  getPaymentProcessor: () => ({
-    customers: {
-      create: async (args: Record<string, unknown>, options: unknown) => {
-        customersCreateCalls.push({ args, options });
-        return { id: `cus_${customersCreateCalls.length}` };
-      },
+const fakeStripeClient = () => ({
+  customers: {
+    create: async (args: Record<string, unknown>, options: unknown) => {
+      customersCreateCalls.push({ args, options });
+      return { id: `cus_${customersCreateCalls.length}` };
     },
-  }),
+  },
+});
+
+mock.module("@f/payments/lib/stripe/client", () => ({
+  getPaymentProcessor: fakeStripeClient,
+  // auth.ts hands this to the stripe plugin instead of getPaymentProcessor() - this file's tests
+  // never reach the plugin's checkout.session.completed subscription lookup, so the same fake is
+  // enough; getPaymentProcessorForAuthPlugin's own short-circuit behavior is covered directly
+  // against the real implementation in stripe-client.test.ts
+  getPaymentProcessorForAuthPlugin: fakeStripeClient,
 }));
 
 import {

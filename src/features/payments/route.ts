@@ -468,6 +468,19 @@ const app = new Hono<PinoLoggerEnv>()
             { message: "This purchase has already been refunded" },
             HTTP.Conflict,
           );
+        case "charge_disputed":
+          return c.json(
+            {
+              message:
+                "This charge is currently disputed and can't be refunded until the dispute is resolved",
+            },
+            HTTP.Conflict,
+          );
+        case "amount_exceeds_refundable":
+          return c.json(
+            { message: "The refund amount exceeds what's left to refund on this charge" },
+            HTTP.UnprocessableEntity,
+          );
         case "refunded":
           return c.json({ data: res.purchase, message: "Purchase refunded" }, HTTP.OK);
       }

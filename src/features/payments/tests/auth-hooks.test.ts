@@ -34,57 +34,64 @@ const listOf = <T>(items: T[]) =>
     },
   });
 
-mock.module("@f/payments/lib/stripe/client", () => ({
-  getPaymentProcessor: () => ({
-    customers: {
-      create: async () => {
-        if (customerCreateFails) throw new Error("Stripe is down");
-        customerCreateCalls++;
-        return { id: `cus_${crypto.randomUUID()}` };
-      },
-      retrieve: async (id: string) => ({ id, email: null, deleted: false }),
-      update: async (id: string, params: unknown) => {
-        customerUpdateCalls.push({ id, params });
-        return {};
-      },
-      search: async () => ({ data: [] }),
-      list: () => listOf([]),
+const fakeStripeClient = () => ({
+  customers: {
+    create: async () => {
+      if (customerCreateFails) throw new Error("Stripe is down");
+      customerCreateCalls++;
+      return { id: `cus_${crypto.randomUUID()}` };
     },
-    subscriptions: {
-      list: () => listOf(fakeSubscriptions),
-      cancel: async (id: string, params: unknown) => {
-        if (cancelFails) throw new Error("Stripe is down");
-        cancelCalls.push({ id, params });
-        return { id, status: "canceled" };
-      },
+    retrieve: async (id: string) => ({ id, email: null, deleted: false }),
+    update: async (id: string, params: unknown) => {
+      customerUpdateCalls.push({ id, params });
+      return {};
     },
-    prices: { retrieve: async (id: string) => ({ id, recurring: { interval: "month" } }) },
-    checkout: {
-      sessions: {
-        list: (params: { customer?: string; status?: string }) =>
-          listOf(
-            fakeCheckoutSessions.filter(
-              (s) =>
-                (!params.customer || s.customer === params.customer) &&
-                (!params.status || s.status === params.status),
-            ),
+    search: async () => ({ data: [] }),
+    list: () => listOf([]),
+  },
+  subscriptions: {
+    list: () => listOf(fakeSubscriptions),
+    cancel: async (id: string, params: unknown) => {
+      if (cancelFails) throw new Error("Stripe is down");
+      cancelCalls.push({ id, params });
+      return { id, status: "canceled" };
+    },
+  },
+  prices: { retrieve: async (id: string) => ({ id, recurring: { interval: "month" } }) },
+  checkout: {
+    sessions: {
+      list: (params: { customer?: string; status?: string }) =>
+        listOf(
+          fakeCheckoutSessions.filter(
+            (s) =>
+              (!params.customer || s.customer === params.customer) &&
+              (!params.status || s.status === params.status),
           ),
-        expire: async (id: string) => {
-          if (expireFails) throw new Error("Stripe is down");
-          expireCalls.push(id);
-          for (const s of fakeCheckoutSessions) if (s.id === id) s.status = "expired";
-          return { id, status: "expired" };
-        },
-        create: async (params: { customer?: string }) => {
-          checkoutCreateCalls++;
-          const id = `cs_sub_${checkoutCreateCalls}`;
-          fakeCheckoutSessions.push({ id, customer: params.customer ?? "", status: "open" });
-          await onCheckoutCreate?.(id);
-          return { id, url: "https://checkout.stripe.com/sub" };
-        },
+        ),
+      expire: async (id: string) => {
+        if (expireFails) throw new Error("Stripe is down");
+        expireCalls.push(id);
+        for (const s of fakeCheckoutSessions) if (s.id === id) s.status = "expired";
+        return { id, status: "expired" };
+      },
+      create: async (params: { customer?: string }) => {
+        checkoutCreateCalls++;
+        const id = `cs_sub_${checkoutCreateCalls}`;
+        fakeCheckoutSessions.push({ id, customer: params.customer ?? "", status: "open" });
+        await onCheckoutCreate?.(id);
+        return { id, url: "https://checkout.stripe.com/sub" };
       },
     },
-  }),
+  },
+});
+
+mock.module("@f/payments/lib/stripe/client", () => ({
+  getPaymentProcessor: fakeStripeClient,
+  // auth.ts hands this to the stripe plugin instead of getPaymentProcessor() - none of this
+  // file's tests reach the plugin's checkout.session.completed subscription lookup, so the same
+  // fake client is enough; getPaymentProcessorForAuthPlugin's own short-circuit behavior is
+  // covered directly against the real implementation in stripe-client.test.ts
+  getPaymentProcessorForAuthPlugin: fakeStripeClient,
 }));
 
 const { auth } = await import("@f/auth/auth");

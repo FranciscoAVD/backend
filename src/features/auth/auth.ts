@@ -11,7 +11,7 @@ import { ac, user, admin } from "@f/auth/lib/permissions";
 import { sendVerificationEmail } from "@f/auth/lib/verification-email";
 import { authLoggerBridge } from "@f/auth/lib/log-bridge";
 import { stripe } from "@better-auth/stripe";
-import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
+import { getPaymentProcessorForAuthPlugin } from "@f/payments/lib/stripe/client";
 import { paymentsRepo } from "@f/payments/repo";
 import { paymentsServices } from "@f/payments/services";
 import { handleStripeEvent } from "@f/payments/lib/webhook";
@@ -96,7 +96,7 @@ export const auth = betterAuth({
   },
   plugins: [
     stripe({
-      stripeClient: getPaymentProcessor(),
+      stripeClient: getPaymentProcessorForAuthPlugin(),
       stripeWebhookSecret: env.STRIPE_WEBHOOK_SECRET,
       createCustomerOnSignUp: true,
       subscription: {

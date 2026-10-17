@@ -1,4 +1,5 @@
 import { describe, expect, test, beforeEach, mock } from "bun:test";
+import Stripe from "stripe";
 import { Hono } from "hono";
 import { pinoLogger, type Env as PinoLoggerEnv } from "hono-pino";
 import { requestId } from "hono/request-id";
@@ -62,6 +63,9 @@ let productsCreated = 0;
 type FakeCharge = { amount: number; amount_refunded: number; refunded: boolean; disputed: boolean };
 let refundCalls: { paymentIntent: string; amount?: number; reason?: string }[] = [];
 let refundFails = false;
+// lets a test have refunds.create reject with a specific Stripe error, to exercise the known
+// disputed-charge / amount-exceeds-refundable translations in fulfillment.ts's refund()
+let refundRejectError: Error | null = null;
 // payment-intent id -> fake charge state, so paymentIntents.retrieve's latest_charge reflects
 // what refunds.create just did (resolveChargeState pulls this back after issuing a refund)
 let fakeCharges: Record<string, FakeCharge> = {};
@@ -111,6 +115,7 @@ mock.module("@f/payments/lib/stripe/client", () => ({
         const cached = refundsByIdempotencyKey[options.idempotencyKey];
         if (cached) return cached;
 
+        if (refundRejectError) throw refundRejectError;
         if (refundFails) throw new Error("Stripe is down");
         refundCalls.push({
           paymentIntent: params.payment_intent,
@@ -1623,6 +1628,7 @@ describe("POST /purchases/:id/refund", () => {
     await resetRedis();
     refundCalls = [];
     refundFails = false;
+    refundRejectError = null;
     fakeCharges = {};
     refundsByIdempotencyKey = {};
     syncFails = false;
@@ -1717,6 +1723,47 @@ describe("POST /purchases/:id/refund", () => {
 
     expect((await refundReq(purchase.id)).status).toBe(200);
     expect((await refundReq(purchase.id)).status).toBe(409);
+  });
+
+  test("409s refunding a disputed charge, with a clear message", async () => {
+    const { purchase } = await seedRefundablePurchase();
+    await asAdmin();
+
+    refundRejectError = new Stripe.errors.StripeInvalidRequestError({
+      message: "The charge you're attempting to refund has been charged back.",
+      code: "charge_disputed",
+    });
+
+    const res = await refundReq(purchase.id);
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { message: string }).message).toContain("disputed");
+  });
+
+  test("422s asking to refund more than what's left, with a clear message", async () => {
+    const { purchase } = await seedRefundablePurchase();
+    await asAdmin();
+
+    refundRejectError = new Stripe.errors.StripeInvalidRequestError({
+      message: "This value must be less than or equal to 500.",
+      code: "amount_too_large",
+      param: "amount",
+    });
+
+    const res = await refundReq(purchase.id, { amount: 999999 });
+    expect(res.status).toBe(422);
+    expect(((await res.json()) as { message: string }).message).toContain("exceeds");
+  });
+
+  test("an unrecognized Stripe error still 500s", async () => {
+    const { purchase } = await seedRefundablePurchase();
+    await asAdmin();
+
+    refundRejectError = new Stripe.errors.StripeInvalidRequestError({
+      message: "Something else went wrong.",
+      code: "some_other_code",
+    });
+
+    expect((await refundReq(purchase.id)).status).toBe(500);
   });
 
   test("a Stripe failure 500s, and repeating the refund completes it", async () => {

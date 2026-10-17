@@ -10,32 +10,13 @@ import { authLoggerBridge, createAuthLoggerBridge } from "@f/auth/lib/log-bridge
 // test file's import of it resolves second in the same `bun test` run (see CLAUDE.md's testing
 // section on @f/auth/auth's shared-module-mock hazard) - this avoids that entirely.
 describe("authLoggerBridge", () => {
-  test("the one-time-checkout subscription-lookup failure is demoted to warn", () => {
-    const warnSpy = spyOn(logger, "warn").mockImplementation(() => logger);
-    const errorSpy = spyOn(logger, "error").mockImplementation(() => logger);
-
-    authLoggerBridge.log("error", "Stripe webhook failed. Error: No such subscription: 'null'");
-
-    expect(errorSpy).not.toHaveBeenCalled();
-    expect(warnSpy).toHaveBeenCalledWith(
-      { betterAuthMessage: "Stripe webhook failed. Error: No such subscription: 'null'" },
-      "payments.webhook.one_time_checkout_has_no_subscription",
-    );
-
-    warnSpy.mockRestore();
-    errorSpy.mockRestore();
-  });
-
-  test("a genuine webhook failure still logs at error, with the real message intact", () => {
-    const warnSpy = spyOn(logger, "warn").mockImplementation(() => logger);
+  test("a webhook failure logs at error, with the real message intact", () => {
     const errorSpy = spyOn(logger, "error").mockImplementation(() => logger);
 
     authLoggerBridge.log("error", "Stripe webhook failed. Error: Stripe is down");
 
-    expect(warnSpy).not.toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalledWith({}, "Stripe webhook failed. Error: Stripe is down");
 
-    warnSpy.mockRestore();
     errorSpy.mockRestore();
   });
 
@@ -100,18 +81,5 @@ describe("authLoggerBridge's real pino output", () => {
     const line = lastLine(lines);
     expect(line.msg).toBe("Base URL is not set");
     expect("err" in line).toBe(false);
-  });
-
-  test("the demoted case keeps the scope name as msg and the original text intact", () => {
-    const { logger: testLogger, lines } = capturingLogger();
-    const bridge = createAuthLoggerBridge(testLogger);
-
-    bridge.log("error", "Stripe webhook failed. Error: No such subscription: 'null'");
-
-    const line = lastLine(lines);
-    expect(line.msg).toBe("payments.webhook.one_time_checkout_has_no_subscription");
-    expect(line.betterAuthMessage).toBe(
-      "Stripe webhook failed. Error: No such subscription: 'null'",
-    );
   });
 });

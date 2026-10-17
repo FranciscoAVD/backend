@@ -1,4 +1,4 @@
-import type Stripe from "stripe";
+import Stripe from "stripe";
 import { logger } from "@/lib/logger";
 import tryCatch from "@vicstack/try-catch";
 import { paymentsRepo } from "@f/payments/repo";
@@ -177,6 +177,8 @@ export type RefundResult =
   | { kind: "not_found" }
   | { kind: "no_payment_intent" } // a $0 purchase - nothing was ever charged
   | { kind: "already_refunded" }
+  | { kind: "charge_disputed" }
+  | { kind: "amount_exceeds_refundable" }
   | { kind: "refunded"; purchase: Payment.Purchase };
 
 /**
@@ -197,7 +199,13 @@ export type RefundResult =
  * record exists regardless of what happens next - and a failed sync (a slow/down Stripe read, or
  * `syncPurchaseCharge` giving up) is logged as a warning, not thrown: the money already moved, so
  * that's not a failure to report, and the `charge.refunded`/`charge.refund.updated` webhook will
- * converge the row once it arrives. Operation must be wrapped in try-catch
+ * converge the row once it arrives.
+ *
+ * Two known Stripe failure modes get their own result instead of bubbling up as a generic
+ * failure: refunding a disputed charge (`charge_disputed`), and asking for more than what's left
+ * to refund (`amount_too_large`, or any error naming `amount` as the bad param). Anything else
+ * still throws, for the route's catch-all to turn into a 500. Operation must be wrapped in
+ * try-catch
  */
 export async function refund(
   target: Pick<Payment.Purchase, "id">,
@@ -211,14 +219,23 @@ export async function refund(
 
   const stripe = getPaymentProcessor();
   const idempotencyKey = `refund:${purchase.id}:${options.amount ?? "full"}:${options.reason ?? "none"}`;
-  await stripe.refunds.create(
-    {
-      payment_intent: purchase.stripePaymentIntentId,
-      ...(options.amount != null ? { amount: options.amount } : {}),
-      ...(options.reason ? { reason: options.reason } : {}),
-    },
-    { idempotencyKey },
-  );
+  try {
+    await stripe.refunds.create(
+      {
+        payment_intent: purchase.stripePaymentIntentId,
+        ...(options.amount != null ? { amount: options.amount } : {}),
+        ...(options.reason ? { reason: options.reason } : {}),
+      },
+      { idempotencyKey },
+    );
+  } catch (e) {
+    if (e instanceof Stripe.errors.StripeInvalidRequestError) {
+      if (e.code === "charge_disputed") return { kind: "charge_disputed" };
+      if (e.code === "amount_too_large" || e.param === "amount")
+        return { kind: "amount_exceeds_refundable" };
+    }
+    throw e;
+  }
 
   const [, auditError] = await tryCatch(
     paymentsRepo.audit.add({
