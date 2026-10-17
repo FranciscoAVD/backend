@@ -14,6 +14,18 @@ export const trustedProxiesSchema = z
   .transform((value) => (value ? value.split(",").map((entry) => entry.trim()) : undefined))
   .pipe(z.array(z.union([z.ipv4(), z.ipv6(), z.cidrv4(), z.cidrv6()])).min(1).optional());
 
+/**
+ * `TRUSTED_IP_HEADER`: the name of a header your reverse proxy sets directly with the real client
+ * IP (not a forwarded chain to walk) - e.g. Fly.io's `Fly-Client-IP`, Cloudflare's
+ * `CF-Connecting-IP`, Vercel's `x-vercel-forwarded-for`, Netlify's `x-nf-client-connection-ip`.
+ * Use this instead of (or alongside) TRUSTED_PROXIES when your platform's edge IPs aren't a
+ * pinnable CIDR range - better-auth then reads this header instead of X-Forwarded-For.
+ */
+export const trustedIpHeaderSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9-]+$/, "Must look like an HTTP header name (letters, digits, hyphens).")
+  .optional();
+
 export const env = createEnv({
   server: {
     NODE_ENV: z.enum(["development", "production", "test"]),
@@ -41,6 +53,7 @@ export const env = createEnv({
     REDIS_URL: z.url(),
     // Rate limiting behind a proxy
     TRUSTED_PROXIES: trustedProxiesSchema,
+    TRUSTED_IP_HEADER: trustedIpHeaderSchema,
     // Logging
     LOG_LEVEL: z
       .enum(["fatal", "error", "warn", "info", "debug", "trace"])
@@ -76,11 +89,13 @@ if (!env.DB_URL && setDiscreteDbFields.length < DISCRETE_DB_FIELDS.length) {
   );
 }
 
-if (env.NODE_ENV === "production" && !env.TRUSTED_PROXIES) {
+if (env.NODE_ENV === "production" && !env.TRUSTED_PROXIES && !env.TRUSTED_IP_HEADER) {
   throw new Error(
-    "TRUSTED_PROXIES must be set in production: unset, rate limiting trusts a single-value " +
-      "X-Forwarded-For header unconditionally (a client can spoof a new IP per request to dodge " +
-      "sign-in rate limits) and falls back to one shared bucket on a multi-hop header (one " +
-      "client's flood 429s everyone else). Set it to your reverse proxy's IP/CIDR.",
+    "Set TRUSTED_PROXIES or TRUSTED_IP_HEADER in production: unset, rate limiting trusts a " +
+      "single-value X-Forwarded-For header unconditionally (a client can spoof a new IP per " +
+      "request to dodge sign-in rate limits) and falls back to one shared bucket on a multi-hop " +
+      "header (one client's flood 429s everyone else). Set TRUSTED_PROXIES to your reverse " +
+      "proxy's IP/CIDR, or TRUSTED_IP_HEADER to a header your proxy sets directly with the real " +
+      "client IP (e.g. Fly-Client-IP, CF-Connecting-IP).",
   );
 }

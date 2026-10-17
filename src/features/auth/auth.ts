@@ -27,7 +27,10 @@ export const auth = betterAuth({
   trustedOrigins: [env.CLIENT_URL],
   advanced: {
     // lets the rate limiter see the real client through this app's own proxies (see env.ts)
-    ipAddress: { trustedProxies: env.TRUSTED_PROXIES },
+    ipAddress: {
+      trustedProxies: env.TRUSTED_PROXIES,
+      ...(env.TRUSTED_IP_HEADER ? { ipAddressHeaders: [env.TRUSTED_IP_HEADER] } : {}),
+    },
   },
   logger: authLoggerBridge,
   // without a `verification.storeInDatabase: true` override, having secondaryStorage

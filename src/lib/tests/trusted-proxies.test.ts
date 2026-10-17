@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { trustedProxiesSchema } from "@/env";
+import { trustedProxiesSchema, trustedIpHeaderSchema } from "@/env";
 
 describe("TRUSTED_PROXIES", () => {
   test("parses a comma-separated list of IPs and CIDRs", () => {
@@ -19,6 +19,26 @@ describe("TRUSTED_PROXIES", () => {
     "rejects a malformed entry: %p",
     (value) => {
       expect(trustedProxiesSchema.safeParse(value).success).toBe(false);
+    },
+  );
+});
+
+describe("TRUSTED_IP_HEADER", () => {
+  test.each(["Fly-Client-IP", "CF-Connecting-IP", "x-vercel-forwarded-for", "X-Real-IP"])(
+    "accepts a plain header name: %p",
+    (value) => {
+      expect(trustedIpHeaderSchema.parse(value)).toBe(value);
+    },
+  );
+
+  test("unset means none", () => {
+    expect(trustedIpHeaderSchema.parse(undefined)).toBeUndefined();
+  });
+
+  test.each(["x-forwarded-for, x-real-ip", "x real ip", "x-forwarded-for:"])(
+    "rejects something that isn't a plain header name: %p",
+    (value) => {
+      expect(trustedIpHeaderSchema.safeParse(value).success).toBe(false);
     },
   );
 });
@@ -51,11 +71,47 @@ describe("rate limiting behind a proxy", () => {
   });
 });
 
-async function envCheck(nodeEnv: string, trustedProxies: string | undefined) {
+async function customHeaderBuckets(headerName: string) {
+  const proc = Bun.spawn(["bun", "run", "src/lib/tests/fixtures/custom-ip-header-buckets.ts"], {
+    stdout: "pipe",
+    stderr: "pipe",
+    env: { ...process.env, LOG_LEVEL: "fatal", TRUSTED_IP_HEADER: headerName },
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  if (exitCode !== 0) throw new Error(`fixture failed: ${stderr}`);
+  return JSON.parse(stdout.trim().split("\n").at(-1)!) as {
+    floodedGot429: boolean;
+    otherClient: number;
+  };
+}
+
+describe("rate limiting via a custom trusted IP header", () => {
+  test("whichever header name is configured is the one actually consulted", async () => {
+    expect(await customHeaderBuckets("Fly-Client-IP")).toEqual({
+      floodedGot429: true,
+      otherClient: 200,
+    });
+  });
+});
+
+async function envCheck(
+  nodeEnv: string,
+  trustedProxies: string | undefined,
+  trustedIpHeader: string | undefined = undefined,
+) {
   const proc = Bun.spawn(["bun", "run", "src/lib/tests/fixtures/env-check.ts"], {
     stdout: "pipe",
     stderr: "pipe",
-    env: { ...process.env, NODE_ENV: nodeEnv, TRUSTED_PROXIES: trustedProxies ?? "" },
+    env: {
+      ...process.env,
+      NODE_ENV: nodeEnv,
+      TRUSTED_PROXIES: trustedProxies ?? "",
+      TRUSTED_IP_HEADER: trustedIpHeader ?? "",
+    },
   });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(proc.stdout).text(),
@@ -65,20 +121,26 @@ async function envCheck(nodeEnv: string, trustedProxies: string | undefined) {
   return { stdout, stderr, exitCode };
 }
 
-describe("TRUSTED_PROXIES required in production", () => {
-  test("production without it refuses to start", async () => {
+describe("TRUSTED_PROXIES or TRUSTED_IP_HEADER required in production", () => {
+  test("production without either refuses to start", async () => {
     const { exitCode, stderr } = await envCheck("production", undefined);
     expect(exitCode).not.toBe(0);
-    expect(stderr).toContain("TRUSTED_PROXIES must be set in production");
+    expect(stderr).toContain("Set TRUSTED_PROXIES or TRUSTED_IP_HEADER in production");
   });
 
-  test("production with it set starts fine", async () => {
+  test("production with TRUSTED_PROXIES set starts fine", async () => {
     const { exitCode, stdout } = await envCheck("production", "10.0.0.0/8");
     expect(exitCode).toBe(0);
     expect(stdout).toContain("ok");
   });
 
-  test("development without it is unaffected", async () => {
+  test("production with TRUSTED_IP_HEADER set starts fine", async () => {
+    const { exitCode, stdout } = await envCheck("production", undefined, "Fly-Client-IP");
+    expect(exitCode).toBe(0);
+    expect(stdout).toContain("ok");
+  });
+
+  test("development without either is unaffected", async () => {
     const { exitCode, stdout } = await envCheck("development", undefined);
     expect(exitCode).toBe(0);
     expect(stdout).toContain("ok");
