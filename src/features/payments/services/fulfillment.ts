@@ -183,8 +183,21 @@ export type RefundResult =
  * @description Issues a refund through Stripe for a purchase, then pulls the resulting
  * refund/dispute state back the same way the webhook does (`syncCharge`/`resolveChargeState`),
  * rather than recomputing the amount/status math here and risking it drifting from that logic.
- * Writes a `refund_issued` audit entry naming the admin who issued it - best-effort, since the
- * refund itself already succeeded by the time it's written. Operation must be wrapped in try-catch
+ *
+ * The Stripe call carries an idempotency key derived from (purchase, amount, reason): a retry of
+ * the exact same request - whether the admin resubmits after seeing a stale error, or anything
+ * else - lands on Stripe's side as the same refund, not a second one. This is what actually
+ * prevents a double refund; a partial refund alone doesn't flip `status` to "refunded", so the
+ * already-refunded guard above can't catch a retry on its own. (Trade-off: two genuinely separate
+ * refunds of the same purchase with the same amount and reason, within Stripe's idempotency key
+ * window, would collide too - indistinguishable from a retry; vary the amount or reason to avoid
+ * it.)
+ *
+ * The audit entry is written right after the Stripe call succeeds, before the sync below, so a
+ * record exists regardless of what happens next - and a failed sync (a slow/down Stripe read, or
+ * `syncPurchaseCharge` giving up) is logged as a warning, not thrown: the money already moved, so
+ * that's not a failure to report, and the `charge.refunded`/`charge.refund.updated` webhook will
+ * converge the row once it arrives. Operation must be wrapped in try-catch
  */
 export async function refund(
   target: Pick<Payment.Purchase, "id">,
@@ -197,15 +210,14 @@ export async function refund(
   if (purchase.status === "refunded") return { kind: "already_refunded" };
 
   const stripe = getPaymentProcessor();
-  await stripe.refunds.create({
-    payment_intent: purchase.stripePaymentIntentId,
-    ...(options.amount != null ? { amount: options.amount } : {}),
-    ...(options.reason ? { reason: options.reason } : {}),
-  });
-
-  const synced = await paymentsRepo.purchase.syncCharge(
-    { stripePaymentIntentId: purchase.stripePaymentIntentId },
-    () => resolveChargeState(purchase.stripePaymentIntentId!),
+  const idempotencyKey = `refund:${purchase.id}:${options.amount ?? "full"}:${options.reason ?? "none"}`;
+  await stripe.refunds.create(
+    {
+      payment_intent: purchase.stripePaymentIntentId,
+      ...(options.amount != null ? { amount: options.amount } : {}),
+      ...(options.reason ? { reason: options.reason } : {}),
+    },
+    { idempotencyKey },
   );
 
   const [, auditError] = await tryCatch(
@@ -220,6 +232,16 @@ export async function refund(
   );
   if (auditError)
     logger.warn({ err: auditError, purchase: purchase.id }, "payments.audit.write_failed");
+
+  const [synced, syncError] = await tryCatch(
+    paymentsRepo.purchase.syncCharge({ stripePaymentIntentId: purchase.stripePaymentIntentId }, () =>
+      resolveChargeState(purchase.stripePaymentIntentId!),
+    ),
+  );
+  if (syncError) {
+    logger.warn({ err: syncError, purchase: purchase.id }, "payments.purchase.refund_sync_failed");
+    return { kind: "refunded", purchase };
+  }
 
   return {
     kind: "refunded",

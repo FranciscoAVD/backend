@@ -65,6 +65,12 @@ let refundFails = false;
 // payment-intent id -> fake charge state, so paymentIntents.retrieve's latest_charge reflects
 // what refunds.create just did (resolveChargeState pulls this back after issuing a refund)
 let fakeCharges: Record<string, FakeCharge> = {};
+// idempotency key -> the Refund already created for it, so a retry with the same key returns the
+// cached result instead of refunding a second time - the same guarantee the real Stripe API gives
+let refundsByIdempotencyKey: Record<string, { id: string }> = {};
+// makes paymentIntents.retrieve throw, simulating refund()'s post-refund sync step failing after
+// the Stripe refund itself already succeeded
+let syncFails = false;
 mock.module("@f/payments/lib/stripe/client", () => ({
   getPaymentProcessor: () => ({
     products: {
@@ -98,7 +104,13 @@ mock.module("@f/payments/lib/stripe/client", () => ({
       },
     },
     refunds: {
-      create: async (params: { payment_intent: string; amount?: number; reason?: string }) => {
+      create: async (
+        params: { payment_intent: string; amount?: number; reason?: string },
+        options: { idempotencyKey: string },
+      ) => {
+        const cached = refundsByIdempotencyKey[options.idempotencyKey];
+        if (cached) return cached;
+
         if (refundFails) throw new Error("Stripe is down");
         refundCalls.push({
           paymentIntent: params.payment_intent,
@@ -113,11 +125,16 @@ mock.module("@f/payments/lib/stripe/client", () => ({
           );
           charge.refunded = charge.amount_refunded >= charge.amount;
         }
-        return { id: `re_${crypto.randomUUID()}` };
+        const refund = { id: `re_${crypto.randomUUID()}` };
+        refundsByIdempotencyKey[options.idempotencyKey] = refund;
+        return refund;
       },
     },
     paymentIntents: {
-      retrieve: async (id: string) => ({ id, latest_charge: fakeCharges[id] ?? null }),
+      retrieve: async (id: string) => {
+        if (syncFails) throw new Error("Stripe is down");
+        return { id, latest_charge: fakeCharges[id] ?? null };
+      },
     },
     disputes: { list: () => ({ data: [] }) },
   }),
@@ -1607,6 +1624,8 @@ describe("POST /purchases/:id/refund", () => {
     refundCalls = [];
     refundFails = false;
     fakeCharges = {};
+    refundsByIdempotencyKey = {};
+    syncFails = false;
   });
 
   const refundReq = (id: number, body: Record<string, unknown> = {}) =>
@@ -1709,5 +1728,29 @@ describe("POST /purchases/:id/refund", () => {
     refundFails = false;
     expect((await refundReq(purchase.id)).status).toBe(200);
     expect(refundCalls).toHaveLength(1);
+  });
+
+  test("a sync failure after a successful refund still 200s with an audit entry, and a retry doesn't refund twice", async () => {
+    const { plan, purchase } = await seedRefundablePurchase();
+    await asAdmin();
+
+    syncFails = true;
+    const res = await refundReq(purchase.id);
+    expect(res.status).toBe(200);
+    // not synced - still reflects the pre-refund state, since Stripe couldn't be read back
+    const body = (await res.json()) as { data: { status: string } };
+    expect(body.data.status).toBe("paid");
+
+    const auditRows = await db.select().from(paymentAuditLog);
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0]?.type).toBe("refund_issued");
+
+    syncFails = false;
+    // the purchase row is still "paid" (the sync never landed), so the already_refunded guard
+    // can't catch this retry on its own - the idempotency key has to stop a second real refund
+    const retry = await refundReq(purchase.id);
+    expect(retry.status).toBe(200);
+    expect(refundCalls).toHaveLength(1);
+    expect(fakeCharges["pi_refund_test"]?.amount_refunded).toBe(plan.amount);
   });
 });
