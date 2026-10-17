@@ -6,7 +6,7 @@
  */
 import { parseArgs } from "node:util";
 import { paymentsServices } from "@f/payments/services";
-import { PROCESSING_TTL_SEC } from "@f/payments/lib/state/pending-checkout";
+import { PROCESSING_TTL_SEC } from "@f/payments/lib/constants";
 import { logger } from "@/lib/logger";
 import tryCatch from "@vicstack/try-catch";
 

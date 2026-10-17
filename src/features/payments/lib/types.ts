@@ -5,6 +5,9 @@ import {
   insertPurchaseSchema,
   updatePurchaseSchema,
   selectPurchaseSchema,
+  insertCheckoutSchema,
+  updateCheckoutSchema,
+  selectCheckoutSchema,
   insertPaymentAuditLogSchema,
   selectPaymentAuditLogSchema,
 } from "@f/payments/lib/schemas";
@@ -22,6 +25,12 @@ export namespace Payment {
     export type Update = z.infer<typeof updatePurchaseSchema>;
   }
   export type Purchase = z.infer<typeof selectPurchaseSchema>;
+
+  export namespace Checkout {
+    export type Insert = z.infer<typeof insertCheckoutSchema>;
+    export type Update = z.infer<typeof updateCheckoutSchema>;
+  }
+  export type Checkout = z.infer<typeof selectCheckoutSchema>;
 
   export namespace AuditLog {
     export type Insert = z.infer<typeof insertPaymentAuditLogSchema>;

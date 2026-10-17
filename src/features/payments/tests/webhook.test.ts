@@ -3,8 +3,7 @@ import type Stripe from "stripe";
 import { eq } from "drizzle-orm";
 import { db } from "@d/connection";
 import { paymentAuditLog as paymentAuditLogTable } from "@d/schemas/payment-schema";
-import { resetDb, seedUser, seedPlan } from "@/test-helpers/db";
-import { resetRedis } from "@/test-helpers/redis";
+import { resetDb, seedUser, seedPlan, seedCheckout } from "@/test-helpers/db";
 
 let retrievedIntentMetadata: Record<string, string> = {};
 let fakeLatestCharge: Record<string, unknown> | null = null;
@@ -56,11 +55,7 @@ import { confirm as confirmCheckout } from "@f/payments/services/fulfillment";
 import { handleStripeEvent } from "@f/payments/lib/webhook";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import { getAllPurchases } from "@f/payments/use-cases/get-purchases";
-import {
-  savePendingCheckout,
-  getPendingCheckout,
-  PENDING_CHECKOUT_TTL_SEC,
-} from "@f/payments/lib/state/pending-checkout";
+import { paymentsRepo } from "@f/payments/repo";
 
 const session = (
   overrides: Partial<Stripe.Checkout.Session> = {},
@@ -91,7 +86,6 @@ const event = (
 
 beforeEach(async () => {
   await resetDb();
-  await resetRedis();
   retrievedIntentMetadata = {};
   fakeLatestCharge = null;
   fakeDispute = null;
@@ -103,11 +97,11 @@ describe("confirmCheckout", () => {
   test("a matching Redis entry still records the purchase", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();
-    await savePendingCheckout(
-      "cs_1",
-      { userId, planId: plan.id, status: "open" },
-      PENDING_CHECKOUT_TTL_SEC,
-    );
+    await seedCheckout({
+      userId: userId,
+      planId: plan.id,
+      stripeCheckoutSessionId: "cs_1",
+    });
 
     // a real session always carries metadata too (set at checkout time) - this is what
     // confirmCheckout actually resolves the owner from; the pending entry just cross-checks it
@@ -119,8 +113,10 @@ describe("confirmCheckout", () => {
     expect(purchase?.stripeCheckoutSessionId).toBe("cs_1");
     expect(purchase?.planId).toBe(plan.id);
 
-    // the pending entry is cleaned up once the purchase is recorded
-    expect(await getPendingCheckout("cs_1")).toBeNull();
+    // the checkout row is marked completed once the purchase is recorded, freeing the slot
+    expect(
+      (await paymentsRepo.checkout.get.bySession({ stripeCheckoutSessionId: "cs_1" }))?.status,
+    ).toBe("completed");
   });
 
   test("falls back to session metadata when there's no pending Redis entry", async () => {
@@ -286,11 +282,11 @@ describe("confirmCheckout", () => {
       new Date(),
     );
 
-    await savePendingCheckout(
-      "cs_dup",
-      { userId, planId: plan.id, status: "open" },
-      PENDING_CHECKOUT_TTL_SEC,
-    );
+    await seedCheckout({
+      userId: userId,
+      planId: plan.id,
+      stripeCheckoutSessionId: "cs_dup",
+    });
 
     // the money's already taken for this second session - must not throw or drop it
     await confirmCheckout(
@@ -321,11 +317,11 @@ describe("confirmCheckout", () => {
     const userA = await seedUser();
     const userB = await seedUser();
     const plan = await seedPlan();
-    await savePendingCheckout(
-      "cs_mismatch_user",
-      { userId: userA, planId: plan.id, status: "open" },
-      PENDING_CHECKOUT_TTL_SEC,
-    );
+    await seedCheckout({
+      userId: userA,
+      planId: plan.id,
+      stripeCheckoutSessionId: "cs_mismatch_user",
+    });
 
     await expect(
       confirmCheckout(
@@ -344,11 +340,11 @@ describe("confirmCheckout", () => {
     const userId = await seedUser();
     const planA = await seedPlan();
     const planB = await seedPlan();
-    await savePendingCheckout(
-      "cs_mismatch_plan",
-      { userId, planId: planA.id, status: "open" },
-      PENDING_CHECKOUT_TTL_SEC,
-    );
+    await seedCheckout({
+      userId: userId,
+      planId: planA.id,
+      stripeCheckoutSessionId: "cs_mismatch_plan",
+    });
 
     await expect(
       confirmCheckout(
@@ -451,11 +447,11 @@ describe("handleStripeEvent", () => {
   test("checkout.session.completed with mode payment and paid status confirms the checkout", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();
-    await savePendingCheckout(
-      "cs_1",
-      { userId, planId: plan.id, status: "open" },
-      PENDING_CHECKOUT_TTL_SEC,
-    );
+    await seedCheckout({
+      userId: userId,
+      planId: plan.id,
+      stripeCheckoutSessionId: "cs_1",
+    });
 
     await handleStripeEvent(
       event(
@@ -564,11 +560,11 @@ describe("handleStripeEvent", () => {
   test("checkout.session.completed with an unpaid status marks it processing instead", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();
-    await savePendingCheckout(
-      "cs_1",
-      { userId, planId: plan.id, status: "open" },
-      PENDING_CHECKOUT_TTL_SEC,
-    );
+    await seedCheckout({
+      userId: userId,
+      planId: plan.id,
+      stripeCheckoutSessionId: "cs_1",
+    });
 
     await handleStripeEvent(
       event(
@@ -578,7 +574,7 @@ describe("handleStripeEvent", () => {
     );
 
     expect(await getAllPurchases({ userId })).toEqual([]);
-    expect((await getPendingCheckout("cs_1"))?.status).toBe("processing");
+    expect((await paymentsRepo.checkout.get.bySession({ stripeCheckoutSessionId: "cs_1" }))?.status).toBe("processing");
   });
 
   test("checkout.session.completed in subscription mode is ignored entirely", async () => {
@@ -592,31 +588,31 @@ describe("handleStripeEvent", () => {
   test("checkout.session.async_payment_failed marks the pending entry failed, not gone", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();
-    await savePendingCheckout(
-      "cs_1",
-      { userId, planId: plan.id, status: "open" },
-      PENDING_CHECKOUT_TTL_SEC,
-    );
+    await seedCheckout({
+      userId: userId,
+      planId: plan.id,
+      stripeCheckoutSessionId: "cs_1",
+    });
 
     await handleStripeEvent(
       event("checkout.session.async_payment_failed", session()),
     );
 
-    expect((await getPendingCheckout("cs_1"))?.status).toBe("failed");
+    expect((await paymentsRepo.checkout.get.bySession({ stripeCheckoutSessionId: "cs_1" }))?.status).toBe("failed");
   });
 
   test("checkout.session.expired marks the pending entry expired, not gone", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();
-    await savePendingCheckout(
-      "cs_1",
-      { userId, planId: plan.id, status: "open" },
-      PENDING_CHECKOUT_TTL_SEC,
-    );
+    await seedCheckout({
+      userId: userId,
+      planId: plan.id,
+      stripeCheckoutSessionId: "cs_1",
+    });
 
     await handleStripeEvent(event("checkout.session.expired", session()));
 
-    expect((await getPendingCheckout("cs_1"))?.status).toBe("expired");
+    expect((await paymentsRepo.checkout.get.bySession({ stripeCheckoutSessionId: "cs_1" }))?.status).toBe("expired");
   });
 
   test("charge.refunded updates an existing purchase's refund state from the live charge", async () => {
@@ -845,8 +841,7 @@ describe("handleStripeEvent", () => {
 describe("duplicate_purchase_confirmed is written once per duplicate charge", () => {
   beforeEach(async () => {
     await resetDb();
-    await resetRedis();
-  });
+    });
 
   test("redeliveries of an already-recorded duplicate add no further entries", async () => {
     const userId = await seedUser();
@@ -877,8 +872,7 @@ describe("duplicate_purchase_confirmed is written once per duplicate charge", ()
 describe("duplicate charges confirmed concurrently", () => {
   beforeEach(async () => {
     await resetDb();
-    await resetRedis();
-  });
+    });
 
   const paidSession = (id: string, userId: string, planId: number) =>
     ({
@@ -918,8 +912,7 @@ describe("duplicate charges confirmed concurrently", () => {
 describe("charge.refund.updated", () => {
   beforeEach(async () => {
     await resetDb();
-    await resetRedis();
-  });
+    });
 
   // a failed refund lowers amount_refunded again without another charge.refunded
   test("a refund that later failed hands access back", async () => {

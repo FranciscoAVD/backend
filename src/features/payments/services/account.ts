@@ -5,7 +5,7 @@ import {
   markUserDeleting,
   clearUserDeleting,
 } from "@f/payments/lib/state/deletion-guard";
-import { PROCESSING_TTL_SEC } from "@f/payments/lib/state/pending-checkout";
+import { PROCESSING_TTL_SEC } from "@f/payments/lib/constants";
 import {
   CANCEL_ON_USER_DELETE,
   SUBSCRIPTION_TERMINAL_STATUSES,

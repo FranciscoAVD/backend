@@ -2,7 +2,7 @@ import Stripe from "stripe";
 import { logger } from "@/lib/logger";
 import tryCatch from "@vicstack/try-catch";
 import { paymentsRepo } from "@f/payments/repo";
-import { getPendingCheckout, removePendingCheckout } from "@f/payments/lib/state/pending-checkout";
+import { markCompleted } from "@f/payments/services/checkout";
 import { decodeDurationDays, decodeOverlapping } from "@f/payments/lib/utils";
 import { resolveChargeState } from "@f/payments/lib/stripe/charge-state";
 import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
@@ -16,11 +16,11 @@ const idOf = (ref: string | { id: string } | null) =>
 
 /**
  * @description Who bought what: Stripe's own session metadata, set once at checkout time -
- * the source of truth, since it's what Stripe itself guarantees for this session. The pending
- * Redis entry is still read, but only to cross-check: if it exists and disagrees with the
- * metadata on `userId` or `planId`, that's suspicious enough to refuse rather than silently pick
- * one (see `confirm`). Redis is never used to supply or override the owner - a session with no
- * resolvable metadata returns null regardless of whether a pending entry exists.
+ * the source of truth, since it's what Stripe itself guarantees for this session. The `checkout`
+ * row is still read, but only to cross-check: if it exists and disagrees with the metadata on
+ * `userId` or `planId`, that's suspicious enough to refuse rather than silently pick one (see
+ * `confirm`). The row is never used to supply or override the owner - a session with no resolvable
+ * metadata returns null regardless of whether a row exists.
  */
 async function resolveOwner(
   session: Stripe.Checkout.Session,
@@ -29,7 +29,9 @@ async function resolveOwner(
   const planId = Number(session.metadata?.planId);
   const fromMetadata = userId && Number.isInteger(planId) ? { userId, planId } : null;
 
-  const [pending, error] = await tryCatch(getPendingCheckout(session.id));
+  const [pending, error] = await tryCatch(
+    paymentsRepo.checkout.get.bySession({ stripeCheckoutSessionId: session.id }),
+  );
   if (!pending && error)
     logger.warn({ err: error, session: session.id }, "payments.webhook.pending_lookup_failed");
 
@@ -47,7 +49,7 @@ async function resolveOwner(
       "payments.webhook.owner_mismatch",
     );
     throw new Error(
-      "Checkout session owner mismatch between Stripe metadata and the pending Redis entry",
+      "Checkout session owner mismatch between Stripe metadata and the checkout row",
     );
   }
 
@@ -75,10 +77,10 @@ export async function confirm(
       return false;
     }
     logger.error(
-      { err: new Error("Paid checkout has no pending entry or metadata"), session: session.id },
+      { err: new Error("Paid checkout has no checkout row or metadata"), session: session.id },
       "payments.webhook.metadata",
     );
-    throw new Error("Paid checkout has no pending entry or metadata");
+    throw new Error("Paid checkout has no checkout row or metadata");
   }
 
   const plan = await paymentsRepo.plan.get.one({ id: owner.planId });
@@ -166,7 +168,9 @@ export async function confirm(
       );
   }
 
-  const [, error] = await tryCatch(removePendingCheckout(session.id));
+  // last, after the insert: whichever request then claims the freed slot is guaranteed to see the
+  // purchase this call just recorded
+  const [, error] = await tryCatch(markCompleted(session.id));
   if (error) logger.warn({ err: error, session: session.id }, "payments.webhook.cleanup");
 
   return inserted !== null;

@@ -1,6 +1,5 @@
 import { describe, expect, test, beforeEach, mock } from "bun:test";
 import { resetDb, seedUser, seedPlan } from "@/test-helpers/db";
-import { resetRedis } from "@/test-helpers/redis";
 
 let sessionCreateCalls: Record<string, unknown>[] = [];
 
@@ -29,7 +28,23 @@ mock.module("@f/payments/lib/checkout-extensions", () => ({
 
 import { createCheckout, status as getCheckoutStatus } from "@f/payments/services/checkout";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
-import { getPendingCheckout } from "@f/payments/lib/state/pending-checkout";
+import { paymentsRepo } from "@f/payments/repo";
+import { RESERVATION_TTL_SEC } from "@f/payments/lib/constants";
+import type { Payment } from "@f/payments/lib/types";
+import { db } from "@d/connection";
+import { checkout as checkoutTable } from "@d/schemas/payment-schema";
+import { eq } from "drizzle-orm";
+
+let userId: string;
+
+/** Claims the slot the way `start` does, then creates the session on it. */
+async function createFor(plan: Payment.Plan, customerId = "cus_abc") {
+  const claimed = await paymentsRepo.checkout.claim(
+    { userId },
+    { planId: plan.id, expiresAt: new Date(Date.now() + RESERVATION_TTL_SEC * 1000) },
+  );
+  return await createCheckout({ userId, stripeCustomerId: customerId }, plan, claimed!);
+}
 
 // The session's metadata and the payment intent's, from the last Stripe call. Asserted
 // separately with toEqual, not through one toMatchObject on the whole call: Bun's toMatchObject
@@ -47,52 +62,57 @@ const lastMetadata = () => {
 describe("createCheckout", () => {
   beforeEach(async () => {
     await resetDb();
-    await resetRedis();
+    userId = await seedUser();
     sessionCreateCalls = [];
     extensionParams = undefined;
   });
 
-  test("creates a Stripe checkout session and tracks it as pending in Redis", async () => {
+  test("creates a Stripe checkout session and opens the checkout row for it", async () => {
     const plan = await seedPlan({ stripePriceId: "price_abc" });
 
-    const res = await createCheckout(
-      { userId: "u1", stripeCustomerId: "cus_abc" },
-      plan,
-    );
+    const res = await createFor(plan);
 
     expect(res).toEqual({
       sessionId: "cs_test_fake",
       url: "https://checkout.stripe.com/fake",
     });
 
-    const pending = await getPendingCheckout("cs_test_fake");
-    expect(pending).toEqual({
-      userId: "u1",
+    const pending = await paymentsRepo.checkout.get.bySession({
+      stripeCheckoutSessionId: "cs_test_fake",
+    });
+    expect(pending).toMatchObject({
+      userId,
       planId: plan.id,
       status: "open",
+      slot: 1,
       url: "https://checkout.stripe.com/fake",
     });
   });
 
+  test("releases the slot for a repeatable plan, so the next purchase isn't blocked", async () => {
+    const plan = await seedPlan({ repeatable: true });
+
+    await createFor(plan);
+
+    const pending = await paymentsRepo.checkout.get.bySession({
+      stripeCheckoutSessionId: "cs_test_fake",
+    });
+    expect(pending).toMatchObject({ status: "open", slot: null });
+  });
+
   test("uses the user's Stripe customer id", async () => {
     const plan = await seedPlan();
-    await createCheckout(
-      { userId: "u1", stripeCustomerId: "cus_abc" },
-      plan,
-    );
+    await createFor(plan);
 
     expect(sessionCreateCalls[0]).toMatchObject({ customer: "cus_abc" });
   });
 
   test("snapshots the plan's durationDays and overlapping onto both metadata objects", async () => {
     const plan = await seedPlan({ durationDays: 30, overlapping: false });
-    await createCheckout(
-      { userId: "u1", stripeCustomerId: "cus_abc" },
-      plan,
-    );
+    await createFor(plan);
 
     const metadata = {
-      userId: "u1",
+      userId,
       planId: String(plan.id),
       durationDays: "30",
       overlapping: "false",
@@ -102,10 +122,7 @@ describe("createCheckout", () => {
 
   test("snapshots a never-expiring plan as an explicit marker, not a missing key", async () => {
     const plan = await seedPlan({ durationDays: null });
-    await createCheckout(
-      { userId: "u1", stripeCustomerId: "cus_abc" },
-      plan,
-    );
+    await createFor(plan);
 
     expect(sessionCreateCalls[0]).toMatchObject({ metadata: { durationDays: "none" } });
   });
@@ -114,7 +131,7 @@ describe("createCheckout", () => {
     extensionParams = { allow_promotion_codes: true, automatic_tax: { enabled: true } };
     const plan = await seedPlan();
 
-    await createCheckout({ userId: "u1", stripeCustomerId: "cus_abc" }, plan);
+    await createFor(plan);
 
     expect(sessionCreateCalls[0]).toMatchObject({
       allow_promotion_codes: true,
@@ -126,7 +143,7 @@ describe("createCheckout", () => {
     extensionParams = { line_items: [{ price: "price_other", quantity: 3 }] };
     const plan = await seedPlan({ stripePriceId: "price_abc" });
 
-    await createCheckout({ userId: "u1", stripeCustomerId: "cus_abc" }, plan);
+    await createFor(plan);
 
     expect(sessionCreateCalls[0]).toMatchObject({
       line_items: [{ price: "price_other", quantity: 3 }],
@@ -140,11 +157,11 @@ describe("createCheckout", () => {
     };
     const plan = await seedPlan({ durationDays: 30 });
 
-    await createCheckout({ userId: "u1", stripeCustomerId: "cus_abc" }, plan);
+    await createFor(plan);
 
     const metadata = {
       campaign: "spring-sale",
-      userId: "u1",
+      userId,
       planId: String(plan.id),
       durationDays: "30",
       overlapping: "true",
@@ -162,10 +179,10 @@ describe("createCheckout", () => {
     };
     const plan = await seedPlan({ durationDays: 30 });
 
-    await createCheckout({ userId: "u1", stripeCustomerId: "cus_abc" }, plan);
+    await createFor(plan);
 
     const core = {
-      userId: "u1",
+      userId,
       planId: String(plan.id),
       durationDays: "30",
       overlapping: "true",
@@ -189,17 +206,17 @@ describe("createCheckout", () => {
     };
     const plan = await seedPlan();
 
-    await createCheckout({ userId: "u1", stripeCustomerId: "cus_abc" }, plan);
+    await createFor(plan, "cus_abc");
 
     expect(sessionCreateCalls[0]).toMatchObject({ mode: "payment", customer: "cus_abc" });
     expect(sessionCreateCalls[0]?.expires_at).toBeGreaterThan(1);
   });
 
-  test("expires_at leaves a margin before the Redis entry's own TTL, and stays above Stripe's minimum", async () => {
+  test("expires_at leaves a margin before the checkout row's own deadline, and stays above Stripe's minimum", async () => {
     const plan = await seedPlan();
     const before = Math.floor(Date.now() / 1000);
 
-    await createCheckout({ userId: "u1", stripeCustomerId: "cus_abc" }, plan);
+    await createFor(plan);
 
     const expiresAt = sessionCreateCalls[0]?.expires_at as number;
     const STRIPE_MIN_EXPIRY_SEC = 30 * 60;
@@ -211,11 +228,10 @@ describe("createCheckout", () => {
 describe("getCheckoutStatus", () => {
   beforeEach(async () => {
     await resetDb();
-    await resetRedis();
+    userId = await seedUser();
   });
 
   test("returns the DB purchase status once confirmed", async () => {
-    const userId = await seedUser();
     const plan = await seedPlan();
     await addPurchase(
       { userId },
@@ -237,26 +253,37 @@ describe("getCheckoutStatus", () => {
     expect(res).toBe("paid");
   });
 
-  test("falls back to the pending Redis entry when no purchase row exists yet", async () => {
+  test("falls back to the checkout row when no purchase row exists yet", async () => {
     const plan = await seedPlan();
-    await createCheckout(
-      { userId: "u1", stripeCustomerId: "cus_abc" },
-      plan,
-    );
+    await createFor(plan);
 
     const res = await getCheckoutStatus({
-      userId: "u1",
+      userId,
       stripeCheckoutSessionId: "cs_test_fake",
     });
     expect(res).toBe("open");
   });
 
-  test("returns null when the pending entry belongs to a different user", async () => {
+  test("reports an open row past its own deadline as expired, not still open", async () => {
     const plan = await seedPlan();
-    await createCheckout(
-      { userId: "u1", stripeCustomerId: "cus_abc" },
-      plan,
-    );
+    await createFor(plan);
+    // nothing has swept it yet - Stripe's expiry webhook hasn't landed and no one has
+    // re-claimed the slot - but the session is no longer payable
+    await db
+      .update(checkoutTable)
+      .set({ expiresAt: new Date(Date.now() - 1000) })
+      .where(eq(checkoutTable.stripeCheckoutSessionId, "cs_test_fake"));
+
+    const res = await getCheckoutStatus({
+      userId,
+      stripeCheckoutSessionId: "cs_test_fake",
+    });
+    expect(res).toBe("expired");
+  });
+
+  test("returns null when the checkout row belongs to a different user", async () => {
+    const plan = await seedPlan();
+    await createFor(plan);
 
     const res = await getCheckoutStatus({
       userId: "someone-else",
@@ -265,9 +292,9 @@ describe("getCheckoutStatus", () => {
     expect(res).toBeNull();
   });
 
-  test("returns null when there's neither a purchase nor a pending entry", async () => {
+  test("returns null when there's neither a purchase nor a checkout row", async () => {
     const res = await getCheckoutStatus({
-      userId: "u1",
+      userId,
       stripeCheckoutSessionId: "cs_nonexistent",
     });
     expect(res).toBeNull();

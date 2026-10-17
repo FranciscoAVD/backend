@@ -1,6 +1,6 @@
 import { db } from "@d/connection";
 import { user, subscription } from "@d/schemas/auth-schema";
-import { plan } from "@d/schemas/payment-schema";
+import { plan, checkout } from "@d/schemas/payment-schema";
 import { sql } from "drizzle-orm";
 
 /**
@@ -11,7 +11,7 @@ import { sql } from "drizzle-orm";
  */
 export async function resetDb(): Promise<void> {
   await db.execute(
-    sql`TRUNCATE TABLE "user", todo, plan, purchase, payment_audit_log, subscription RESTART IDENTITY CASCADE`,
+    sql`TRUNCATE TABLE "user", todo, plan, purchase, checkout, payment_audit_log, subscription RESTART IDENTITY CASCADE`,
   );
 }
 
@@ -59,6 +59,31 @@ export async function seedUser(
     })
     .returning();
   return row!.id;
+}
+
+/**
+ * @description Inserts an in-flight `checkout` row directly, bypassing `POST /checkout` and Stripe
+ * entirely — for tests that need a checkout already in a given state rather than one they walked
+ * there. Defaults to an `open` session holding slot 1 for the next 24 hours, the shape
+ * `createCheckout` leaves behind for a non-repeatable plan.
+ */
+export async function seedCheckout(
+  overrides: Partial<typeof checkout.$inferInsert> & {
+    userId: string;
+    planId: number;
+  },
+): Promise<typeof checkout.$inferSelect> {
+  const [row] = await db
+    .insert(checkout)
+    .values({
+      status: "open",
+      slot: 1,
+      url: `https://checkout.stripe.com/c/${overrides.stripeCheckoutSessionId ?? "cs_seeded"}`,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      ...overrides,
+    })
+    .returning();
+  return row!;
 }
 
 /**

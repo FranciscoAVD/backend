@@ -4,7 +4,13 @@ import { Hono } from "hono";
 import { pinoLogger, type Env as PinoLoggerEnv } from "hono-pino";
 import { requestId } from "hono/request-id";
 import { logger, httpLoggerOptions } from "@/lib/logger";
-import { resetDb, seedUser, seedPlan, seedSubscription } from "@/test-helpers/db";
+import {
+  resetDb,
+  seedUser,
+  seedPlan,
+  seedSubscription,
+  seedCheckout,
+} from "@/test-helpers/db";
 import { resetRedis } from "@/test-helpers/redis";
 
 type FakeUser = { id: string; name: string; email: string };
@@ -181,14 +187,13 @@ mock.module("@f/email/lib/client", () => ({
 }));
 
 import { db } from "@d/connection";
-import { paymentAuditLog } from "@d/schemas/payment-schema";
 import {
-  savePendingCheckout,
-  getPendingCheckout,
-  getResumableCheckout,
-  PENDING_CHECKOUT_TTL_SEC,
-} from "@f/payments/lib/state/pending-checkout";
+  paymentAuditLog,
+  checkout as checkoutTable,
+} from "@d/schemas/payment-schema";
+import { eq } from "drizzle-orm";
 import { paymentsRepo } from "@f/payments/repo";
+import { RESERVATION_TTL_SEC } from "@f/payments/lib/constants";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import { redis } from "@/lib/redis";
 import { markUserDeleting } from "@f/payments/lib/state/deletion-guard";
@@ -1046,11 +1051,12 @@ describe("POST /checkout", () => {
   test("409s on a non-repeatable plan with a pending checkout it can't resume (no stored url)", async () => {
     const userId = await seedUser({ stripeCustomerId: "cus_test" });
     const plan = await seedPlan({ type: "one_time", repeatable: false });
-    await savePendingCheckout(
-      "cs_pending",
-      { userId, planId: plan.id, status: "open" },
-      PENDING_CHECKOUT_TTL_SEC,
-    );
+    await seedCheckout({
+      userId,
+      planId: plan.id,
+      stripeCheckoutSessionId: "cs_pending",
+      url: null,
+    });
     setSession({ id: userId, ...regularUser });
 
     const res = await app.request("/checkout", {
@@ -1065,11 +1071,12 @@ describe("POST /checkout", () => {
   test("resumes an open checkout for a non-repeatable plan instead of locking the buyer out", async () => {
     const userId = await seedUser({ stripeCustomerId: "cus_test" });
     const plan = await seedPlan({ type: "one_time", repeatable: false });
-    await savePendingCheckout(
-      "cs_open",
-      { userId, planId: plan.id, status: "open", url: "https://checkout.stripe.com/c/open" },
-      PENDING_CHECKOUT_TTL_SEC,
-    );
+    await seedCheckout({
+      userId,
+      planId: plan.id,
+      stripeCheckoutSessionId: "cs_open",
+      url: "https://checkout.stripe.com/c/open",
+    });
     setSession({ id: userId, ...regularUser });
 
     const res = await app.request("/checkout", {
@@ -1112,16 +1119,13 @@ describe("POST /checkout", () => {
   test("still 409s while the pending checkout is processing - it's already paid", async () => {
     const userId = await seedUser({ stripeCustomerId: "cus_test" });
     const plan = await seedPlan({ type: "one_time", repeatable: false });
-    await savePendingCheckout(
-      "cs_processing",
-      {
-        userId,
-        planId: plan.id,
-        status: "processing",
-        url: "https://checkout.stripe.com/c/processing",
-      },
-      PENDING_CHECKOUT_TTL_SEC,
-    );
+    await seedCheckout({
+      userId,
+      planId: plan.id,
+      stripeCheckoutSessionId: "cs_processing",
+      status: "processing",
+      url: "https://checkout.stripe.com/c/processing",
+    });
     setSession({ id: userId, ...regularUser });
 
     const res = await app.request("/checkout", {
@@ -1177,9 +1181,13 @@ describe("POST /checkout", () => {
 
     // no second checkout for an already-owned plan, and the slot isn't left held
     expect(sessionCreateCalls).toHaveLength(0);
-    expect(await getResumableCheckout(userId, plan.id)).toBeNull();
-    const { reservePendingCheckout } = await import("@f/payments/lib/state/pending-checkout");
-    expect(await reservePendingCheckout(userId, plan.id)).not.toBeNull();
+    expect(await paymentsRepo.checkout.get.resumable({ userId, planId: plan.id })).toBeNull();
+    expect(
+      await paymentsRepo.checkout.claim(
+        { userId },
+        { planId: plan.id, expiresAt: new Date(Date.now() + RESERVATION_TTL_SEC * 1000) },
+      ),
+    ).not.toBeNull();
     const auditRows = await db.select().from(paymentAuditLog);
     expect(auditRows.map((row) => row.type)).toEqual(["checkout_blocked_existing_purchase"]);
   });
@@ -1226,8 +1234,10 @@ describe("POST /checkout", () => {
     expect(res.status).toBe(200);
     expect(sessionCreateCalls).toHaveLength(1);
 
-    const pending = await getPendingCheckout("cs_test_fake");
-    expect(pending).toMatchObject({ userId, planId: plan.id, status: "open" });
+    const pending = await paymentsRepo.checkout.get.bySession({
+      stripeCheckoutSessionId: "cs_test_fake",
+    });
+    expect(pending).toMatchObject({ userId, planId: plan.id, status: "open", slot: 1 });
   });
 
   test("non-repeatable plan: concurrent requests reach Stripe once - the rest 409", async () => {
@@ -1296,22 +1306,32 @@ describe("POST /checkout: reservations, deletion and repeatable plans", () => {
     const userId = await seedUser({ stripeCustomerId: "cus_test" });
     const plan = await seedPlan({ type: "one_time", repeatable: false });
     setSession({ id: userId, ...regularUser });
-    const pointer = `checkout:active:${userId}:${plan.id}`;
-    const { reservePendingCheckout } = await import("@f/payments/lib/state/pending-checkout");
-    let otherReservation: string | null = null;
-    // this request's reservation expires mid-call, and another request claims the slot
+    let otherClaim: { id: number } | null = null;
+    // this request's reservation lapses mid-call; another request sweeps it and claims the slot
     onSessionCreate = async () => {
-      await redis.del(pointer);
-      otherReservation = await reservePendingCheckout(userId, plan.id);
+      await db
+        .update(checkoutTable)
+        .set({ expiresAt: new Date(Date.now() - 1000) })
+        .where(eq(checkoutTable.userId, userId));
+      otherClaim = await paymentsRepo.checkout.claim(
+        { userId },
+        { planId: plan.id, expiresAt: new Date(Date.now() + RESERVATION_TTL_SEC * 1000) },
+      );
     };
 
     const res = await checkout(plan.id);
 
     expect(res.status).toBe(409);
-    expect(otherReservation).not.toBeNull();
+    expect(otherClaim).not.toBeNull();
     // the other request still holds the slot, and this request's session was withheld and expired
-    expect(await redis.get(pointer)).toBe(otherReservation!);
-    expect(await getPendingCheckout("cs_test_fake")).toBeNull();
+    const [held] = await db
+      .select()
+      .from(checkoutTable)
+      .where(eq(checkoutTable.id, otherClaim!.id));
+    expect(held!.status).toBe("reserving");
+    expect(
+      await paymentsRepo.checkout.get.bySession({ stripeCheckoutSessionId: "cs_test_fake" }),
+    ).toBeNull();
     expect(expiredSessions).toEqual(["cs_test_fake"]);
   });
 
@@ -1338,7 +1358,10 @@ describe("POST /checkout: reservations, deletion and repeatable plans", () => {
     expect(res.status).toBe(409);
     expect(JSON.stringify(await res.json())).not.toContain("checkout.stripe.com");
     expect(expiredSessions).toEqual(["cs_test_fake"]);
-    expect(await getPendingCheckout("cs_test_fake")).toBeNull();
+    expect(
+      (await paymentsRepo.checkout.get.bySession({ stripeCheckoutSessionId: "cs_test_fake" }))
+        ?.status,
+    ).toBe("expired");
   });
 
   test("repeatable plan: a second request reuses the open session instead of creating another", async () => {
@@ -1379,11 +1402,15 @@ describe("POST /checkout: reservations, deletion and repeatable plans", () => {
   test("repeatable plan: a settling (processing) purchase doesn't block buying it again", async () => {
     const userId = await seedUser({ stripeCustomerId: "cus_test" });
     const plan = await seedPlan({ type: "one_time", repeatable: true });
-    await savePendingCheckout(
-      "cs_settling",
-      { userId, planId: plan.id, status: "processing", url: "https://checkout.stripe.com/s" },
-      PENDING_CHECKOUT_TTL_SEC,
-    );
+    await seedCheckout({
+      userId,
+      planId: plan.id,
+      stripeCheckoutSessionId: "cs_settling",
+      status: "processing",
+      // a repeatable plan's session released the slot when it opened
+      slot: null,
+      url: "https://checkout.stripe.com/s",
+    });
     setSession({ id: userId, ...regularUser });
 
     const res = await checkout(plan.id);
@@ -1650,11 +1677,13 @@ describe("checkouts expired by a plan edit can't be resumed", () => {
       const adminId = await seedUser();
       const userId = await seedUser({ stripeCustomerId: "cus_test" });
       const plan = await seedPlan({ type: "one_time", repeatable, durationDays: 30 });
-      await savePendingCheckout(
-        "cs_old_terms",
-        { userId, planId: plan.id, status: "open", url: "https://checkout.stripe.com/c/old" },
-        PENDING_CHECKOUT_TTL_SEC,
-      );
+      await seedCheckout({
+        userId,
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_old_terms",
+        slot: repeatable ? null : 1,
+        url: "https://checkout.stripe.com/c/old",
+      });
       openSessions = [{ id: "cs_old_terms", status: "open", metadata: { planId: String(plan.id) } }];
 
       setSession({ id: adminId, ...admin }, { plan: ["update"] });
@@ -1664,8 +1693,12 @@ describe("checkouts expired by a plan edit can't be resumed", () => {
         body: JSON.stringify({ durationDays: 7 }),
       });
       expect(patch.status).toBe(204);
-      expect((await getPendingCheckout("cs_old_terms"))?.status).toBe("expired");
-      expect(await getResumableCheckout(userId, plan.id)).toBeNull();
+      expect(
+        (await paymentsRepo.checkout.get.bySession({
+          stripeCheckoutSessionId: "cs_old_terms",
+        }))?.status,
+      ).toBe("expired");
+      expect(await paymentsRepo.checkout.get.resumable({ userId, planId: plan.id })).toBeNull();
 
       setSession({ id: userId, ...regularUser });
       const res = await app.request("/checkout", {

@@ -14,7 +14,7 @@ A Hono + better-auth + Drizzle API template, built on Bun.
 
 ## Payments
 
-A `plan` is `recurring` (a subscription managed by better-auth's stripe plugin) or `one_time` (this app's own Checkout flow, tracked pending in Redis until the webhook confirms it and writes a `purchase` row).
+A `plan` is `recurring` (a subscription managed by better-auth's stripe plugin) or `one_time` (this app's own Checkout flow, tracked in the `checkout` table until the webhook confirms it and writes a `purchase` row).
 
 **Endpoints** (`/api/payments`, session-gated; see `route.ts`):
 
@@ -53,7 +53,7 @@ Give it the same env vars as the main app (`DB_URL`/`DB_*`, `REDIS_URL`, `STRIPE
 
 | Delete | What it is |
 | --- | --- |
-| `lib/pending-checkout.ts` | Redis pending-checkout state |
+| the `checkout` table + its use-cases | `claim-checkout.ts` / `get-checkouts.ts` / `update-checkout.ts`, the `checkout` table and its `checkout_status` enum |
 | `use-cases/checkout.ts` | `createCheckout` / `getCheckoutStatus` |
 | `lib/webhook.ts` | the Stripe webhook handler (also remove `auth.ts`'s `onEvent`) |
 | `lib/charge-state.ts` | `resolveChargeState`, shared by the webhook and the reconciler |
