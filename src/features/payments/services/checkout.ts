@@ -326,8 +326,9 @@ export async function markExpired(sessionId: string): Promise<boolean> {
  * @description Marks a checkout completed once its `purchase` row exists, freeing the (user, plan)
  * slot. Called last by `services.fulfillment.confirm`, after the insert - any request that then
  * claims the freed slot is guaranteed to see the purchase.
- * @returns false if there was no checkout row (a session created before this table existed, or one
- * the reconciler found), or if it already reached a different terminal status.
+ * @returns false if there was no checkout row to update - a session whose owner was resolved from
+ * Stripe metadata alone, with no row of its own (see `fulfillment.ts`'s `resolveOwner`) - or if it
+ * already reached a different terminal status.
  */
 export async function markCompleted(sessionId: string): Promise<boolean> {
   const res = await paymentsRepo.checkout.transition(

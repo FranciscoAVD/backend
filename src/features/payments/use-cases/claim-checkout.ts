@@ -15,8 +15,8 @@ const SLOT = 1;
 /**
  * Marks a (user, plan)'s slot-holding rows `expired` once they're past their own `expiresAt` - the
  * request died mid-checkout, or Stripe's `checkout.session.expired` webhook never landed. Without
- * this a stuck row would hold the slot forever; the TTL on the Redis keys this table replaced used
- * to do it. Private to the claim below, which is the only path that needs the slot free.
+ * this a stuck row would hold the slot forever. Private to the claim below, which is the only path
+ * that needs the slot free.
  */
 async function expireStaleCheckouts(
   target: { userId: string } & Pick<Payment.Checkout, "planId">,

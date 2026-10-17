@@ -47,7 +47,7 @@ export const STRIPE_MAX_NETWORK_RETRIES = 2;
 export const MAX_DURATION_DAYS = 36_500;
 export const MAX_TRIAL_DAYS = 730;
 
-/** How long an `open` checkout row stays valid - no longer matches the Stripe session (see below). */
+/** How long an `open` checkout row stays valid. */
 export const PENDING_CHECKOUT_TTL_SEC = 60 * 60 * 24;
 /**
  * The Stripe Checkout Session's own `expires_at`, kept 10 minutes shorter than
