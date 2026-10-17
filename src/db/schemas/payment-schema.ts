@@ -28,6 +28,8 @@ export const paymentAuditType = pgEnum("payment_audit_type", [
   // confirmCheckout: money was taken for an already-owned non-repeatable plan (the race the
   // two guards above can't fully close) - still recorded as a purchase; this flags it for review
   "duplicate_purchase_confirmed",
+  // POST /purchases/:id/refund: an admin issued a refund through Stripe
+  "refund_issued",
 ]);
 
 export const plan = pgTable("plan", {

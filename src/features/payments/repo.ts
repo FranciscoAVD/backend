@@ -14,6 +14,7 @@ import {
   getAllPurchasesWithAccess,
   getAllPurchasesAdmin,
   getPurchasesByUserAdmin,
+  getPurchaseById,
   getPurchaseBySession,
   getPurchaseBySessionAnyUser,
   getBlockingPurchaseByPlan,
@@ -57,6 +58,7 @@ export const paymentsRepo = {
     get: {
       mine: getAllPurchases,
       mineWithAccess: getAllPurchasesWithAccess,
+      byId: getPurchaseById,
       bySession: getPurchaseBySession,
       bySessionAnyUser: getPurchaseBySessionAnyUser,
       allAdmin: getAllPurchasesAdmin,

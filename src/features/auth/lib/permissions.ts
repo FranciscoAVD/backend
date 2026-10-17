@@ -9,7 +9,7 @@ export const statement = {
   ...defaultStatements,
   todo: ["create", "update", "delete"],
   plan: ["create", "update", "read:active", "read:all"],
-  purchase: ["read:all"],
+  purchase: ["read:all", "refund"],
   audit: ["list"],
 } as const;
 
@@ -23,7 +23,7 @@ export const user = ac.newRole({
 export const admin = ac.newRole({
   todo: ["create", "update", "delete"],
   plan: ["create", "update", "read:active", "read:all"],
-  purchase: ["read:all"],
+  purchase: ["read:all", "refund"],
   audit: ["list"],
   ...adminAc.statements,
 });

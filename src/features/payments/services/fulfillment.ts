@@ -6,6 +6,7 @@ import { getPendingCheckout, removePendingCheckout } from "@f/payments/lib/state
 import { decodeDurationDays, decodeOverlapping } from "@f/payments/lib/utils";
 import { resolveChargeState } from "@f/payments/lib/stripe/charge-state";
 import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
+import type { Payment } from "@f/payments/lib/types";
 
 const idOf = (ref: string | { id: string } | null) =>
   typeof ref === "string" ? ref : (ref?.id ?? null);
@@ -170,4 +171,58 @@ export async function syncCharge(
   const intent = await getPaymentProcessor().paymentIntents.retrieve(stripePaymentIntentId);
   if (intent.metadata.planId)
     throw new Error("Purchase not recorded yet for this payment intent");
+}
+
+export type RefundResult =
+  | { kind: "not_found" }
+  | { kind: "no_payment_intent" } // a $0 purchase - nothing was ever charged
+  | { kind: "already_refunded" }
+  | { kind: "refunded"; purchase: Payment.Purchase };
+
+/**
+ * @description Issues a refund through Stripe for a purchase, then pulls the resulting
+ * refund/dispute state back the same way the webhook does (`syncCharge`/`resolveChargeState`),
+ * rather than recomputing the amount/status math here and risking it drifting from that logic.
+ * Writes a `refund_issued` audit entry naming the admin who issued it - best-effort, since the
+ * refund itself already succeeded by the time it's written. Operation must be wrapped in try-catch
+ */
+export async function refund(
+  target: Pick<Payment.Purchase, "id">,
+  admin: { id: string },
+  options: { amount?: number; reason?: Stripe.RefundCreateParams.Reason } = {},
+): Promise<RefundResult> {
+  const purchase = await paymentsRepo.purchase.get.byId(target);
+  if (!purchase) return { kind: "not_found" };
+  if (!purchase.stripePaymentIntentId) return { kind: "no_payment_intent" };
+  if (purchase.status === "refunded") return { kind: "already_refunded" };
+
+  const stripe = getPaymentProcessor();
+  await stripe.refunds.create({
+    payment_intent: purchase.stripePaymentIntentId,
+    ...(options.amount != null ? { amount: options.amount } : {}),
+    ...(options.reason ? { reason: options.reason } : {}),
+  });
+
+  const synced = await paymentsRepo.purchase.syncCharge(
+    { stripePaymentIntentId: purchase.stripePaymentIntentId },
+    () => resolveChargeState(purchase.stripePaymentIntentId!),
+  );
+
+  const [, auditError] = await tryCatch(
+    paymentsRepo.audit.add({
+      type: "refund_issued",
+      userId: purchase.userId,
+      planId: purchase.planId,
+      existingPurchaseId: purchase.id,
+      stripeCheckoutSessionId: purchase.stripeCheckoutSessionId,
+      details: { issuedBy: admin.id, amount: options.amount ?? null, reason: options.reason ?? null },
+    }),
+  );
+  if (auditError)
+    logger.warn({ err: auditError, purchase: purchase.id }, "payments.audit.write_failed");
+
+  return {
+    kind: "refunded",
+    purchase: synced.found && synced.to ? { ...purchase, ...synced.to } : purchase,
+  };
 }

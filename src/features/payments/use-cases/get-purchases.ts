@@ -162,6 +162,23 @@ export async function getPurchaseBySession(
 }
 
 /**
+ * @description Select query for a purchase by its own id, whoever owns it - for an admin acting
+ * on a specific purchase (e.g. issuing a refund), not a route answering a user about their own.
+ * Assumes validation. Operation must be wrapped in try-catch
+ * @param purchase object of the purchase's own id
+ * @returns Purchase object or null. If null, no purchase exists with that id.
+ */
+export async function getPurchaseById(
+  purchase: Pick<Payment.Purchase, "id">,
+): Promise<Payment.Purchase | null> {
+  const res = await db
+    .select()
+    .from(purchaseTable)
+    .where(eq(purchaseTable.id, purchase.id));
+  return res[0] ?? null;
+}
+
+/**
  * @description Select query for the purchase recorded for a checkout session, whoever owns it -
  * including a purchase whose user was since deleted (`userId` set null), which the user-scoped
  * `getPurchaseBySession` can't see. For system callers that already know the session is ours

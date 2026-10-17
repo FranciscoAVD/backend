@@ -16,6 +16,7 @@ import {
   checkoutSchema,
   insertPlanSchema,
   updatePlanSchema,
+  refundPurchaseSchema,
 } from "@f/payments/lib/schemas";
 import { isCheckoutSessionId } from "@f/payments/lib/utils";
 
@@ -430,6 +431,45 @@ const app = new Hono<PinoLoggerEnv>()
             { data: { sessionId: res.sessionId, url: res.url }, message: "Checkout created" },
             HTTP.OK,
           );
+      }
+    },
+  )
+  .post(
+    "/purchases/:id/refund",
+    idParamValidator,
+    requirePermissionMiddleware({ purchase: ["refund"] }),
+    jsonValidator(refundPurchaseSchema),
+    async (c) => {
+      const { user } = c.get("session");
+      const { id } = c.req.valid("param");
+      const { data } = c.req.valid("json");
+
+      const [res, error] = await tryCatch(
+        paymentsServices.fulfillment.refund({ id }, { id: user.id }, data),
+      );
+      if (error) {
+        c.var.logger.error({ err: error, user: user.id, purchase: id }, "payments.purchase.refund");
+        return c.json(
+          { message: "Something went wrong. Try again later." },
+          HTTP.InternalServerError,
+        );
+      }
+
+      switch (res.kind) {
+        case "not_found":
+          return c.json({ message: "Purchase not found" }, HTTP.NotFound);
+        case "no_payment_intent":
+          return c.json(
+            { message: "This purchase has no payment to refund" },
+            HTTP.UnprocessableEntity,
+          );
+        case "already_refunded":
+          return c.json(
+            { message: "This purchase has already been refunded" },
+            HTTP.Conflict,
+          );
+        case "refunded":
+          return c.json({ data: res.purchase, message: "Purchase refunded" }, HTTP.OK);
       }
     },
   );

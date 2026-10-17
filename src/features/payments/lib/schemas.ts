@@ -115,6 +115,11 @@ export const checkoutSchema = z.object({
   planId: z.number().int().positive(),
 });
 
+export const refundPurchaseSchema = z.object({
+  amount: z.number().int().positive().optional(), // omit for a full refund
+  reason: z.enum(["duplicate", "fraudulent", "requested_by_customer"]).optional(),
+});
+
 export const insertPaymentAuditLogSchema = createInsertSchema(
   paymentAuditLog,
 ).omit({ createdAt: true });

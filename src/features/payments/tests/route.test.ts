@@ -58,6 +58,13 @@ let openSessions: { id: string; status: string; metadata: Record<string, string>
 let expiredSessions: string[] = [];
 let expireFails = false;
 let productsCreated = 0;
+// POST /purchases/:id/refund
+type FakeCharge = { amount: number; amount_refunded: number; refunded: boolean; disputed: boolean };
+let refundCalls: { paymentIntent: string; amount?: number; reason?: string }[] = [];
+let refundFails = false;
+// payment-intent id -> fake charge state, so paymentIntents.retrieve's latest_charge reflects
+// what refunds.create just did (resolveChargeState pulls this back after issuing a refund)
+let fakeCharges: Record<string, FakeCharge> = {};
 mock.module("@f/payments/lib/stripe/client", () => ({
   getPaymentProcessor: () => ({
     products: {
@@ -90,6 +97,29 @@ mock.module("@f/payments/lib/stripe/client", () => ({
         },
       },
     },
+    refunds: {
+      create: async (params: { payment_intent: string; amount?: number; reason?: string }) => {
+        if (refundFails) throw new Error("Stripe is down");
+        refundCalls.push({
+          paymentIntent: params.payment_intent,
+          amount: params.amount,
+          reason: params.reason,
+        });
+        const charge = fakeCharges[params.payment_intent];
+        if (charge) {
+          charge.amount_refunded = Math.min(
+            charge.amount,
+            charge.amount_refunded + (params.amount ?? charge.amount),
+          );
+          charge.refunded = charge.amount_refunded >= charge.amount;
+        }
+        return { id: `re_${crypto.randomUUID()}` };
+      },
+    },
+    paymentIntents: {
+      retrieve: async (id: string) => ({ id, latest_charge: fakeCharges[id] ?? null }),
+    },
+    disputes: { list: () => ({ data: [] }) },
   }),
 }));
 
@@ -182,6 +212,18 @@ describe("auth gating", () => {
     setSession({ id: userId, ...admin });
 
     const res = await app.request("/audit-log");
+    expect(res.status).toBe(403);
+  });
+
+  test("403s on POST /purchases/:id/refund without purchase:refund", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...admin });
+
+    const res = await app.request("/purchases/1/refund", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({}),
+    });
     expect(res.status).toBe(403);
   });
 });
@@ -1556,4 +1598,116 @@ describe("checkouts expired by a plan edit can't be resumed", () => {
       });
       expect(sessionCreateCalls).toHaveLength(1);
     });
+});
+
+describe("POST /purchases/:id/refund", () => {
+  beforeEach(async () => {
+    await resetDb();
+    await resetRedis();
+    refundCalls = [];
+    refundFails = false;
+    fakeCharges = {};
+  });
+
+  const refundReq = (id: number, body: Record<string, unknown> = {}) =>
+    app.request(`/purchases/${id}/refund`, {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(body),
+    });
+
+  // stripePaymentIntentId: null mirrors a $0 purchase, where Stripe never creates a payment
+  // intent at all - everything else is a full-amount, unrefunded purchase on a fresh plan
+  async function seedRefundablePurchase(stripePaymentIntentId: string | null = "pi_refund_test") {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    const purchase = await addPurchase(
+      { userId },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: `cs_${crypto.randomUUID()}`,
+        stripePaymentIntentId,
+        amountTotal: plan.amount,
+        currency: plan.currency,
+      },
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
+    if (stripePaymentIntentId)
+      fakeCharges[stripePaymentIntentId] = {
+        amount: plan.amount,
+        amount_refunded: 0,
+        refunded: false,
+        disputed: false,
+      };
+    return { plan, purchase: purchase! };
+  }
+
+  async function asAdmin() {
+    const adminId = await seedUser();
+    setSession({ id: adminId, ...admin }, { purchase: ["refund"] });
+  }
+
+  test("refunds a purchase in full, syncing status and amountRefunded back from Stripe", async () => {
+    const { plan, purchase } = await seedRefundablePurchase();
+    await asAdmin();
+
+    const res = await refundReq(purchase.id);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { status: string; amountRefunded: number } };
+    expect(body.data.status).toBe("refunded");
+    expect(body.data.amountRefunded).toBe(plan.amount);
+    expect(refundCalls).toEqual([
+      { paymentIntent: "pi_refund_test", amount: undefined, reason: undefined },
+    ]);
+
+    const auditRows = await db.select().from(paymentAuditLog);
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0]?.type).toBe("refund_issued");
+    expect(auditRows[0]?.existingPurchaseId).toBe(purchase.id);
+  });
+
+  test("supports a partial refund amount and reason", async () => {
+    const { purchase } = await seedRefundablePurchase();
+    await asAdmin();
+
+    const res = await refundReq(purchase.id, { amount: 500, reason: "requested_by_customer" });
+    expect(res.status).toBe(200);
+    expect(refundCalls).toEqual([
+      { paymentIntent: "pi_refund_test", amount: 500, reason: "requested_by_customer" },
+    ]);
+    const body = (await res.json()) as { data: { amountRefunded: number } };
+    expect(body.data.amountRefunded).toBe(500);
+  });
+
+  test("404s for a nonexistent purchase", async () => {
+    await asAdmin();
+    expect((await refundReq(999999)).status).toBe(404);
+  });
+
+  test("422s a purchase with no payment intent (e.g. a $0 purchase)", async () => {
+    const { purchase } = await seedRefundablePurchase(null);
+    await asAdmin();
+
+    expect((await refundReq(purchase.id)).status).toBe(422);
+  });
+
+  test("409s refunding an already-refunded purchase", async () => {
+    const { purchase } = await seedRefundablePurchase();
+    await asAdmin();
+
+    expect((await refundReq(purchase.id)).status).toBe(200);
+    expect((await refundReq(purchase.id)).status).toBe(409);
+  });
+
+  test("a Stripe failure 500s, and repeating the refund completes it", async () => {
+    const { purchase } = await seedRefundablePurchase();
+    await asAdmin();
+
+    refundFails = true;
+    expect((await refundReq(purchase.id)).status).toBe(500);
+    refundFails = false;
+    expect((await refundReq(purchase.id)).status).toBe(200);
+    expect(refundCalls).toHaveLength(1);
+  });
 });
