@@ -145,6 +145,22 @@ mock.module("@f/payments/lib/stripe/client", () => ({
   }),
 }));
 
+// mocks @f/email/lib/client, not @f/email/send - see CLAUDE.md's testing section for why.
+// POST /purchases/:id/refund now sends a best-effort confirmation email on a successful refund.
+let refundConfirmationEmailCalls: Record<string, unknown>[] = [];
+let refundConfirmationEmailFails = false;
+mock.module("@f/email/lib/client", () => ({
+  getEmailClient: () => ({
+    emails: {
+      send: async (payload: Record<string, unknown>) => {
+        if (refundConfirmationEmailFails) throw new Error("Resend is down");
+        refundConfirmationEmailCalls.push(payload);
+        return { data: { id: "email_1" }, error: null };
+      },
+    },
+  }),
+}));
+
 import { db } from "@d/connection";
 import { paymentAuditLog } from "@d/schemas/payment-schema";
 import {
@@ -1632,6 +1648,8 @@ describe("POST /purchases/:id/refund", () => {
     fakeCharges = {};
     refundsByIdempotencyKey = {};
     syncFails = false;
+    refundConfirmationEmailCalls = [];
+    refundConfirmationEmailFails = false;
   });
 
   const refundReq = (id: number, body: Record<string, unknown> = {}) =>
@@ -1643,8 +1661,11 @@ describe("POST /purchases/:id/refund", () => {
 
   // stripePaymentIntentId: null mirrors a $0 purchase, where Stripe never creates a payment
   // intent at all - everything else is a full-amount, unrefunded purchase on a fresh plan
-  async function seedRefundablePurchase(stripePaymentIntentId: string | null = "pi_refund_test") {
-    const userId = await seedUser();
+  async function seedRefundablePurchase(
+    stripePaymentIntentId: string | null = "pi_refund_test",
+    userOverrides: Partial<{ email: string; name: string }> = {},
+  ) {
+    const userId = await seedUser({ email: "buyer@example.test", name: "Ada", ...userOverrides });
     const plan = await seedPlan();
     const purchase = await addPurchase(
       { userId },
@@ -1690,6 +1711,10 @@ describe("POST /purchases/:id/refund", () => {
     expect(auditRows).toHaveLength(1);
     expect(auditRows[0]?.type).toBe("refund_issued");
     expect(auditRows[0]?.existingPurchaseId).toBe(purchase.id);
+
+    expect(refundConfirmationEmailCalls).toHaveLength(1);
+    expect(refundConfirmationEmailCalls[0]?.to).toBe("buyer@example.test");
+    expect(refundConfirmationEmailCalls[0]?.html).toContain("Hi Ada,");
   });
 
   test("supports a partial refund amount and reason", async () => {
@@ -1703,6 +1728,10 @@ describe("POST /purchases/:id/refund", () => {
     ]);
     const body = (await res.json()) as { data: { amountRefunded: number } };
     expect(body.data.amountRefunded).toBe(500);
+
+    // the email reports the amount of *this* refund, not the (so far identical) running total
+    expect(refundConfirmationEmailCalls).toHaveLength(1);
+    expect(refundConfirmationEmailCalls[0]?.html).toContain("$5.00");
   });
 
   test("404s for a nonexistent purchase", async () => {
@@ -1717,15 +1746,16 @@ describe("POST /purchases/:id/refund", () => {
     expect((await refundReq(purchase.id)).status).toBe(422);
   });
 
-  test("409s refunding an already-refunded purchase", async () => {
+  test("409s refunding an already-refunded purchase, sending no additional email", async () => {
     const { purchase } = await seedRefundablePurchase();
     await asAdmin();
 
     expect((await refundReq(purchase.id)).status).toBe(200);
     expect((await refundReq(purchase.id)).status).toBe(409);
+    expect(refundConfirmationEmailCalls).toHaveLength(1);
   });
 
-  test("409s refunding a disputed charge, with a clear message", async () => {
+  test("409s refunding a disputed charge, with a clear message and no email", async () => {
     const { purchase } = await seedRefundablePurchase();
     await asAdmin();
 
@@ -1737,9 +1767,10 @@ describe("POST /purchases/:id/refund", () => {
     const res = await refundReq(purchase.id);
     expect(res.status).toBe(409);
     expect(((await res.json()) as { message: string }).message).toContain("disputed");
+    expect(refundConfirmationEmailCalls).toHaveLength(0);
   });
 
-  test("422s asking to refund more than what's left, with a clear message", async () => {
+  test("422s asking to refund more than what's left, with a clear message and no email", async () => {
     const { purchase } = await seedRefundablePurchase();
     await asAdmin();
 
@@ -1752,6 +1783,7 @@ describe("POST /purchases/:id/refund", () => {
     const res = await refundReq(purchase.id, { amount: 999999 });
     expect(res.status).toBe(422);
     expect(((await res.json()) as { message: string }).message).toContain("exceeds");
+    expect(refundConfirmationEmailCalls).toHaveLength(0);
   });
 
   test("an unrecognized Stripe error still 500s", async () => {
@@ -1775,6 +1807,8 @@ describe("POST /purchases/:id/refund", () => {
     refundFails = false;
     expect((await refundReq(purchase.id)).status).toBe(200);
     expect(refundCalls).toHaveLength(1);
+    // only the successful retry actually refunded anything - only it emails a confirmation
+    expect(refundConfirmationEmailCalls).toHaveLength(1);
   });
 
   test("a sync failure after a successful refund still 200s with an audit entry, and a retry doesn't refund twice", async () => {
@@ -1799,5 +1833,19 @@ describe("POST /purchases/:id/refund", () => {
     expect(retry.status).toBe(200);
     expect(refundCalls).toHaveLength(1);
     expect(fakeCharges["pi_refund_test"]?.amount_refunded).toBe(plan.amount);
+    // no email on the first attempt - the sync never confirmed a transition happened at all;
+    // the retry's successful sync is what actually earns the one confirmation email
+    expect(refundConfirmationEmailCalls).toHaveLength(1);
+  });
+
+  test("a failing confirmation email doesn't fail the refund response", async () => {
+    const { purchase } = await seedRefundablePurchase();
+    await asAdmin();
+    refundConfirmationEmailFails = true;
+
+    const res = await refundReq(purchase.id);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { data: { status: string } };
+    expect(body.data.status).toBe("refunded");
   });
 });

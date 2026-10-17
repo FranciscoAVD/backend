@@ -30,6 +30,16 @@ mock.module("@f/payments/lib/stripe/client", () => ({
   }),
 }));
 
+// mocks @f/email/lib/client, not @f/email/send - see CLAUDE.md's testing section for why. The
+// refund here now triggers a best-effort confirmation email (fulfillment.ts's syncCharge); this
+// keeps the test fully offline rather than hitting the real (sandboxed) Resend API, same reason
+// every other Stripe-dependent test mocks its own non-Postgres I/O.
+mock.module("@f/email/lib/client", () => ({
+  getEmailClient: () => ({
+    emails: { send: async () => ({ data: { id: "email_1" }, error: null }) },
+  }),
+}));
+
 import type Stripe from "stripe";
 import { handleStripeEvent } from "@f/payments/lib/webhook";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";

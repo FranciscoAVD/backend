@@ -9,6 +9,7 @@ import {
   Text,
 } from "@react-email/components";
 import { render } from "@react-email/render";
+import { formatAmount } from "@f/email/lib/format-amount";
 
 /**
  * @description Content for the purchase-confirmation (receipt) email. Kept separate from
@@ -26,15 +27,6 @@ type PurchaseConfirmationEmailProps = {
   /** A public (not localhost) URL - email clients fetch images remotely, never a local path. */
   logoUrl?: string;
 };
-
-// a fixed locale, not the runtime's default - this is an email's content, not a UI rendered in
-// the reader's own browser, so it must read the same regardless of which locale the server runs
-// under
-const formatAmount = (amountTotal: number, currency: string) =>
-  new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: currency.toUpperCase(),
-  }).format(amountTotal / 100);
 
 function PurchaseConfirmationEmail({
   name,

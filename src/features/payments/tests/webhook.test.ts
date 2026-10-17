@@ -645,6 +645,60 @@ describe("handleStripeEvent", () => {
     expect(purchase?.amountRefunded).toBe(plan.amount);
   });
 
+  test("charge.refunded sends exactly one refund-confirmation email", async () => {
+    const userId = await seedUser({ email: "buyer@example.test", name: "Ada" });
+    const plan = await seedPlan({ name: "Pro" });
+    await addPurchase(
+      { userId },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_refund_email",
+        stripePaymentIntentId: "pi_refund_email",
+        amountTotal: plan.amount,
+        currency: plan.currency,
+      },
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
+    fakeLatestCharge = { amount_refunded: plan.amount, refunded: true, disputed: false };
+
+    await handleStripeEvent(event("charge.refunded", { payment_intent: "pi_refund_email" }));
+
+    expect(purchaseConfirmationEmailCalls).toHaveLength(1);
+    expect(purchaseConfirmationEmailCalls[0]?.to).toBe("buyer@example.test");
+    expect(purchaseConfirmationEmailCalls[0]?.subject).toBe("Your refund has been processed");
+
+    // redelivering the same already-synced charge sends no additional email
+    await handleStripeEvent(event("charge.refunded", { payment_intent: "pi_refund_email" }));
+    expect(purchaseConfirmationEmailCalls).toHaveLength(1);
+  });
+
+  test("a dispute merely opening sends no refund-confirmation email", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    await addPurchase(
+      { userId },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_dispute_open",
+        stripePaymentIntentId: "pi_dispute_open",
+        amountTotal: plan.amount,
+        currency: plan.currency,
+      },
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
+    // open dispute: status moves to "disputed", but no money has moved yet
+    fakeLatestCharge = { amount_refunded: 0, refunded: false, disputed: true };
+    fakeDispute = { status: "needs_response", amount: plan.amount };
+
+    await handleStripeEvent(event("charge.dispute.created", { payment_intent: "pi_dispute_open" }));
+
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase?.status).toBe("disputed");
+    expect(purchaseConfirmationEmailCalls).toHaveLength(0);
+  });
+
   test("charge.refunded re-fetches the live charge instead of trusting a stale event payload", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();

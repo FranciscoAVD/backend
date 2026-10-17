@@ -7,6 +7,8 @@ import { decodeDurationDays, decodeOverlapping } from "@f/payments/lib/utils";
 import { resolveChargeState } from "@f/payments/lib/stripe/charge-state";
 import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
 import { sendPurchaseConfirmationEmail } from "@f/payments/lib/purchase-confirmation-email";
+import { sendRefundConfirmationEmail } from "@f/payments/lib/refund-confirmation-email";
+import type { ChargeSyncResult } from "@f/payments/use-cases/sync-purchase-charge";
 import type { Payment } from "@f/payments/lib/types";
 
 const idOf = (ref: string | { id: string } | null) =>
@@ -171,6 +173,37 @@ export async function confirm(
 }
 
 /**
+ * @description Sends the refund-confirmation email, but only when this exact sync actually moved
+ * money back (`amountRefunded` increasing) - not keyed on `status` reaching "refunded", since a
+ * partial refund alone doesn't flip it (see `purchaseUpdateFromCharge`/`PARTIAL_REFUND_REVOKES_ACCESS`
+ * in `lib/utils.ts`) and would otherwise never get an email at all. This also naturally excludes a
+ * redelivered webhook re-confirming an already-synced amount, a sync with no diff, and a dispute
+ * merely opening (no amount change yet) - all land here with `delta <= 0`. A dispute *lost* does
+ * increase `amountRefunded` (resolveChargeState adds it there too, since the chargeback returns the
+ * money just as surely as an explicit refund does) and correctly emails the same way. Best-effort:
+ * never throws.
+ */
+async function maybeSendRefundEmail(synced: ChargeSyncResult): Promise<void> {
+  if (!synced.found || !synced.to) return;
+  if (!synced.purchase.userId) return; // the purchaser's account was since deleted
+
+  const delta = synced.to.amountRefunded - synced.from.amountRefunded;
+  if (delta <= 0) return;
+
+  const plan = await paymentsRepo.plan.get.one({ id: synced.purchase.planId });
+  const [, emailError] = await tryCatch(
+    sendRefundConfirmationEmail({
+      userId: synced.purchase.userId,
+      planName: plan?.name ?? "your purchase",
+      amountRefunded: delta,
+      currency: synced.purchase.currency,
+    }),
+  );
+  if (emailError)
+    logger.warn({ err: emailError }, "payments.refund_confirmation_email.send_failed");
+}
+
+/**
  * @description Syncs a purchase's refund/dispute state from a `charge.*` webhook event, or throws
  * so Stripe retries if the purchase isn't recorded yet. Operation must be wrapped in try-catch
  */
@@ -183,7 +216,10 @@ export async function syncCharge(
   const synced = await paymentsRepo.purchase.syncCharge({ stripePaymentIntentId }, () =>
     resolveChargeState(stripePaymentIntentId),
   );
-  if (synced.found) return;
+  if (synced.found) {
+    await maybeSendRefundEmail(synced);
+    return;
+  }
 
   const intent = await getPaymentProcessor().paymentIntents.retrieve(stripePaymentIntentId);
   if (intent.metadata.planId)
@@ -276,6 +312,8 @@ export async function refund(
     logger.warn({ err: syncError, purchase: purchase.id }, "payments.purchase.refund_sync_failed");
     return { kind: "refunded", purchase };
   }
+
+  await maybeSendRefundEmail(synced);
 
   return {
     kind: "refunded",

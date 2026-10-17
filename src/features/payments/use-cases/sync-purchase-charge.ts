@@ -7,7 +7,13 @@ type PurchaseState = Pick<Payment.Purchase, "status" | "amountRefunded">;
 
 export type ChargeSyncResult =
   | { found: false }
-  | { found: true; updated: boolean; from: PurchaseState; to: PurchaseState | null };
+  | {
+      found: true;
+      updated: boolean;
+      from: PurchaseState;
+      to: PurchaseState | null;
+      purchase: Pick<Payment.Purchase, "userId" | "planId" | "currency">;
+    };
 
 // a write that keeps losing to concurrent ones gives up rather than spinning: the caller fails (the
 // webhook answers 400 and Stripe redelivers; the reconciler counts it failed) and tries later
@@ -31,7 +37,9 @@ const MAX_ATTEMPTS = 3;
  * purchase row at all, and again after each lost race; null means there's no charge to sync from yet
  * @param options `write: false` reports what would change without changing it (a dry run)
  * @returns `found: false` if no purchase was paid by this intent; otherwise its state before, the
- * live target, and whether it changed (or, without `write`, would have).
+ * live target, whether it changed (or, without `write`, would have), and the purchase's owner/plan/
+ * currency - for a caller (e.g. a refund-confirmation email) that needs to act on the transition
+ * without a second lookup.
  */
 export async function syncPurchaseCharge(
   purchase: { stripePaymentIntentId: string },
@@ -44,17 +52,22 @@ export async function syncPurchaseCharge(
         id: purchaseTable.id,
         status: purchaseTable.status,
         amountRefunded: purchaseTable.amountRefunded,
+        userId: purchaseTable.userId,
+        planId: purchaseTable.planId,
+        currency: purchaseTable.currency,
       })
       .from(purchaseTable)
       .where(eq(purchaseTable.stripePaymentIntentId, purchase.stripePaymentIntentId));
     if (!row) return { found: false };
 
+    const owner = { userId: row.userId, planId: row.planId, currency: row.currency };
     const from = { status: row.status, amountRefunded: row.amountRefunded };
     const to = await resolve();
     const differs =
       to !== null &&
       (to.status !== from.status || to.amountRefunded !== from.amountRefunded);
-    if (!differs || !options.write) return { found: true, updated: differs, from, to };
+    if (!differs || !options.write)
+      return { found: true, updated: differs, from, to, purchase: owner };
 
     const written = await db
       .update(purchaseTable)
@@ -67,7 +80,7 @@ export async function syncPurchaseCharge(
         ),
       )
       .returning({ id: purchaseTable.id });
-    if (written.length > 0) return { found: true, updated: true, from, to };
+    if (written.length > 0) return { found: true, updated: true, from, to, purchase: owner };
     // the row changed since it was read - this fetch may predate that change, so start over
   }
   throw new Error("Purchase kept changing during its charge sync; retry later");

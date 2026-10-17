@@ -24,14 +24,14 @@ async function seedPurchase(stripePaymentIntentId: string) {
     { durationDays: null },
     new Date(),
   );
-  return userId;
+  return { userId, planId: plan.id };
 }
 
 const refunded = { status: "refunded" as const, amountRefunded: 1000 };
 
 describe("syncPurchaseCharge", () => {
   test("writes the live state when it differs, and reports the change", async () => {
-    const userId = await seedPurchase("pi_1");
+    const { userId, planId } = await seedPurchase("pi_1");
 
     const res = await syncPurchaseCharge({ stripePaymentIntentId: "pi_1" }, async () => refunded);
 
@@ -40,6 +40,7 @@ describe("syncPurchaseCharge", () => {
       updated: true,
       from: { status: "paid", amountRefunded: 0 },
       to: refunded,
+      purchase: { userId, planId, currency: "usd" },
     });
     expect((await getAllPurchases({ userId }))[0]).toMatchObject(refunded);
   });
@@ -69,7 +70,7 @@ describe("syncPurchaseCharge", () => {
   });
 
   test("write: false reports the change without making it", async () => {
-    const userId = await seedPurchase("pi_1");
+    const { userId } = await seedPurchase("pi_1");
 
     const res = await syncPurchaseCharge(
       { stripePaymentIntentId: "pi_1" },
@@ -99,7 +100,7 @@ describe("syncPurchaseCharge", () => {
   });
 
   test("a fetch that finishes after a newer write can't overwrite it", async () => {
-    const userId = await seedPurchase("pi_1");
+    const { userId } = await seedPurchase("pi_1");
     let resolveSlow!: () => void;
     const slowFetchCanFinish = new Promise<void>((r) => (resolveSlow = r));
     let fetches = 0;
@@ -123,7 +124,7 @@ describe("syncPurchaseCharge", () => {
   });
 
   test("gives up with an error if the row keeps changing under it", async () => {
-    const userId = await seedPurchase("pi_1");
+    const { userId } = await seedPurchase("pi_1");
     let n = 0;
     // every fetch races a write that changes the row first
     const res = syncPurchaseCharge({ stripePaymentIntentId: "pi_1" }, async () => {
