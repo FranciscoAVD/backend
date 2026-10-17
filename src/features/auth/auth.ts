@@ -61,10 +61,14 @@ export const auth = betterAuth({
   emailAndPassword: {
     enabled: true,
     sendResetPassword: sendResetPasswordEmail,
+    // without this, an attacker who signs up with someone else's email first keeps a working
+    // session even after the real owner later resets the password - better-auth's own
+    // resetPassword only revokes other sessions when this is on
+    requireEmailVerification: true,
+    revokeSessionsOnPasswordReset: true,
   },
   emailVerification: {
     sendVerificationEmail,
-    // must be explicit - otherwise this follows requireEmailVerification, which stays off
     sendOnSignUp: true,
   },
   databaseHooks: {

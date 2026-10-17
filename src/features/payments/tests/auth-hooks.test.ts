@@ -94,6 +94,23 @@ mock.module("@f/payments/lib/stripe/client", () => ({
   getPaymentProcessorForAuthPlugin: fakeStripeClient,
 }));
 
+// sign-up now sends a real verification email (requireEmailVerification: true) - faked the same
+// way as every other Stripe-dependent test, via the thin client wrapper rather than the raw SDK
+// (@f/email/lib/client, never @f/email/send or "resend" - see CLAUDE.md's testing section). The
+// password-reset regression test below needs to read the reset email's actual content to recover
+// the token, so a real send (silently failing against the Resend sandbox) won't do here.
+let emailSendCalls: Record<string, unknown>[] = [];
+mock.module("@f/email/lib/client", () => ({
+  getEmailClient: () => ({
+    emails: {
+      send: async (payload: Record<string, unknown>) => {
+        emailSendCalls.push(payload);
+        return { data: { id: "email_1" }, error: null };
+      },
+    },
+  }),
+}));
+
 const { auth } = await import("@f/auth/auth");
 
 beforeEach(async () => {
@@ -110,10 +127,28 @@ beforeEach(async () => {
   expireFails = false;
   customerUpdateCalls = [];
   onCheckoutCreate = null;
+  emailSendCalls = [];
 });
 
 const userExists = async (id: string) =>
   (await db.select().from(userTable).where(eq(userTable.id, id))).length > 0;
+
+// sign-up no longer creates a session once email verification is required - mark the address
+// verified directly (these tests aren't exercising the verification-email flow itself) and sign
+// in for real, the same as a user who clicked their verification link would
+async function signUpVerifiedAndSignIn(overrides: { email?: string; name?: string } = {}) {
+  const email = overrides.email ?? `u-${crypto.randomUUID()}@example.com`;
+  const name = overrides.name ?? "Test";
+  await auth.api.signUpEmail({ body: { email, password: "correct-horse-battery", name } });
+  await db.update(userTable).set({ emailVerified: true }).where(eq(userTable.email, email));
+  const res = await auth.api.signInEmail({
+    body: { email, password: "correct-horse-battery" },
+    asResponse: true,
+  });
+  const cookie = res.headers.get("set-cookie") ?? "";
+  const session = await auth.api.getSession({ headers: new Headers({ cookie }) });
+  return { cookie, userId: session!.user.id, email };
+}
 
 describe("deleting a user cancels their subscriptions", () => {
   test("cancels every live subscription with the configured terms, then deletes the user", async () => {
@@ -188,12 +223,7 @@ describe("retired recurring plans", () => {
   // a real signed-in session, so the request runs through better-auth's full handler,
   // global hooks included
   async function signIn() {
-    const email = `u-${crypto.randomUUID()}@example.com`;
-    const res = await auth.api.signUpEmail({
-      body: { email, password: "correct-horse-battery", name: "Test" },
-      asResponse: true,
-    });
-    return res.headers.get("set-cookie") ?? "";
+    return (await signUpVerifiedAndSignIn()).cookie;
   }
 
   const upgrade = (cookie: string, plan: string) =>
@@ -267,14 +297,20 @@ describe("a Stripe customer created at checkout reaches the cached session", () 
     // Stripe is down at sign-up, so createCustomerOnSignUp leaves stripeCustomerId unset...
     customerCreateFails = true;
     const email = `u-${crypto.randomUUID()}@example.com`;
-    const signUp = await auth.api.signUpEmail({
-      body: { email, password: "correct-horse-battery", name: "Test" },
+    await auth.api.signUpEmail({ body: { email, password: "correct-horse-battery", name: "Test" } });
+    expect(
+      (await db.select().from(userTable).where(eq(userTable.email, email)))[0]?.stripeCustomerId,
+    ).toBeNull();
+    customerCreateFails = false;
+
+    await db.update(userTable).set({ emailVerified: true }).where(eq(userTable.email, email));
+    const signIn = await auth.api.signInEmail({
+      body: { email, password: "correct-horse-battery" },
       asResponse: true,
     });
-    const cookie = signUp.headers.get("set-cookie") ?? "";
+    const cookie = signIn.headers.get("set-cookie") ?? "";
     const session = await auth.api.getSession({ headers: new Headers({ cookie }) });
     expect(session?.user.stripeCustomerId ?? null).toBeNull();
-    customerCreateFails = false;
 
     // ...then a one-time checkout creates the customer
     const { ensureCustomer } = await import("@f/payments/services/account");
@@ -335,13 +371,7 @@ describe("stripeCustomerId can't be set from a request", () => {
   });
 
   test("update-user with it is refused, leaving the customer and Stripe untouched", async () => {
-    const email = `u-${crypto.randomUUID()}@example.com`;
-    const signUp = await post("/sign-up/email", {
-      email,
-      password: "correct-horse-battery",
-      name: "Test",
-    });
-    const cookie = signUp.headers.get("set-cookie") ?? "";
+    const { cookie, email } = await signUpVerifiedAndSignIn();
     const own = (await rowByEmail(email))?.stripeCustomerId;
     expect(own).toBeString();
     customerUpdateCalls = [];
@@ -354,13 +384,7 @@ describe("stripeCustomerId can't be set from a request", () => {
   });
 
   test("null or empty is refused too - it would detach the user from their customer", async () => {
-    const email = `u-${crypto.randomUUID()}@example.com`;
-    const signUp = await post("/sign-up/email", {
-      email,
-      password: "correct-horse-battery",
-      name: "Test",
-    });
-    const cookie = signUp.headers.get("set-cookie") ?? "";
+    const { cookie } = await signUpVerifiedAndSignIn();
 
     for (const value of [null, ""]) {
       const res = await post("/update-user", { stripeCustomerId: value }, cookie);
@@ -369,13 +393,7 @@ describe("stripeCustomerId can't be set from a request", () => {
   });
 
   test("ordinary profile updates still work", async () => {
-    const email = `u-${crypto.randomUUID()}@example.com`;
-    const signUp = await post("/sign-up/email", {
-      email,
-      password: "correct-horse-battery",
-      name: "Test",
-    });
-    const cookie = signUp.headers.get("set-cookie") ?? "";
+    const { cookie, email } = await signUpVerifiedAndSignIn();
 
     const res = await post("/update-user", { name: "Renamed" }, cookie);
 
@@ -386,14 +404,7 @@ describe("stripeCustomerId can't be set from a request", () => {
 
 describe("no subscription checkout survives a user's deletion", () => {
   async function signIn() {
-    const email = `u-${crypto.randomUUID()}@example.com`;
-    const res = await auth.api.signUpEmail({
-      body: { email, password: "correct-horse-battery", name: "Test" },
-      asResponse: true,
-    });
-    const cookie = res.headers.get("set-cookie") ?? "";
-    const session = await auth.api.getSession({ headers: new Headers({ cookie }) });
-    return { cookie, userId: session!.user.id };
+    return signUpVerifiedAndSignIn();
   }
 
   const upgrade = (cookie: string) =>
@@ -451,5 +462,23 @@ describe("no subscription checkout survives a user's deletion", () => {
     const deleted = await seedUser({ stripeCustomerId: "cus_gone" });
     await (await auth.$context).internalAdapter.deleteUser(deleted);
     expect(await isUserDeleting(deleted)).toBe(true);
+  });
+});
+
+describe("password reset revokes existing sessions", () => {
+  test("a session created before a password reset is invalid afterward", async () => {
+    const { cookie: earlierCookie, email } = await signUpVerifiedAndSignIn();
+    expect(
+      await auth.api.getSession({ headers: new Headers({ cookie: earlierCookie }) }),
+    ).not.toBeNull();
+
+    await auth.api.requestPasswordReset({ body: { email, redirectTo: `${env.CLIENT_URL}/reset` } });
+    const html = String(emailSendCalls.at(-1)?.html);
+    const token = html.match(/\/reset-password\/([^"?&]+)/)?.[1];
+    await auth.api.resetPassword({ body: { token: token!, newPassword: "new-horse-battery-staple" } });
+
+    expect(
+      await auth.api.getSession({ headers: new Headers({ cookie: earlierCookie }) }),
+    ).toBeNull();
   });
 });
