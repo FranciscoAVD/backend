@@ -26,6 +26,7 @@ function capturingApp() {
           "req.headers.authorization",
           'req.headers["stripe-signature"]',
           'res.headers["set-cookie"]',
+          "res.headers.location",
         ],
         censor: "[Redacted]",
       },
@@ -39,15 +40,22 @@ function capturingApp() {
     .get("/ok", (c) => {
       c.header("Set-Cookie", "better_auth.session_token=realsecret; Path=/; HttpOnly");
       return c.json({ ok: true });
+    })
+    // mirrors better-auth's own GET /reset-password/:token (password.mjs's
+    // requestPasswordResetCallback): it 302s to callbackURL?token=<token>, a second place the same
+    // token leaks if the Location header isn't redacted
+    .get("/reset-password/:token", (c) => {
+      c.header("Location", `https://example.com/reset?token=${c.req.param("token")}`);
+      return c.body(null, 302);
     });
 
   return { app, lines };
 }
 
-const requestLogLine = (lines: string[]) =>
+const requestLogLine = (lines: string[], url: string) =>
   lines
     .map((line) => JSON.parse(line) as Record<string, unknown>)
-    .find((line) => (line.req as { url?: string } | undefined)?.url === "/ok")!;
+    .find((line) => (line.req as { url?: string } | undefined)?.url === url)!;
 
 describe("request/response logging redacts secrets", () => {
   test("request headers: cookie, authorization and stripe-signature are redacted", async () => {
@@ -62,7 +70,7 @@ describe("request/response logging redacts secrets", () => {
       },
     });
 
-    const line = requestLogLine(lines);
+    const line = requestLogLine(lines, "/ok");
     const headers = (line.req as { headers: Record<string, unknown> }).headers;
     expect(headers.cookie).toBe("[Redacted]");
     expect(headers.authorization).toBe("[Redacted]");
@@ -76,9 +84,30 @@ describe("request/response logging redacts secrets", () => {
 
     await app.request("/ok");
 
-    const line = requestLogLine(lines);
+    const line = requestLogLine(lines, "/ok");
     const headers = (line.res as { headers: Record<string, unknown> }).headers;
     expect(headers["set-cookie"]).toBe("[Redacted]");
     expect(headers["content-type"]).toBe("application/json");
+  });
+
+  test("a reset-password token in the URL path is masked, not logged", async () => {
+    const { app, lines } = capturingApp();
+
+    await app.request("/reset-password/supersecrettoken123");
+
+    const line = requestLogLine(lines, "/reset-password/[Redacted]");
+    expect(line).toBeDefined();
+    expect(JSON.stringify(line)).not.toContain("supersecrettoken123");
+  });
+
+  test("response headers: location is redacted", async () => {
+    const { app, lines } = capturingApp();
+
+    await app.request("/reset-password/supersecrettoken123");
+
+    const line = requestLogLine(lines, "/reset-password/[Redacted]");
+    const headers = (line.res as { headers: Record<string, unknown> }).headers;
+    expect(headers.location).toBe("[Redacted]");
+    expect(JSON.stringify(line)).not.toContain("supersecrettoken123");
   });
 });

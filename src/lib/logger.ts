@@ -13,6 +13,7 @@ export const logger = pino({
       "req.headers.authorization",
       'req.headers["stripe-signature"]',
       'res.headers["set-cookie"]',
+      "res.headers.location",
     ],
     censor: "[Redacted]",
   },
@@ -31,7 +32,25 @@ export const logger = pino({
 // so the res.headers["set-cookie"] path above finds nothing there and silently no-ops (in one
 // observed case it broke serialization of the whole `res` object instead). Flattening to a plain
 // object first is what makes that redact path actually take effect - confirmed empirically.
-export const httpLoggerOptions: { onResBindings: HttpLoggerOptions["onResBindings"] } = {
+//
+// better-auth's own GET /reset-password/:token redirect-helper endpoint puts the reset token
+// directly in the URL *path* (not a query param, which the default req binding below would
+// already exclude) - confirmed in its source, node_modules/better-auth/dist/api/routes/password.mjs.
+// redact can't reach into the middle of a string value, so this needs its own onReqBindings to
+// mask it out before logging, rather than a redact path.
+const RESET_PASSWORD_TOKEN_PATH = /\/reset-password\/[^/?]+/;
+
+export const httpLoggerOptions: {
+  onReqBindings: HttpLoggerOptions["onReqBindings"];
+  onResBindings: HttpLoggerOptions["onResBindings"];
+} = {
+  onReqBindings: (c) => ({
+    req: {
+      url: c.req.path.replace(RESET_PASSWORD_TOKEN_PATH, "/reset-password/[Redacted]"),
+      method: c.req.method,
+      headers: c.req.header(),
+    },
+  }),
   onResBindings: (c) => ({
     res: { status: c.res.status, headers: Object.fromEntries(c.res.headers.entries()) },
   }),
