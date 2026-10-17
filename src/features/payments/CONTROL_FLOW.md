@@ -3,12 +3,11 @@
 This documents how `src/features/payments` actually behaves at runtime. See the
 [README](../../../README.md#payments) for the endpoint table and the two-plan-type summary.
 
-## Overview: where the two plan types diverge
+## Overview
 
-`plan.type` decides which of two entirely separate systems handles the purchase.
-`recurring` is better-auth's own stripe plugin (its own tables, its own webhook
-handling); `one_time` is this feature's own Checkout + webhook + `purchase` table.
-This doc only covers the `one_time` path in detail.
+`plan.type` picks the system: `recurring` is better-auth's own stripe plugin (own table,
+own webhook, own checkout); `one_time` is this feature's own. This doc covers `one_time`
+only, except where the two cross over (retirement, deletion, access checks).
 
 ```mermaid
 flowchart TD
@@ -17,100 +16,49 @@ flowchart TD
     B -- one_time --> D["POST /api/payments/checkout\n(this feature's own flow, detailed below)"]
 ```
 
+### Layering
+
+`route.ts` → `paymentsServices` → `paymentsRepo`, no skipping down. `route.ts` is the only
+HTTP-aware layer. `paymentsServices` holds every Stripe call and branching decision.
+`paymentsRepo` is plain Postgres, one query per file, no Stripe, no branching. Non-route
+entry points: `lib/webhook.ts` (Stripe webhook), `lib/auth-hooks.ts` (better-auth hooks),
+`scripts/reconcile.ts` (CLI). Below, steps are named `layer.function` so each diagram
+doubles as a code index.
+
+### Data model
+
+| Table | Holds | Lifetime |
+| --- | --- | --- |
+| `plan` | Price, type, `repeatable`/`durationDays`/`overlapping` policy | Forever |
+| `checkout` | One in-flight purchase attempt | Minutes (`reserving`) → 24h (`open`) → 14d (`processing`) → kept forever, terminal |
+| `purchase` | One confirmed payment, written once by `fulfillment.confirm` | Forever - the financial record |
+| `payment_audit_log` | Races/exceptions around `plan.repeatable` | Forever |
+
+One index drives the whole `checkout` lifecycle: `checkout_active_slot`, a partial unique
+index on `(user_id, plan_id, slot)` while `status` is `reserving`/`open`/`processing`. At
+most one in-flight checkout per (user, plan) - every flow below just moves a row into or
+out of that predicate.
+
+### What follows
+
+| Section | Entry point | Does |
+| --- | --- | --- |
+| `POST /checkout` | `services.checkout.start` | Claims the slot, creates the session |
+| Stripe webhook dispatch | `lib/webhook.ts`'s `handleStripeEvent` | Routes an event to a service call |
+| The reconciler | `services/reconcile.ts`'s `purchases`/`subscriptions` | Backstops lost webhooks |
+| Checking active access | `services.plan.access` | Does the caller hold this plan now |
+| Retiring a plan | `services.plan.update` | Stops new purchases, expires open checkouts |
+| Deleting a user | `services.account.prepareDeletion` | Expires checkouts, cancels subscriptions |
+
+Everything after that (audit log, admin purchase listing, access policy, trial pattern,
+field reference) is lookup material, not a flow.
+
 ## `POST /checkout`: creating a one-time Checkout Session
 
-`route.ts`'s handler, in the order the checks actually run. The two guards under
-`plan.repeatable` close the realistic "two tabs" race (a user opening a second
-checkout before the first confirms). The second one is an atomic claim on the
-`checkout` table, not a check followed by a later write, so two concurrent
-requests can't both get past it and both reach Stripe. They still can't close
-every race - see `services.fulfillment.confirm`'s own re-check further down for
-the narrower one that reaches the webhook anyway.
-
-### The slot: one `checkout` row per in-flight purchase
-
-An in-flight checkout is a row in the `checkout` table
-(`db/schemas/payment-schema.ts`), from the moment `POST /checkout` claims it
-until Stripe settles it. A `purchase` row is still only written once the payment
-confirms; the checkout row is what that confirmation supersedes.
-
-The invariant that matters - *one active checkout per (user, plan) slot* - is a
-partial unique index, `checkout_active_slot` on `(user_id, plan_id, slot)
-WHERE status IN ('reserving', 'open', 'processing')`, not something any code
-enforces by hand. Reaching a terminal status (`failed`, `expired`, `completed`)
-takes the row out of the predicate, which *is* how the slot is freed - there's
-nothing separate to clear.
-
-`slot` is `1` while a creation is in flight, for both plan types:
-
-| phase | non-repeatable | repeatable |
-| --- | --- | --- |
-| `reserving` | `slot = 1` | `slot = 1` - this is the creation lock |
-| `open` / `processing` | `slot = 1` | `slot = NULL` - released; buying again is the point |
-| terminal | outside the index predicate | outside the index predicate |
-
-So a repeatable plan is still held to one Stripe call per (user, plan) in flight
-(without that, every request created a new Checkout Session, and any number of
-sign-ups could spend the account's shared Stripe API rate limit, starving the
-webhook handler's own Stripe calls), but its *open* session doesn't block the
-next purchase, and a settling `processing` one doesn't either. Nulls never
-collide in a unique index, which is what makes one column do both jobs.
-
-`expires_at` carries the deadline for whatever status the row is in: minutes
-while `reserving` (`RESERVATION_TTL_SEC`), the session's own lifetime once `open`
-(`PENDING_CHECKOUT_TTL_SEC`), up to two weeks while `processing`
-(`PROCESSING_TTL_SEC`, for delayed payment methods). A row past its deadline -
-the request died mid-checkout, or Stripe's `checkout.session.expired` webhook
-never landed - would otherwise hold the slot forever, so `claimCheckoutSlot`
-sweeps that one slot's stale rows to `expired` before it inserts
-(`expireStaleCheckouts`). The insert itself is the gate: `INSERT ... ON CONFLICT
-DO NOTHING RETURNING id` against the partial index lets exactly one of any number
-of concurrent requests through, and no row back means the slot is genuinely held.
-
-The claimed row's own `id` is the reservation token. A claim can lapse while
-Stripe is slow and be swept by another request, which then inserts a *fresh* row
-with a different id - so `openCheckout` only ever opens a row still `reserving`
-under the claimed id. If it matches nothing, the new session is expired and
-withheld and the request answers 409 (`CheckoutSlotLostError`). The Stripe
-client's timeout and retries (`STRIPE_TIMEOUT_MS`, `STRIPE_MAX_NETWORK_RETRIES`
-in `lib/constants.ts`) are set so two calls fit inside `RESERVATION_TTL_SEC`
-anyway; a test pins that budget.
-
-### The two guards
-
-Ownership is checked twice for a non-repeatable plan: once before claiming,
-as a fast path, and again once the slot is held. The second check closes
-a gap the first leaves open - the user's earlier checkout confirming in between,
-which inserts the purchase and then frees the slot for this request to claim.
-Because `services.fulfillment.confirm` writes the purchase *before* it frees the
-slot (its `markCompleted` call is last), any request that claims a freed slot is
-guaranteed to see the purchase.
-
-When the slot is held by the same user's still-`open` session, the claim fails
-but the request isn't refused: it gets that session's id and URL back
-(`paymentsRepo.checkout.get.resumable`, from the `url` on the row). That's the
-common case - a buyer who closed the Stripe tab and clicked buy again - and
-without it they'd be locked out until the session expired, up to 24h. It's still
-one session per (user, plan), so the guard isn't weakened. A `processing`
-session (already paid, settling), a row still `reserving` (no session yet), and
-one past its own `expires_at` all answer 409 instead. A repeatable plan checks
-for a resumable session *first*, before claiming, since its own open session no
-longer holds the slot.
-
-Finally, the handler checks the user-deletion flag (`lib/state/deletion-guard.ts`)
-twice: before doing anything, and again once the session exists, expiring and
-withholding it if the user's deletion started in between. See "Deleting a user".
-
-All of this - the plan fetch, both guards, the claim, customer resolution,
-session creation, and the final deletion recheck - is one function,
-`services.checkout.start` (`services/checkout.ts`), called by `route.ts`'s
-`POST /checkout` handler. The handler itself only translates `start`'s returned
-`{ kind }` into the right HTTP status/message - it holds no business logic of
-its own. Everything from the claim onward runs in one `try`, with a `finally`
-that always releases it (`releaseCheckoutReservation` deletes the row while it's
-still `reserving`, and is a no-op once it's been opened) - a DB or Stripe call
-failing anywhere past that point frees the slot immediately rather than leaving
-it held until the next claim sweeps it 5 minutes later.
+One function, `services.checkout.start`, does everything below; `route.ts` only maps its
+`{ kind }` result to a status code. Everything from the claim onward runs in one
+`try`/`finally` - the claimed row is always released, so a DB/Stripe failure frees the
+slot immediately rather than waiting out `RESERVATION_TTL_SEC`.
 
 ```mermaid
 flowchart TD
@@ -159,70 +107,67 @@ flowchart TD
     Return200 --> Redirect(["client redirects user to\nthe Stripe-hosted url"])
 ```
 
-`services.account.ensureCustomer` (`services/account.ts`) re-reads
-`user.stripeCustomerId` from Postgres on every call (`paymentsRepo.user.getForCustomer`)
-rather than trusting the session object, since better-auth can serve a
-Redis-cached `user` blob without querying Postgres at all. When it does create a
-customer, it saves the id through better-auth's `internalAdapter.updateUser`
-rather than a raw query, so the user's cached sessions are refreshed too. That
-matters beyond this flow: the stripe plugin's subscription upgrade reads
-`stripeCustomerId` from the session, and a stale `null` there made it create a
-second customer and switch the user over to it. It also passes a
-`customer-<userId>-<hash of email and name>` Stripe idempotency key, so a
-retried call can't create a second customer, and a user who changed their
-details in between doesn't hit Stripe's "same key, different parameters" error
-for 24 hours (though it doesn't fully dedupe two truly simultaneous requests
-- Stripe's idempotency semantics don't strictly guarantee that).
+### The slot
 
-### Adding Stripe params: `lib/checkout-extensions.ts`
+One partial unique index, `checkout_active_slot` on `(user_id, plan_id, slot) WHERE status
+IN ('reserving', 'open', 'processing')`, is the entire guard. Leaving the predicate (any
+terminal status) is what frees the slot - nothing else clears it.
 
-`services/checkout.ts`'s `createCheckout` calls `getCheckoutSessionParams({ user, plan })` before
-building the Stripe request - an extension point for promo codes
-(`discounts`/`allow_promotion_codes`), tax (`automatic_tax`/`tax_id_collection`),
-different `line_items`, or most other params
-`stripe.checkout.sessions.create` accepts that this app doesn't set itself. A
-few conflict with what this flow always sets and make Stripe reject the
-session: `customer_email`/`customer_creation` (this flow always passes
-`customer`) and `ui_mode: "embedded"` (which takes `return_url`, not
-`success_url`/`cancel_url`).
-Mirrors `@better-auth/stripe`'s own `subscription.getCheckoutSessionParams`
-option for the subscription flow (verified in
-`node_modules/@better-auth/stripe/dist/index.mjs`) - same idea, for this
-flow. The default implementation returns `undefined` (no-op); an app wanting
-any of this edits the function directly, the same "change it here, not
-where it's read" convention `access-policy.ts` already established.
+| phase | non-repeatable | repeatable |
+| --- | --- | --- |
+| `reserving` | `slot = 1` | `slot = 1` - the creation lock |
+| `open` / `processing` | `slot = 1` | `slot = NULL` - released |
+| terminal | outside the index | outside the index |
 
-What always wins over whatever it returns, by object-literal ordering in
-`createCheckout` (the explicit fields are listed after the extension's
-params are spread first) - `mode`, `customer`, `client_reference_id`,
-`success_url`, `cancel_url`, and `expires_at` (kept in lockstep with
-`PENDING_CHECKOUT_TTL_SEC`; letting it drift would open a window where
-Stripe still accepts the session but the checkout row has already lapsed). The
-`userId`/`planId`/`durationDays` keys of `metadata` and
-`payment_intent_data.metadata` also always win (merged rather than replaced
-wholesale, so an app can still tag a session with its own additional keys
-alongside them; the payment intent gets the session's `metadata` plus any
-keys set only on `payment_intent_data.metadata`) - `services.fulfillment.confirm`
-and the reconciler depend on those three to resolve a session back to a purchase at
-all. `line_items` is
-deliberately **not** protected, unlike the subscription plugin (which has
-its own seat/multi-item logic to guard) - a returned `line_items` fully
-replaces the `[{ price, quantity: 1 }]` default, e.g. to charge a different
-price or add items. It doesn't change what's granted: one completed checkout
-is one purchase of the plan with one access window, whatever the quantity. A
-"3 months" sale as quantity 3 of a 30-day plan would charge 3x and grant 30
-days - use a 90-day plan, or a repeatable plan bought three times.
+Nulls never collide, so one column does both jobs: a repeatable plan still gets one Stripe
+call per (user, plan) in flight, but its open or settling session doesn't block the next
+purchase. The claimed row's own `id` is the reservation - `openCheckout` only writes to a
+row still `reserving` under that id, so a claim swept by a fresh row (past its own
+`expires_at` - `RESERVATION_TTL_SEC`/`PENDING_CHECKOUT_TTL_SEC`/`PROCESSING_TTL_SEC` per
+status) can't be opened by the request that lost it.
 
-`GET /checkout/:sessionId` (`services.checkout.status`) answers the client's polling: it
-reads the `purchase` row if one exists yet (`paid`/`refunded`/`disputed`), otherwise
-falls back to the `checkout` row (`open`/`processing`/`failed`/`expired`/`completed`),
-otherwise `null` → 404. 404 is reserved for a session the user never had at all;
-`failed`/`expired` both answer with 200 so a polling client can tell "your payment
-failed" apart from "this session never existed." An `open` (or `reserving`) row past
-its own `expires_at` reads as `expired`: nothing has swept it yet, but the session
-isn't payable any more. Terminal rows are kept indefinitely rather than aged out, so
-unlike the Redis entries this replaced, a failed checkout keeps answering `failed`
-instead of decaying into a 404 an hour later.
+### The two guards
+
+Ownership for a non-repeatable plan is checked twice - once before claiming, once after -
+because the user's earlier checkout can confirm in the gap between them. Safe either way:
+`fulfillment.confirm` writes the purchase before it frees the slot (`markCompleted` runs
+last), so any request that claims a freed slot already sees the purchase.
+
+A failed claim isn't always a 409: if the slot is held by the caller's own still-`open`
+session, they get that session back instead (`checkout.get.resumable`) - the "buyer closed
+the tab" case. A repeatable plan checks for that resumable session *first*, since its own
+open session no longer holds the slot. The deletion flag (`lib/state/deletion-guard.ts`) is
+checked the same way - before claiming, and again once the session exists - so a deletion
+starting mid-request still gets the session expired.
+
+### `ensureCustomer`
+
+Re-reads `stripeCustomerId` from Postgres on every call rather than trusting the session
+(better-auth can serve a stale, Redis-cached blob), and writes a new id through
+better-auth's `internalAdapter.updateUser` so the session cache picks it up too - the
+subscription plugin's own upgrade path reads `stripeCustomerId` straight from the session,
+and a stale `null` there creates a second Stripe customer and switches the user onto it. An
+idempotency key (`customer-<userId>-<hash of email/name>`) keeps a retry from creating a
+duplicate.
+
+### Extension point: `lib/checkout-extensions.ts`
+
+`createCheckout` calls `getCheckoutSessionParams({ user, plan })` before building the Stripe
+request - a no-op by default, for an app wanting promo codes, tax, or custom `line_items`.
+Mirrors `@better-auth/stripe`'s own `subscription.getCheckoutSessionParams`.
+
+| Always wins over the extension | Why |
+| --- | --- |
+| `mode`, `customer`, `client_reference_id`, `success_url`, `cancel_url`, `expires_at` | This flow's own identity; `expires_at` must stay in lockstep with `PENDING_CHECKOUT_TTL_SEC` |
+| `metadata`/`payment_intent_data.metadata`'s `userId`/`planId`/`durationDays` keys | `fulfillment.confirm` and the reconciler resolve a session back to a purchase from these |
+| *(not protected)* `line_items` | Fully replaceable - doesn't change what's granted; one checkout is still one purchase, whatever the quantity |
+
+### `GET /checkout/:sessionId`
+
+Polls `purchase` first, then falls back to the `checkout` row, then `null` → 404.
+`failed`/`expired` answer 200 (not 404) and are kept forever rather than aged out. An
+`open`/`reserving` row past its own `expires_at` reads as `expired` even before anything
+sweeps it.
 
 ## Stripe webhook dispatch
 
