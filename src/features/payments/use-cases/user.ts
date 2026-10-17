@@ -35,6 +35,24 @@ export async function getForCustomer(
 }
 
 /**
+ * @description Select query for a user's email and name, for the purchase-confirmation email
+ * (see `lib/purchase-confirmation-email.ts`) - the DB is this app's authoritative source for user
+ * identity, rather than a Stripe checkout session's own (nullable) `customer_details`. Assumes
+ * validation. Operation must be wrapped in try-catch
+ * @param target object of the user ID to look up
+ * @returns The contact fields, or null if no user has that ID.
+ */
+export async function getContact(
+  target: { userId: string },
+): Promise<{ email: string; name: string } | null> {
+  const res = await db
+    .select({ email: userTable.email, name: userTable.name })
+    .from(userTable)
+    .where(eq(userTable.id, target.userId));
+  return res[0] ?? null;
+}
+
+/**
  * @description Update query for a user's Stripe customer ID. A plain write - unlike
  * `services/account.ts`'s `ensureCustomer`, which writes through better-auth's own
  * `internalAdapter.updateUser` instead of this function, because that also refreshes the

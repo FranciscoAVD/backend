@@ -6,6 +6,7 @@ import { getPendingCheckout, removePendingCheckout } from "@f/payments/lib/state
 import { decodeDurationDays, decodeOverlapping } from "@f/payments/lib/utils";
 import { resolveChargeState } from "@f/payments/lib/stripe/charge-state";
 import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
+import { sendPurchaseConfirmationEmail } from "@f/payments/lib/purchase-confirmation-email";
 import type { Payment } from "@f/payments/lib/types";
 
 const idOf = (ref: string | { id: string } | null) =>
@@ -145,6 +146,22 @@ export async function confirm(
     );
     if (auditError)
       logger.warn({ err: auditError, session: session.id }, "payments.audit.write_failed");
+  }
+
+  if (inserted) {
+    const [, emailError] = await tryCatch(
+      sendPurchaseConfirmationEmail({
+        userId: inserted.userId ?? owner.userId,
+        planName: plan.name,
+        amountTotal: inserted.amountTotal,
+        currency: inserted.currency,
+      }),
+    );
+    if (emailError)
+      logger.warn(
+        { err: emailError, session: session.id },
+        "payments.purchase_confirmation_email.send_failed",
+      );
   }
 
   const [, error] = await tryCatch(removePendingCheckout(session.id));

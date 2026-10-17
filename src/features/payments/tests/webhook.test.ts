@@ -9,6 +9,24 @@ import { resetRedis } from "@/test-helpers/redis";
 let retrievedIntentMetadata: Record<string, string> = {};
 let fakeLatestCharge: Record<string, unknown> | null = null;
 let fakeDispute: Record<string, unknown> | null = null;
+let purchaseConfirmationEmailCalls: Record<string, unknown>[] = [];
+let purchaseConfirmationEmailFails = false;
+
+// mocks @f/email/lib/client, not @f/email/send - see CLAUDE.md's testing section for why.
+// Without this, confirmCheckout's best-effort email send would hit the real (sandboxed) Resend
+// API on every test that reaches it - still harmless (errors are swallowed), but not the fully
+// offline, deterministic suite this mirrors every other Stripe-dependent test's approach for.
+mock.module("@f/email/lib/client", () => ({
+  getEmailClient: () => ({
+    emails: {
+      send: async (payload: Record<string, unknown>) => {
+        if (purchaseConfirmationEmailFails) throw new Error("Resend is down");
+        purchaseConfirmationEmailCalls.push(payload);
+        return { data: { id: "email_1" }, error: null };
+      },
+    },
+  }),
+}));
 
 // no free local "real Stripe" to run against, unlike Postgres/Redis — so the SDK surface
 // updateByCharge/resolveChargeState actually calls is faked here via bun:test's mock.module.
@@ -77,6 +95,8 @@ beforeEach(async () => {
   retrievedIntentMetadata = {};
   fakeLatestCharge = null;
   fakeDispute = null;
+  purchaseConfirmationEmailCalls = [];
+  purchaseConfirmationEmailFails = false;
 });
 
 describe("confirmCheckout", () => {
@@ -340,6 +360,56 @@ describe("confirmCheckout", () => {
     ).rejects.toThrow();
 
     expect(await getAllPurchases({ userId })).toEqual([]);
+  });
+
+  test("a new purchase sends exactly one confirmation email, to the buyer's own address", async () => {
+    const userId = await seedUser({ email: "buyer@example.test", name: "Ada" });
+    const plan = await seedPlan({ name: "Pro" });
+
+    await confirmCheckout(
+      session({
+        id: "cs_confirmation_email",
+        metadata: { userId, planId: String(plan.id) },
+      }),
+    );
+
+    expect(purchaseConfirmationEmailCalls).toHaveLength(1);
+    expect(purchaseConfirmationEmailCalls[0]?.to).toBe("buyer@example.test");
+    expect(purchaseConfirmationEmailCalls[0]?.html).toContain("Hi Ada,");
+  });
+
+  test("redelivering an already-recorded session sends no additional email", async () => {
+    const userId = await seedUser({ email: "buyer@example.test" });
+    const plan = await seedPlan();
+    const theSession = session({
+      id: "cs_redelivered_email",
+      metadata: { userId, planId: String(plan.id) },
+    });
+
+    await confirmCheckout(theSession);
+    expect(purchaseConfirmationEmailCalls).toHaveLength(1);
+
+    // the same webhook delivered again - onConflictDoNothing means `inserted` is null this time
+    await confirmCheckout(theSession);
+    expect(purchaseConfirmationEmailCalls).toHaveLength(1);
+  });
+
+  test("a failing confirmation email doesn't fail the purchase confirmation itself", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    purchaseConfirmationEmailFails = true;
+
+    await expect(
+      confirmCheckout(
+        session({
+          id: "cs_email_fails",
+          metadata: { userId, planId: String(plan.id) },
+        }),
+      ),
+    ).resolves.toBe(true);
+
+    const [purchase] = await getAllPurchases({ userId });
+    expect(purchase?.stripeCheckoutSessionId).toBe("cs_email_fails");
   });
 });
 

@@ -37,6 +37,7 @@ import {
 import {
   getEmailVerified,
   getForCustomer,
+  getContact,
   setStripeCustomerId,
 } from "@f/payments/use-cases/user";
 
@@ -78,6 +79,7 @@ export const paymentsRepo = {
   user: {
     getEmailVerified,
     getForCustomer,
+    getContact,
     setStripeCustomerId,
   },
   access: {

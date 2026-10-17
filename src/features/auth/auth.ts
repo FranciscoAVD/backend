@@ -9,6 +9,7 @@ import { redis, incrementWithTTL } from "@/lib/redis";
 import { logger } from "@/lib/logger";
 import { ac, user, admin } from "@f/auth/lib/permissions";
 import { sendVerificationEmail } from "@f/auth/lib/verification-email";
+import { sendResetPasswordEmail } from "@f/auth/lib/reset-password-email";
 import { authLoggerBridge } from "@f/auth/lib/log-bridge";
 import { stripe } from "@better-auth/stripe";
 import { getPaymentProcessorForAuthPlugin } from "@f/payments/lib/stripe/client";
@@ -59,6 +60,7 @@ export const auth = betterAuth({
   },
   emailAndPassword: {
     enabled: true,
+    sendResetPassword: sendResetPasswordEmail,
   },
   emailVerification: {
     sendVerificationEmail,
