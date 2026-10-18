@@ -70,6 +70,15 @@ mock.module("@f/payments/lib/stripe/client", () => ({
 import { purchases as run, subscriptions as runSubscriptions } from "@f/payments/services/reconcile";
 import { getAllPurchases, getPurchaseBySessionAnyUser } from "@f/payments/use-cases/get-purchases";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
+import {
+  CHECKOUT_SOURCE_METADATA_KEY,
+  CHECKOUT_SOURCE_METADATA_VALUE,
+} from "@f/payments/lib/constants";
+
+// how every Checkout Session this app creates is tagged (see CHECKOUT_SOURCE_METADATA_KEY) - the
+// sessions below stand in for ones it created, so they carry it too
+const OURS = { [CHECKOUT_SOURCE_METADATA_KEY]: CHECKOUT_SOURCE_METADATA_VALUE };
+
 
 const fakeSubscription = (overrides: Record<string, unknown> = {}): Stripe.Subscription =>
   ({
@@ -120,7 +129,7 @@ describe("run", () => {
     fakeSessions = [
       fakeSession({
         id: "cs_ok",
-        metadata: { userId, planId: String(plan.id) },
+        metadata: { ...OURS, userId, planId: String(plan.id) },
         payment_intent: {
           id: "pi_ok",
           latest_charge: { amount_refunded: 0, refunded: false, disputed: false },
@@ -134,6 +143,33 @@ describe("run", () => {
     expect(await getAllPurchases({ userId })).toHaveLength(1);
   });
 
+  test("skips another integration's paid session on the same Stripe account - not inserted, not failed", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    fakeSessions = [
+      // e.g. a Payment Link that happens to use the same metadata keys: untagged, no checkout row
+      fakeSession({
+        id: "cs_payment_link",
+        metadata: { userId, planId: String(plan.id) },
+        payment_intent: {
+          id: "pi_payment_link",
+          latest_charge: { amount_refunded: 0, refunded: false, disputed: false },
+        } as unknown as Stripe.PaymentIntent,
+      }),
+      // one with only `planId` - which used to count as failed on every run, for lacking `userId`
+      fakeSession({
+        id: "cs_other_app",
+        metadata: { planId: "7" },
+        payment_intent: null,
+      }),
+    ];
+
+    const summary = await run(7, false);
+
+    expect(summary).toEqual({ scanned: 0, inserted: 0, updated: 0, failed: 0 });
+    expect(await getAllPurchases({ userId })).toHaveLength(0);
+  });
+
   test("a late insert starts access when Stripe says it was paid, not when checkout began or now", async () => {
     const userId = await seedUser();
     const plan = await seedPlan({ durationDays: 30 });
@@ -144,7 +180,7 @@ describe("run", () => {
       id: "cs_settled",
       created: startedAt,
       payment_status: "paid",
-      metadata: { userId, planId: String(plan.id) },
+      metadata: { ...OURS, userId, planId: String(plan.id) },
       payment_intent: {
         id: "pi_settled",
         latest_charge: { created: startedAt, amount_refunded: 0, refunded: false, disputed: false },
@@ -179,7 +215,7 @@ describe("run", () => {
       fakeSession({
         id: "cs_no_event",
         created: chargedAt - 600,
-        metadata: { userId, planId: String(plan.id) },
+        metadata: { ...OURS, userId, planId: String(plan.id) },
         payment_intent: {
           id: "pi_no_event",
           latest_charge: { created: chargedAt, amount_refunded: 0, refunded: false, disputed: false },
@@ -200,7 +236,7 @@ describe("run", () => {
     fakeSessions = [
       fakeSession({
         id: "cs_ok",
-        metadata: { userId, planId: String(plan.id) },
+        metadata: { ...OURS, userId, planId: String(plan.id) },
         payment_intent: {
           id: "pi_ok",
           latest_charge: { created: chargedAt, amount_refunded: 0, refunded: false, disputed: false },
@@ -223,7 +259,7 @@ describe("run", () => {
     fakeSessions = [
       fakeSession({
         id: "cs_bad_plan",
-        metadata: { userId, planId: "999999" }, // no such plan
+        metadata: { ...OURS, userId, planId: "999999" }, // no such plan
         payment_intent: {
           id: "pi_bad_plan",
           latest_charge: { amount_refunded: 0, refunded: false, disputed: false },
@@ -255,7 +291,7 @@ describe("run", () => {
     fakeSessions = [
       fakeSession({
         id: "cs_existing",
-        metadata: { userId, planId: String(plan.id) },
+        metadata: { ...OURS, userId, planId: String(plan.id) },
         payment_intent: {
           id: "pi_existing",
           latest_charge: {
@@ -295,7 +331,7 @@ describe("run", () => {
     fakeSessions = [
       fakeSession({
         id: "cs_orphaned",
-        metadata: { userId, planId: String(plan.id) },
+        metadata: { ...OURS, userId, planId: String(plan.id) },
         payment_intent: {
           id: "pi_orphaned",
           latest_charge: { amount_refunded: 0, refunded: false, disputed: false },
@@ -326,7 +362,7 @@ describe("run", () => {
     fakeSessions = [
       fakeSession({
         id: "cs_orphaned_refund",
-        metadata: { userId, planId: String(plan.id) },
+        metadata: { ...OURS, userId, planId: String(plan.id) },
         payment_intent: {
           id: "pi_orphaned_refund",
           latest_charge: { amount_refunded: plan.amount, refunded: true, disputed: false },
@@ -350,7 +386,7 @@ describe("run", () => {
         id: "cs_free",
         payment_status: "no_payment_required",
         payment_intent: null,
-        metadata: { userId, planId: String(plan.id) },
+        metadata: { ...OURS, userId, planId: String(plan.id) },
       }),
     ];
 
@@ -379,7 +415,7 @@ describe("run", () => {
     fakeSessions = [
       fakeSession({
         id: "cs_dry",
-        metadata: { userId, planId: String(plan.id) },
+        metadata: { ...OURS, userId, planId: String(plan.id) },
         payment_intent: {
           id: "pi_dry",
           latest_charge: { amount_refunded: 0, refunded: false, disputed: false },
@@ -474,7 +510,7 @@ describe("run: refunds and disputes on older purchases", () => {
     fakeSessions = [
       fakeSession({
         id: "cs_recent",
-        metadata: { userId, planId: String(plan.id) },
+        metadata: { ...OURS, userId, planId: String(plan.id) },
         payment_intent: {
           id: "pi_recent",
           latest_charge: { amount_refunded: 0, refunded: false, disputed: false },

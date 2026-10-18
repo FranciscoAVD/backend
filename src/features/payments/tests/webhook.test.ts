@@ -6,6 +6,9 @@ import { paymentAuditLog as paymentAuditLogTable } from "@d/schemas/payment-sche
 import { resetDb, seedUser, seedPlan, seedCheckout } from "@/test-helpers/db";
 
 let retrievedIntentMetadata: Record<string, string> = {};
+// the Checkout Sessions checkout.sessions.list({ payment_intent }) finds - how an untagged payment
+// intent is traced back to its session to tell whether it's ours
+let sessionsForIntent: { id: string; metadata: Record<string, string> }[] = [];
 let fakeLatestCharge: Record<string, unknown> | null = null;
 let fakeDispute: Record<string, unknown> | null = null;
 let purchaseConfirmationEmailCalls: Record<string, unknown>[] = [];
@@ -48,6 +51,13 @@ mock.module("@f/payments/lib/stripe/client", () => ({
         data: fakeDispute ? [fakeDispute] : [],
       }),
     },
+    checkout: {
+      sessions: {
+        list: async (_args: { payment_intent: string; limit: number }) => ({
+          data: sessionsForIntent,
+        }),
+      },
+    },
   }),
 }));
 
@@ -56,6 +66,15 @@ import { handleStripeEvent } from "@f/payments/lib/webhook";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import { getAllPurchases } from "@f/payments/use-cases/get-purchases";
 import { paymentsRepo } from "@f/payments/repo";
+import {
+  CHECKOUT_SOURCE_METADATA_KEY,
+  CHECKOUT_SOURCE_METADATA_VALUE,
+} from "@f/payments/lib/constants";
+
+// how every Checkout Session this app creates is tagged (see CHECKOUT_SOURCE_METADATA_KEY) - the
+// sessions below stand in for ones it created, so they carry it too
+const OURS = { [CHECKOUT_SOURCE_METADATA_KEY]: CHECKOUT_SOURCE_METADATA_VALUE };
+
 
 const session = (
   overrides: Partial<Stripe.Checkout.Session> = {},
@@ -87,6 +106,7 @@ const event = (
 beforeEach(async () => {
   await resetDb();
   retrievedIntentMetadata = {};
+  sessionsForIntent = [];
   fakeLatestCharge = null;
   fakeDispute = null;
   purchaseConfirmationEmailCalls = [];
@@ -106,7 +126,7 @@ describe("confirmCheckout", () => {
     // a real session always carries metadata too (set at checkout time) - this is what
     // confirmCheckout actually resolves the owner from; the checkout row just cross-checks it
     await confirmCheckout(
-      session({ id: "cs_1", metadata: { userId, planId: String(plan.id) } }),
+      session({ id: "cs_1", metadata: { ...OURS, userId, planId: String(plan.id) } }),
     );
 
     const [purchase] = await getAllPurchases({ userId });
@@ -126,7 +146,7 @@ describe("confirmCheckout", () => {
     await confirmCheckout(
       session({
         id: "cs_2",
-        metadata: { userId, planId: String(plan.id) },
+        metadata: { ...OURS, userId, planId: String(plan.id) },
       }),
     );
 
@@ -142,7 +162,7 @@ describe("confirmCheckout", () => {
     await confirmCheckout(
       session({
         id: "cs_backdated",
-        metadata: { userId, planId: String(plan.id) },
+        metadata: { ...OURS, userId, planId: String(plan.id) },
         created: createdAgo,
       }),
     );
@@ -159,7 +179,7 @@ describe("confirmCheckout", () => {
 
     // has planId metadata (so it's recognizably ours) but no userId - still unresolvable
     await expect(
-      confirmCheckout(session({ id: "cs_3", metadata: { planId: "1" } })),
+      confirmCheckout(session({ id: "cs_3", metadata: { ...OURS, planId: "1" } })),
     ).rejects.toThrow();
 
     expect(await getAllPurchases({ userId })).toEqual([]);
@@ -176,7 +196,7 @@ describe("confirmCheckout", () => {
   test("reports whether it inserted the purchase: true the first time, false on a redelivery", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();
-    const s = session({ id: "cs_once", metadata: { userId, planId: String(plan.id) } });
+    const s = session({ id: "cs_once", metadata: { ...OURS, userId, planId: String(plan.id) } });
 
     expect(await confirmCheckout(s)).toBe(true);
     expect(await confirmCheckout(s)).toBe(false);
@@ -196,7 +216,7 @@ describe("confirmCheckout", () => {
       session({
         id: "cs_snapshot",
         created,
-        metadata: { userId, planId: String(plan.id), durationDays: "30" },
+        metadata: { ...OURS, userId, planId: String(plan.id), durationDays: "30" },
       }),
     );
 
@@ -212,7 +232,7 @@ describe("confirmCheckout", () => {
     await confirmCheckout(
       session({
         id: "cs_perpetual",
-        metadata: { userId, planId: String(plan.id), durationDays: "none" },
+        metadata: { ...OURS, userId, planId: String(plan.id), durationDays: "none" },
       }),
     );
 
@@ -226,7 +246,7 @@ describe("confirmCheckout", () => {
     const plan = await seedPlan({ durationDays: 14 });
 
     await confirmCheckout(
-      session({ id: "cs_legacy", metadata: { userId, planId: String(plan.id) } }),
+      session({ id: "cs_legacy", metadata: { ...OURS, userId, planId: String(plan.id) } }),
     );
 
     const [purchase] = await getAllPurchases({ userId });
@@ -238,7 +258,7 @@ describe("confirmCheckout", () => {
     const plan = await seedPlan({ repeatable: false });
     const s = session({
       id: "cs_redelivered",
-      metadata: { userId, planId: String(plan.id) },
+      metadata: { ...OURS, userId, planId: String(plan.id) },
     });
 
     await confirmCheckout(s);
@@ -259,7 +279,7 @@ describe("confirmCheckout", () => {
 
     await expect(
       confirmCheckout(
-        session({ id: "cs_4", metadata: { userId, planId: "999999" } }),
+        session({ id: "cs_4", metadata: { ...OURS, userId, planId: "999999" } }),
       ),
     ).rejects.toThrow();
 
@@ -293,7 +313,7 @@ describe("confirmCheckout", () => {
       session({
         id: "cs_dup",
         payment_intent: "pi_dup",
-        metadata: { userId, planId: String(plan.id) },
+        metadata: { ...OURS, userId, planId: String(plan.id) },
       }),
     );
 
@@ -327,7 +347,7 @@ describe("confirmCheckout", () => {
       confirmCheckout(
         session({
           id: "cs_mismatch_user",
-          metadata: { userId: userB, planId: String(plan.id) },
+          metadata: { ...OURS, userId: userB, planId: String(plan.id) },
         }),
       ),
     ).rejects.toThrow();
@@ -350,7 +370,7 @@ describe("confirmCheckout", () => {
       confirmCheckout(
         session({
           id: "cs_mismatch_plan",
-          metadata: { userId, planId: String(planB.id) },
+          metadata: { ...OURS, userId, planId: String(planB.id) },
         }),
       ),
     ).rejects.toThrow();
@@ -365,7 +385,7 @@ describe("confirmCheckout", () => {
     await confirmCheckout(
       session({
         id: "cs_confirmation_email",
-        metadata: { userId, planId: String(plan.id) },
+        metadata: { ...OURS, userId, planId: String(plan.id) },
       }),
     );
 
@@ -379,7 +399,7 @@ describe("confirmCheckout", () => {
     const plan = await seedPlan();
     const theSession = session({
       id: "cs_redelivered_email",
-      metadata: { userId, planId: String(plan.id) },
+      metadata: { ...OURS, userId, planId: String(plan.id) },
     });
 
     await confirmCheckout(theSession);
@@ -399,7 +419,7 @@ describe("confirmCheckout", () => {
       confirmCheckout(
         session({
           id: "cs_email_fails",
-          metadata: { userId, planId: String(plan.id) },
+          metadata: { ...OURS, userId, planId: String(plan.id) },
         }),
       ),
     ).resolves.toBe(true);
@@ -422,7 +442,7 @@ describe("a $0 checkout (e.g. a 100% coupon)", () => {
           payment_status: "no_payment_required",
           payment_intent: null,
           amount_total: 0,
-          metadata: { userId, planId: String(plan.id) },
+          metadata: { ...OURS, userId, planId: String(plan.id) },
         }),
       ),
     );
@@ -456,7 +476,7 @@ describe("handleStripeEvent", () => {
     await handleStripeEvent(
       event(
         "checkout.session.completed",
-        session({ payment_status: "paid", metadata: { userId, planId: String(plan.id) } }),
+        session({ payment_status: "paid", metadata: { ...OURS, userId, planId: String(plan.id) } }),
       ),
     );
 
@@ -477,7 +497,7 @@ describe("handleStripeEvent", () => {
         session({
           id: "cs_bank_debit",
           created: startedAt,
-          metadata: { userId, planId: String(plan.id), durationDays: "7" },
+          metadata: { ...OURS, userId, planId: String(plan.id), durationDays: "7" },
         }),
         settledAt,
       ),
@@ -501,7 +521,7 @@ describe("handleStripeEvent", () => {
     await handleStripeEvent(
       event(
         "checkout.session.completed",
-        session({ id: "cs_late", metadata: { userId, planId: String(plan.id) } }),
+        session({ id: "cs_late", metadata: { ...OURS, userId, planId: String(plan.id) } }),
         paidAt,
       ),
     );
@@ -520,6 +540,7 @@ describe("handleStripeEvent", () => {
           id,
           payment_intent: `pi_${id}`,
           metadata: {
+            ...OURS,
             userId,
             planId: String(plan.id),
             durationDays: "30",
@@ -550,7 +571,7 @@ describe("handleStripeEvent", () => {
     const plan = await seedPlan({ overlapping: false });
 
     await confirmCheckout(
-      session({ id: "cs_old", metadata: { userId, planId: String(plan.id) } }),
+      session({ id: "cs_old", metadata: { ...OURS, userId, planId: String(plan.id) } }),
     );
 
     const [purchase] = await getAllPurchases({ userId });
@@ -727,15 +748,39 @@ describe("handleStripeEvent", () => {
     expect(purchase?.amountRefunded).toBe(plan.amount);
   });
 
-  test("charge.refunded with no matching purchase, but ours (has metadata.planId), throws so Stripe retries", async () => {
-    retrievedIntentMetadata = { planId: "1" };
+  test("charge.refunded with no matching purchase, but ours (tagged), throws so Stripe retries", async () => {
+    retrievedIntentMetadata = { ...OURS, planId: "1" };
     fakeLatestCharge = { amount_refunded: 500, refunded: false, disputed: false };
 
     await expect(
       handleStripeEvent(
         event("charge.refunded", { payment_intent: "pi_dangling" }),
       ),
-    ).rejects.toThrow();
+    ).rejects.toThrow("Purchase not recorded yet");
+  });
+
+  test("an untagged intent from before the tag existed is still ours if its session has a checkout row", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    await seedCheckout({ userId, planId: plan.id, stripeCheckoutSessionId: "cs_legacy_pi" });
+    retrievedIntentMetadata = { userId, planId: String(plan.id) };
+    sessionsForIntent = [{ id: "cs_legacy_pi", metadata: { userId, planId: String(plan.id) } }];
+    fakeLatestCharge = { amount_refunded: 500, refunded: false, disputed: false };
+
+    await expect(
+      handleStripeEvent(event("charge.refunded", { payment_intent: "pi_legacy" })),
+    ).rejects.toThrow("Purchase not recorded yet");
+  });
+
+  test("an untagged intent with planId metadata but no checkout row of ours is ignored, not retried forever", async () => {
+    // e.g. a Payment Link or another app on the same Stripe account that also uses `planId`
+    retrievedIntentMetadata = { userId: "someone", planId: "1" };
+    sessionsForIntent = [{ id: "cs_payment_link", metadata: { userId: "someone", planId: "1" } }];
+    fakeLatestCharge = { amount_refunded: 500, refunded: false, disputed: false };
+
+    await expect(
+      handleStripeEvent(event("charge.refunded", { payment_intent: "pi_foreign" })),
+    ).resolves.toBeUndefined();
   });
 
   test("charge.refunded with no matching purchase and no planId metadata is ignored (e.g. a subscription invoice)", async () => {
@@ -850,7 +895,7 @@ describe("duplicate_purchase_confirmed is written once per duplicate charge", ()
       session({
         id,
         payment_intent: `pi_${id}`,
-        metadata: { userId, planId: String(plan.id) },
+        metadata: { ...OURS, userId, planId: String(plan.id) },
       });
 
     await confirmCheckout(paid("cs_first"));
@@ -883,7 +928,7 @@ describe("duplicate charges confirmed concurrently", () => {
       amount_total: 1000,
       currency: "usd",
       payment_intent: `pi_${id}`,
-      metadata: { userId, planId: String(planId), durationDays: "none", overlapping: "true" },
+      metadata: { ...OURS, userId, planId: String(planId), durationDays: "none", overlapping: "true" },
     }) as unknown as Stripe.Checkout.Session;
 
   // confirm checks for an existing blocking purchase only after its own insert, not before - a
@@ -943,5 +988,110 @@ describe("charge.refund.updated", () => {
     const [purchase] = await getAllPurchases({ userId });
     expect(purchase?.status).toBe("paid");
     expect(purchase?.amountRefunded).toBe(0);
+  });
+});
+
+describe("only this app's own Checkout Sessions are recorded", () => {
+  beforeEach(async () => {
+    await resetDb();
+  });
+
+  test("an untagged paid session with our metadata keys but no checkout row is not a purchase", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+
+    const inserted = await confirmCheckout(
+      session({ id: "cs_payment_link", metadata: { userId, planId: String(plan.id) } }),
+    );
+
+    expect(inserted).toBe(false);
+    expect(await getAllPurchases({ userId })).toHaveLength(0);
+  });
+
+  test("an untagged session created before the tag existed is still recorded through its checkout row", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    await seedCheckout({ userId, planId: plan.id, stripeCheckoutSessionId: "cs_pre_tag" });
+
+    const inserted = await confirmCheckout(
+      session({ id: "cs_pre_tag", metadata: { userId, planId: String(plan.id) } }),
+    );
+
+    expect(inserted).toBe(true);
+    expect(await getAllPurchases({ userId })).toHaveLength(1);
+  });
+});
+
+describe("a duplicate charge alerts the admins", () => {
+  beforeEach(async () => {
+    await resetDb();
+    purchaseConfirmationEmailCalls = [];
+    purchaseConfirmationEmailFails = false;
+  });
+
+  const alerts = () =>
+    purchaseConfirmationEmailCalls.filter((c) => String(c.subject).startsWith("Action needed"));
+
+  test("emails every admin once, naming both purchases, and not on a redelivery", async () => {
+    await seedUser({ email: "boss@example.test", role: "admin" });
+    await seedUser({ email: "multi@example.test", role: "user, admin" });
+    await seedUser({ email: "banned@example.test", role: "admin", banned: true });
+    await seedUser({ email: "someone@example.test", role: "user" });
+    const userId = await seedUser({ email: "buyer@example.test" });
+    const plan = await seedPlan({ name: "Lifetime", repeatable: false });
+    const paid = (id: string) =>
+      session({
+        id,
+        payment_intent: `pi_${id}`,
+        metadata: { ...OURS, userId, planId: String(plan.id) },
+      });
+
+    await confirmCheckout(paid("cs_first"));
+    expect(alerts()).toHaveLength(0);
+
+    await confirmCheckout(paid("cs_dup"));
+    await confirmCheckout(paid("cs_dup")); // Stripe redelivering it
+
+    const sent = alerts();
+    expect(sent.map((c) => c.to).sort()).toEqual(["boss@example.test", "multi@example.test"]);
+    expect(sent[0]?.subject).toBe("Action needed: duplicate purchase of Lifetime");
+    const [first, dup] = await getAllPurchases({ userId });
+    expect(sent[0]?.text).toContain(`#${first!.id}`);
+    expect(sent[0]?.text).toContain(`#${dup!.id}`);
+    expect(sent[0]?.text).toContain("buyer@example.test");
+    expect(sent[0]?.text).toContain("cs_dup");
+  });
+
+  test("a failing alert doesn't fail the confirmation", async () => {
+    await seedUser({ role: "admin" });
+    const userId = await seedUser();
+    const plan = await seedPlan({ repeatable: false });
+    const paid = (id: string) =>
+      session({
+        id,
+        payment_intent: `pi_${id}`,
+        metadata: { ...OURS, userId, planId: String(plan.id) },
+      });
+
+    await confirmCheckout(paid("cs_first"));
+    purchaseConfirmationEmailFails = true;
+    expect(await confirmCheckout(paid("cs_dup"))).toBe(true);
+    expect(await getAllPurchases({ userId })).toHaveLength(2);
+  });
+
+  test("a repeatable plan bought twice is no duplicate and alerts no one", async () => {
+    await seedUser({ role: "admin" });
+    const userId = await seedUser();
+    const plan = await seedPlan({ repeatable: true });
+    const paid = (id: string) =>
+      session({
+        id,
+        payment_intent: `pi_${id}`,
+        metadata: { ...OURS, userId, planId: String(plan.id) },
+      });
+
+    await confirmCheckout(paid("cs_one"));
+    await confirmCheckout(paid("cs_two"));
+    expect(alerts()).toHaveLength(0);
   });
 });

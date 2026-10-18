@@ -7,6 +7,7 @@
 import type Stripe from "stripe";
 import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
 import { confirm } from "@f/payments/services/fulfillment";
+import { isOurs } from "@f/payments/services/checkout";
 import { resolveChargeState, type PurchaseState } from "@f/payments/lib/stripe/charge-state";
 import { paymentsRepo } from "@f/payments/repo";
 import type { Subscription } from "@f/payments/use-cases/get-subscription";
@@ -202,6 +203,17 @@ export async function purchases(days: number, dryRun: boolean): Promise<Reconcil
       !session.metadata?.planId
     )
       continue;
+
+    // someone else's session on the same Stripe account (a Payment Link, another app) is skipped
+    // quietly - not inserted as a purchase, and not counted failed for lacking our metadata
+    const [ours, oursError] = await tryCatch(isOurs(session));
+    if (oursError) {
+      summary.scanned++;
+      summary.failed++;
+      logger.error({ err: oursError, session: session.id }, "payments.reconcile");
+      continue;
+    }
+    if (!ours) continue;
 
     summary.scanned++;
     const intent = session.payment_intent as Stripe.PaymentIntent | string | null;

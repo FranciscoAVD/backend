@@ -32,7 +32,7 @@ A `plan` is `recurring` (a subscription managed by better-auth's stripe plugin) 
 | POST | `/checkout` | caller | one-time plans only — `recurring` 422s |
 | GET | `/checkout/:sessionId` | caller | `open`/`processing`/`failed`/`expired`/`paid`/`refunded`/`disputed` |
 
-The webhook (`/api/auth/stripe/webhook` → `handleStripeEvent` in `lib/webhook.ts`) writes and syncs `purchase` rows; `bun run payments:reconcile [--days 14] [--dry-run]` backfills anything a missed webhook left behind *and* corrects any `subscription` row left stale by an out-of-order webhook event. See `CONTROL_FLOW.md` for the full request/webhook/reconciler control flow, including the `plan.repeatable`/`durationDays`/`overlapping` races and the `payment_audit_log` trail they write to.
+The webhook (`/api/auth/stripe/webhook` → `handleStripeEvent` in `lib/webhook.ts`) writes and syncs `purchase` rows; `bun run payments:reconcile [--days 28] [--dry-run]` backfills anything a missed webhook left behind *and* corrects any `subscription` row left stale by an out-of-order webhook event. See `CONTROL_FLOW.md` for the full request/webhook/reconciler control flow, including the `plan.repeatable`/`durationDays`/`overlapping` races and the `payment_audit_log` trail they write to.
 
 **Product decisions** — whether `past_due` keeps access, whether a partial refund or an open dispute ends it, whether a retired plan's holders keep it, and how a deleted user's subscriptions are cancelled — are named constants in `lib/access-policy.ts`, with the defaults and alternatives documented there and in `CONTROL_FLOW.md`. Change them there rather than in the queries that read them.
 

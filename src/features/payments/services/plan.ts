@@ -2,7 +2,7 @@ import type Stripe from "stripe";
 import type { Payment } from "@f/payments/lib/types";
 import { paymentsRepo } from "@f/payments/repo";
 import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
-import { markExpired } from "@f/payments/services/checkout";
+import { isOurs, markExpired } from "@f/payments/services/checkout";
 import { isUniqueViolation } from "@f/payments/lib/utils";
 import {
   RETIRED_PLANS_KEEP_ACCESS,
@@ -98,7 +98,12 @@ async function expireOpenCheckoutsForPlan(
 
   let matches: Stripe.Checkout.Session[];
   if (plan.type === "one_time") {
-    matches = open.filter((session) => session.metadata?.planId === String(plan.id));
+    // `planId` alone isn't enough: a Payment Link or another app on the same Stripe account may use
+    // the same metadata key, and expiring its checkouts isn't this app's call
+    matches = [];
+    for (const session of open)
+      if (session.metadata?.planId === String(plan.id) && (await isOurs(session)))
+        matches.push(session);
   } else {
     const rowIds = open.flatMap((session) => session.metadata?.subscriptionId ?? []);
     const rows = await paymentsRepo.subscription.getByIds(rowIds);

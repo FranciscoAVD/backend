@@ -9,12 +9,16 @@ import {
   PROCESSING_TTL_SEC,
   RESERVATION_TTL_SEC,
   CHECKOUT_TRANSITIONS_FROM,
+  CHECKOUT_SESSION_EXPIRY_MARGIN_SEC,
+  CHECKOUT_SOURCE_METADATA_KEY,
+  CHECKOUT_SOURCE_METADATA_VALUE,
 } from "@f/payments/lib/constants";
 import { isUserDeleting } from "@f/payments/lib/state/deletion-guard";
 import { encodeDurationDays, encodeOverlapping } from "@f/payments/lib/utils";
 import { getCheckoutSessionParams } from "@f/payments/lib/checkout-extensions";
 import { logger } from "@/lib/logger";
 import tryCatch from "@vicstack/try-catch";
+import type Stripe from "stripe";
 
 type CheckoutUser = { userId: string; name: string; email: string };
 
@@ -60,6 +64,7 @@ export async function createCheckout(
 
   const metadata = {
     ...extraMetadata,
+    [CHECKOUT_SOURCE_METADATA_KEY]: CHECKOUT_SOURCE_METADATA_VALUE,
     userId: user.userId,
     planId: String(plan.id),
     durationDays: encodeDurationDays(plan.durationDays),
@@ -250,10 +255,28 @@ export async function start(
 }
 
 /**
+ * @description Whether this app created a Checkout Session - and so whether the webhook, the
+ * reconciler or plan retirement may act on it. True if it carries this app's source tag
+ * (`CHECKOUT_SOURCE_METADATA_KEY`, set on every session since the tag existed), or - for a session
+ * created before then - if a `checkout` row was recorded for it. A session from anything else on
+ * the same Stripe account (a Payment Link, the Dashboard, another app) is neither, even if it
+ * happens to carry `planId`/`userId` metadata. Operation must be wrapped in try-catch
+ */
+export async function isOurs(
+  session: Pick<Stripe.Checkout.Session, "id" | "metadata">,
+): Promise<boolean> {
+  if (session.metadata?.[CHECKOUT_SOURCE_METADATA_KEY] === CHECKOUT_SOURCE_METADATA_VALUE)
+    return true;
+  const row = await paymentsRepo.checkout.get.bySession({ stripeCheckoutSessionId: session.id });
+  return row !== null;
+}
+
+/**
  * @description Resolves a checkout's status: the DB purchase once confirmed, otherwise the
- * `checkout` row. Both are scoped to the user. A row still `open` or `reserving` past its own
- * `expiresAt` reads as `expired` - nothing has swept it yet, but it's no longer payable. Operation
- * must be wrapped in try-catch
+ * `checkout` row. Both are scoped to the user. A `reserving` row past its own `expiresAt`, or an
+ * `open` one whose Stripe session has expired (`CHECKOUT_SESSION_EXPIRY_MARGIN_SEC` before the
+ * row's own `expiresAt`), reads as `expired` - nothing has swept it yet, but it's no longer
+ * payable. Operation must be wrapped in try-catch
  */
 export async function status(
   checkout: { userId: string } & Pick<Payment.Purchase, "stripeCheckoutSessionId">,
@@ -263,8 +286,11 @@ export async function status(
 
   const pending = await paymentsRepo.checkout.get.bySession(checkout);
   if (!pending || pending.userId !== checkout.userId) return null;
-  return (pending.status === "open" || pending.status === "reserving") &&
-    pending.expiresAt.getTime() <= Date.now()
+  const deadAt =
+    pending.status === "open"
+      ? pending.expiresAt.getTime() - CHECKOUT_SESSION_EXPIRY_MARGIN_SEC * 1000
+      : pending.expiresAt.getTime();
+  return (pending.status === "open" || pending.status === "reserving") && deadAt <= Date.now()
     ? "expired"
     : pending.status;
 }

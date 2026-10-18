@@ -2,12 +2,17 @@ import Stripe from "stripe";
 import { logger } from "@/lib/logger";
 import tryCatch from "@vicstack/try-catch";
 import { paymentsRepo } from "@f/payments/repo";
-import { markCompleted } from "@f/payments/services/checkout";
+import { isOurs, markCompleted } from "@f/payments/services/checkout";
 import { decodeDurationDays, decodeOverlapping } from "@f/payments/lib/utils";
 import { resolveChargeState } from "@f/payments/lib/stripe/charge-state";
 import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
 import { sendPurchaseConfirmationEmail } from "@f/payments/lib/purchase-confirmation-email";
 import { sendRefundConfirmationEmail } from "@f/payments/lib/refund-confirmation-email";
+import { sendDuplicatePurchaseAlert } from "@f/payments/lib/duplicate-purchase-alert-email";
+import {
+  CHECKOUT_SOURCE_METADATA_KEY,
+  CHECKOUT_SOURCE_METADATA_VALUE,
+} from "@f/payments/lib/constants";
 import type { ChargeSyncResult } from "@f/payments/use-cases/sync-purchase-charge";
 import type { Payment } from "@f/payments/lib/types";
 
@@ -70,6 +75,13 @@ export async function confirm(
   session: Stripe.Checkout.Session,
   paidAt: Date = new Date(session.created * 1000),
 ): Promise<boolean> {
+  // before anything else: a paid session from a Payment Link, the Dashboard or another app on the
+  // same Stripe account is no purchase of ours, whatever its metadata says
+  if (!(await isOurs(session))) {
+    logger.warn({ session: session.id }, "payments.webhook.not_ours");
+    return false;
+  }
+
   const owner = await resolveOwner(session);
   if (!owner) {
     if (!session.metadata?.planId) {
@@ -150,6 +162,22 @@ export async function confirm(
     );
     if (auditError)
       logger.warn({ err: auditError, session: session.id }, "payments.audit.write_failed");
+
+    // the buyer has now paid twice for something they can only own once - a person has to decide
+    // on the refund, and an audit row nobody is watching isn't enough to make that happen
+    const [, alertError] = await tryCatch(
+      sendDuplicatePurchaseAlert({
+        planName: plan.name,
+        buyerUserId: owner.userId,
+        existingPurchaseId: blocking.id,
+        duplicatePurchaseId: inserted.id,
+        stripeCheckoutSessionId: session.id,
+        amountTotal: inserted.amountTotal,
+        currency: inserted.currency,
+      }),
+    );
+    if (alertError)
+      logger.warn({ err: alertError, session: session.id }, "payments.duplicate_alert.send_failed");
   }
 
   if (inserted) {
@@ -225,9 +253,30 @@ export async function syncCharge(
     return;
   }
 
-  const intent = await getPaymentProcessor().paymentIntents.retrieve(stripePaymentIntentId);
-  if (intent.metadata.planId)
+  if (await isOurPaymentIntent(stripePaymentIntentId))
     throw new Error("Purchase not recorded yet for this payment intent");
+}
+
+/**
+ * @description Whether a payment intent was paid through one of this app's Checkout Sessions - so
+ * a charge event for it with no purchase recorded yet is worth Stripe retrying. Tagged with this
+ * app's source since that existed; older ones are resolved through their session (`isOurs`). An
+ * untagged intent with no `planId` is never ours, and is settled without that extra lookup -
+ * that's every subscription invoice, and anything else on the account.
+ */
+async function isOurPaymentIntent(stripePaymentIntentId: string): Promise<boolean> {
+  const stripe = getPaymentProcessor();
+  const intent = await stripe.paymentIntents.retrieve(stripePaymentIntentId);
+  if (intent.metadata?.[CHECKOUT_SOURCE_METADATA_KEY] === CHECKOUT_SOURCE_METADATA_VALUE)
+    return true;
+  if (!intent.metadata?.planId) return false;
+
+  const sessions = await stripe.checkout.sessions.list({
+    payment_intent: stripePaymentIntentId,
+    limit: 1,
+  });
+  const session = sessions.data[0];
+  return session ? isOurs(session) : false;
 }
 
 export type RefundResult =

@@ -152,7 +152,7 @@ export const checkout = pgTable(
     // session instead of being locked out until it expires
     url: text("url"),
     // when this row's current status lapses: minutes while `reserving`, the session's own
-    // lifetime once `open`, up to two weeks while `processing` (delayed payment methods). A row
+    // lifetime once `open`, up to four weeks while `processing` (delayed payment methods). A row
     // past this is swept to `expired` by the next claim for the same slot, so a request that
     // died mid-checkout can't hold the slot forever
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),

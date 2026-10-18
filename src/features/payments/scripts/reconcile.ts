@@ -2,7 +2,7 @@
  * @description CLI wrapper for `services/reconcile.ts`'s `purchases`. See that file for the
  * actual logic.
  *
- * Usage: bun run payments:reconcile [--days 14] [--dry-run]
+ * Usage: bun run payments:reconcile [--days 28] [--dry-run]
  */
 import { parseArgs } from "node:util";
 import { paymentsServices } from "@f/payments/services";

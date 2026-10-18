@@ -1,8 +1,17 @@
 import { db } from "@d/connection";
 import { checkout as checkoutTable } from "@d/schemas/payment-schema";
 import type { Payment } from "@f/payments/lib/types";
-import { CHECKOUT_ACTIVE_STATUSES } from "@f/payments/lib/constants";
-import { and, eq, inArray, lt, sql } from "drizzle-orm";
+import {
+  CHECKOUT_ACTIVE_STATUSES,
+  CHECKOUT_EXPIRY_CLOCK_SKEW_SEC,
+  CHECKOUT_SESSION_EXPIRY_MARGIN_SEC,
+} from "@f/payments/lib/constants";
+import { and, eq, inArray, lt, or, sql } from "drizzle-orm";
+
+// an `open` row's session is dead CHECKOUT_SESSION_EXPIRY_MARGIN_SEC before the row's own
+// expiresAt; it's swept from then, plus clock-skew slack so a session Stripe still accepts never
+// loses its slot to a second checkout
+const OPEN_SWEEP_LEAD_SEC = CHECKOUT_SESSION_EXPIRY_MARGIN_SEC - CHECKOUT_EXPIRY_CLOCK_SKEW_SEC;
 
 /**
  * The only slot a checkout ever holds. A second one would mean letting a user buy the same
@@ -13,10 +22,12 @@ import { and, eq, inArray, lt, sql } from "drizzle-orm";
 const SLOT = 1;
 
 /**
- * Marks a (user, plan)'s slot-holding rows `expired` once they're past their own `expiresAt` - the
- * request died mid-checkout, or Stripe's `checkout.session.expired` webhook never landed. Without
- * this a stuck row would hold the slot forever. Private to the claim below, which is the only path
- * that needs the slot free.
+ * Marks a (user, plan)'s slot-holding rows `expired` once they're stale - the request died
+ * mid-checkout, or Stripe's `checkout.session.expired` webhook never landed. Without this a stuck
+ * row would hold the slot forever. A `reserving` or `processing` row is stale past its own
+ * `expiresAt`; an `open` one as soon as its Stripe session has expired (see `OPEN_SWEEP_LEAD_SEC`),
+ * rather than locking the buyer out for the row's last minutes behind a session nobody can pay.
+ * Private to the claim below, which is the only path that needs the slot free.
  */
 async function expireStaleCheckouts(
   target: { userId: string } & Pick<Payment.Checkout, "planId">,
@@ -30,7 +41,16 @@ async function expireStaleCheckouts(
         eq(checkoutTable.planId, target.planId),
         eq(checkoutTable.slot, SLOT),
         inArray(checkoutTable.status, CHECKOUT_ACTIVE_STATUSES),
-        lt(checkoutTable.expiresAt, sql`now()`),
+        or(
+          lt(checkoutTable.expiresAt, sql`now()`),
+          and(
+            eq(checkoutTable.status, "open"),
+            lt(
+              checkoutTable.expiresAt,
+              sql`now() + make_interval(secs => ${OPEN_SWEEP_LEAD_SEC})`,
+            ),
+          ),
+        ),
       ),
     );
 }

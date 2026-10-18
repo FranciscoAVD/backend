@@ -29,7 +29,10 @@ mock.module("@f/payments/lib/checkout-extensions", () => ({
 import { createCheckout, status as getCheckoutStatus } from "@f/payments/services/checkout";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import { paymentsRepo } from "@f/payments/repo";
-import { RESERVATION_TTL_SEC } from "@f/payments/lib/constants";
+import {
+  RESERVATION_TTL_SEC,
+  CHECKOUT_SESSION_EXPIRY_MARGIN_SEC,
+} from "@f/payments/lib/constants";
 import type { Payment } from "@f/payments/lib/types";
 import { db } from "@d/connection";
 import { checkout as checkoutTable } from "@d/schemas/payment-schema";
@@ -112,6 +115,7 @@ describe("createCheckout", () => {
     await createFor(plan);
 
     const metadata = {
+      source: "backend-payments",
       userId,
       planId: String(plan.id),
       durationDays: "30",
@@ -150,9 +154,14 @@ describe("createCheckout", () => {
     });
   });
 
-  test("the extension can't override userId/planId/durationDays/overlapping in metadata, but can add its own keys", async () => {
+  test("the extension can't override source/userId/planId/durationDays/overlapping in metadata, but can add its own keys", async () => {
     extensionParams = {
-      metadata: { userId: "someone-else", overlapping: "false", campaign: "spring-sale" },
+      metadata: {
+        source: "someone-else",
+        userId: "someone-else",
+        overlapping: "false",
+        campaign: "spring-sale",
+      },
       payment_intent_data: { metadata: { planId: "999999" } },
     };
     const plan = await seedPlan({ durationDays: 30 });
@@ -161,6 +170,7 @@ describe("createCheckout", () => {
 
     const metadata = {
       campaign: "spring-sale",
+      source: "backend-payments",
       userId,
       planId: String(plan.id),
       durationDays: "30",
@@ -182,6 +192,7 @@ describe("createCheckout", () => {
     await createFor(plan);
 
     const core = {
+      source: "backend-payments",
       userId,
       planId: String(plan.id),
       durationDays: "30",
@@ -279,6 +290,25 @@ describe("getCheckoutStatus", () => {
       stripeCheckoutSessionId: "cs_test_fake",
     });
     expect(res).toBe("expired");
+  });
+
+  test("reports an open row as expired once its Stripe session has, before the row's own deadline", async () => {
+    const plan = await seedPlan();
+    await createFor(plan);
+    const setRowDeadline = (secondsFromNow: number) =>
+      db
+        .update(checkoutTable)
+        .set({ expiresAt: new Date(Date.now() + secondsFromNow * 1000) })
+        .where(eq(checkoutTable.stripeCheckoutSessionId, "cs_test_fake"));
+    const check = () => getCheckoutStatus({ userId, stripeCheckoutSessionId: "cs_test_fake" });
+
+    // the session dies CHECKOUT_SESSION_EXPIRY_MARGIN_SEC before the row: a minute past that, the
+    // row still has minutes to run but Stripe no longer accepts the session
+    await setRowDeadline(CHECKOUT_SESSION_EXPIRY_MARGIN_SEC - 60);
+    expect(await check()).toBe("expired");
+
+    await setRowDeadline(CHECKOUT_SESSION_EXPIRY_MARGIN_SEC + 60);
+    expect(await check()).toBe("open");
   });
 
   test("returns null when the checkout row belongs to a different user", async () => {

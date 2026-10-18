@@ -5,6 +5,9 @@ import {
   PROCESSING_TTL_SEC,
   RESERVATION_TTL_SEC,
   CHECKOUT_TRANSITIONS_FROM,
+  CHECKOUT_SESSION_EXPIRY_MARGIN_SEC,
+  CHECKOUT_RESUME_MIN_REMAINING_SEC,
+  CHECKOUT_EXPIRY_CLOCK_SKEW_SEC,
 } from "@f/payments/lib/constants";
 import { resetDb, seedUser, seedPlan } from "@/test-helpers/db";
 import { db } from "@d/connection";
@@ -62,6 +65,10 @@ const transition = (
 const statusOf = async (sessionId: string) =>
   (await paymentsRepo.checkout.get.bySession({ stripeCheckoutSessionId: sessionId }))
     ?.status ?? null;
+
+/** Sets a row's deadline to `seconds` from now - negative for one already past. */
+const deadlineIn = (id: number, seconds: number) =>
+  db.update(checkoutTable).set({ expiresAt: expiresIn(seconds) }).where(eq(checkoutTable.id, id));
 
 /** Backdates a row's deadline, standing in for a request that died or a webhook that never came. */
 const backdate = (id: number) =>
@@ -139,6 +146,43 @@ describe("claimCheckoutSlot", () => {
 
     expect(await claim()).not.toBeNull();
     expect(await statusOf("cs_1")).toBe("expired");
+  });
+
+  // an open row's Stripe session expires CHECKOUT_SESSION_EXPIRY_MARGIN_SEC before the row does
+  test("frees an open row's slot once its session has expired, without waiting out the row's deadline", async () => {
+    const stale = await claim();
+    await open(stale!.id, "cs_1");
+    // the session expired a bit more than the clock-skew allowance ago; the row still has minutes
+    await deadlineIn(
+      stale!.id,
+      CHECKOUT_SESSION_EXPIRY_MARGIN_SEC - CHECKOUT_EXPIRY_CLOCK_SKEW_SEC - 30,
+    );
+
+    expect(await claim()).not.toBeNull();
+    expect(await statusOf("cs_1")).toBe("expired");
+  });
+
+  test("keeps an open row's slot through the clock-skew allowance after its session's expiry", async () => {
+    const recent = await claim();
+    await open(recent!.id, "cs_1");
+    // expired per our clock 30s ago - Stripe's may not agree yet, so it mustn't lose the slot
+    await deadlineIn(
+      recent!.id,
+      CHECKOUT_SESSION_EXPIRY_MARGIN_SEC - CHECKOUT_EXPIRY_CLOCK_SKEW_SEC + 30,
+    );
+
+    expect(await claim()).toBeNull();
+    expect(await statusOf("cs_1")).toBe("open");
+  });
+
+  test("a processing row keeps its slot until its own deadline - only an open row is freed early", async () => {
+    const settling = await claim();
+    await open(settling!.id, "cs_1");
+    await transition("cs_1", "processing");
+    await deadlineIn(settling!.id, 60);
+
+    expect(await claim()).toBeNull();
+    expect(await statusOf("cs_1")).toBe("processing");
   });
 
   test("claims the slot once the previous checkout reached a terminal status", async () => {
@@ -393,6 +437,31 @@ describe("getResumableCheckout", () => {
     await backdate(claimed!.id);
 
     expect(await paymentsRepo.checkout.get.resumable({ userId, planId })).toBeNull();
+  });
+
+  test("not resumable in its last minutes - its session dies before the row does", async () => {
+    const claimed = await claim();
+    await open(claimed!.id, "cs_1");
+    // the row has over 10 minutes left, but the session under 5
+    await deadlineIn(
+      claimed!.id,
+      CHECKOUT_SESSION_EXPIRY_MARGIN_SEC + CHECKOUT_RESUME_MIN_REMAINING_SEC - 30,
+    );
+
+    expect(await paymentsRepo.checkout.get.resumable({ userId, planId })).toBeNull();
+  });
+
+  test("resumable while its session still has enough time left", async () => {
+    const claimed = await claim();
+    await open(claimed!.id, "cs_1");
+    await deadlineIn(
+      claimed!.id,
+      CHECKOUT_SESSION_EXPIRY_MARGIN_SEC + CHECKOUT_RESUME_MIN_REMAINING_SEC + 60,
+    );
+
+    expect(await paymentsRepo.checkout.get.resumable({ userId, planId })).toMatchObject({
+      stripeCheckoutSessionId: "cs_1",
+    });
   });
 
   test("not resumable with no url stored", async () => {

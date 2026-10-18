@@ -136,7 +136,13 @@ last), so any request that claims a freed slot already sees the purchase.
 A failed claim isn't always a 409: if the slot is held by the caller's own still-`open`
 session, they get that session back instead (`checkout.get.resumable`) - the "buyer closed
 the tab" case. A repeatable plan checks for that resumable session *first*, since its own
-open session no longer holds the slot. The deletion flag (`lib/state/deletion-guard.ts`) is
+open session no longer holds the slot. A session is only resumable while it has at least
+`CHECKOUT_RESUME_MIN_REMAINING_SEC` left: Stripe expires it `CHECKOUT_SESSION_EXPIRY_MARGIN_SEC`
+(10 minutes) before its row's own `expiresAt`, so going by the row alone handed back a
+session Stripe would refuse whenever `checkout.session.expired` was late. For the same
+reason, the claim's sweep frees an `open` row's slot once its session has expired (plus
+`CHECKOUT_EXPIRY_CLOCK_SKEW_SEC` of slack), not at the row's deadline, and
+`GET /checkout/:sessionId` reports such a row as `expired`. The deletion flag (`lib/state/deletion-guard.ts`) is
 checked the same way - before claiming, and again once the session exists - so a deletion
 starting mid-request still gets the session expired.
 
@@ -274,6 +280,14 @@ construction.
 
 ### `services.fulfillment.confirm`: turning a paid session into a `purchase` row
 
+First, `isOurs` (`services/checkout.ts`) decides whether the session is this app's
+at all: tagged with `CHECKOUT_SOURCE_METADATA_KEY` (every session `createCheckout`
+has made since the tag existed), or - for an older one - with a `checkout` row
+recorded for it. Anything else on the same Stripe account (a Payment Link, the
+Dashboard, another app) is logged as `payments.webhook.not_ours` and skipped,
+even if its metadata happens to carry `planId`/`userId`. The reconciler's scan and
+plan retirement's `expireOpenCheckoutsForPlan` apply the same check.
+
 Both drop branches below **throw** rather than log-and-return: a silently
 swallowed 200 would mean a payment with no trace of ever going wrong (Stripe
 never retries, and a later reconciler pass that hits the same drop would
@@ -281,7 +295,9 @@ otherwise miscount it as a successful insert - see the reconciler section).
 
 ```mermaid
 flowchart TD
-    Start(["services.fulfillment.confirm(session)"]) --> ResolveOwner["resolveOwner (private helper):\npaymentsRepo.checkout.get.bySession(session.id)"]
+    Start(["services.fulfillment.confirm(session)"]) --> IsOurs{"isOurs(session):\nsource tag, or a\ncheckout row?"}
+    IsOurs -- no --> NotOursEarly["log warning: payments.webhook.not_ours,\nreturn false"]
+    IsOurs -- yes --> ResolveOwner["resolveOwner (private helper):\npaymentsRepo.checkout.get.bySession(session.id)"]
     ResolveOwner --> HasPending{"checkout row\nfound?"}
     HasPending -- yes --> Owner["{ userId, planId }"]
     HasPending -- no, or db error --> Metadata["fall back to\nsession.metadata\n(set on the session at createCheckout time)"]
@@ -339,7 +355,7 @@ session's own `created`, so a delayed payment method that took days to settle
 doesn't lose them - with that clock, a 7-day plan paid by a bank debit that
 settled on day 8 granted no access at all. The reconciler recovers the same
 timestamp by listing those two event types (Stripe keeps events for 30 days,
-longer than the default 14-day scan); failing that, it uses the charge's own
+longer than the default 28-day scan); failing that, it uses the charge's own
 creation time. For the same reason, `durationDays`
 comes from the snapshot `createCheckout` writes into the session's metadata
 (`"none"` for a never-expiring plan, since Stripe drops empty metadata values),
@@ -394,9 +410,9 @@ flowchart TD
     Resolve --> Write["if it differs: UPDATE ... WHERE the row still\nholds what was read (no charge yet: nothing to write)"]
     Write -- "row changed meanwhile" --> Read
     Found -- no --> Retrieve["stripe.paymentIntents.retrieve(id)\n(plain, no expand - just for metadata)"]
-    Retrieve --> OursButMissing{"intent.metadata.planId\nset (one of our checkouts)?"}
+    Retrieve --> OursButMissing{"ours? source tag on the intent, or\n(planId set and its session,\nfound via checkout.sessions.list,\npasses isOurs)"}
     OursButMissing -- yes --> Throw["throw\n(services.fulfillment.confirm's insert is still\nin flight/retrying - fail so Stripe\nretries this event too)"]
-    OursButMissing -- no --> Ignore["ignore\n(e.g. a subscription invoice charge\nwith no purchase row at all)"]
+    OursButMissing -- no --> Ignore["ignore\n(e.g. a subscription invoice charge, or\nanother integration's payment - retrying\nthose would just fail for 3 days)"]
 ```
 
 ## The reconciler: `services/reconcile.ts` (`bun run payments:reconcile`)
@@ -420,9 +436,11 @@ deleted plan), that exception propagates out and the session is counted as
 metadata's `userId`: a purchase whose user was since deleted has `userId: null`,
 and a user-scoped lookup would miss it and re-count it as inserted on every run.
 
-The default scan window is 14 days (derived from `PROCESSING_TTL_SEC`), not 7 -
-delayed payment methods (e.g. bank debits) can take that long to settle, and a
-late settlement whose webhook was lost needs to still fall inside the window.
+The default scan window is 28 days (derived from `PROCESSING_TTL_SEC`), not 7 -
+delayed payment methods can take that long to settle (SEPA Direct Debit up to 14
+business days, ~20 calendar days, more over bank holidays), and a late settlement
+whose webhook was lost needs to still fall inside the window. Still inside the 30
+days Stripe keeps events for, which the success-time lookup below depends on.
 
 That window is about *sessions*, though, and refunds and disputes don't keep to
 it: chargebacks typically land 30-120 days after the purchase. So after the
@@ -773,7 +791,8 @@ only translates its returned `kind` into the matching HTTP status:
   `RETIRING_EXPIRES_OPEN_CHECKOUTS` (on by default), retiring also expires every
   open session for the plan (`expireOpenCheckoutsForPlan`, also a private helper
   inside `services/plan.ts`): one-time ones by their
-  `metadata.planId`, the plugin's subscription ones by the plan of the pending
+  `metadata.planId`, and only if `isOurs` (another integration's session using the
+  same key is left alone), the plugin's subscription ones by the plan of the pending
   `subscription` row their `metadata.subscriptionId` points at. Turn it off to let
   anyone mid-checkout finish. Failures return `{ kind: updated_expire_failed }`
   (route.ts: 500) like the price sync, and

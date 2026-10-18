@@ -1,6 +1,6 @@
 import { db } from "@d/connection";
 import { user as userTable } from "@d/schemas/auth-schema";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull, or, sql } from "drizzle-orm";
 
 /**
  * @description Select query for a user's email verification flag. Assumes validation.
@@ -70,4 +70,24 @@ export async function setStripeCustomerId(
     .update(userTable)
     .set({ stripeCustomerId })
     .where(eq(userTable.id, target.userId));
+}
+
+/**
+ * @description Select query for every admin's email and name - who to alert when something needs a
+ * person to act on it (e.g. `lib/duplicate-purchase-alert-email.ts`). An admin is any non-banned
+ * user whose role list includes `admin`: the admin plugin stores several roles as one
+ * comma-separated string, so this splits it rather than matching the column whole. Assumes
+ * validation. Operation must be wrapped in try-catch
+ * @returns The admins' contact fields - empty if there are none.
+ */
+export async function getAdminContacts(): Promise<{ email: string; name: string }[]> {
+  return db
+    .select({ email: userTable.email, name: userTable.name })
+    .from(userTable)
+    .where(
+      and(
+        sql`'admin' = any(string_to_array(replace(${userTable.role}, ' ', ''), ','))`,
+        or(isNull(userTable.banned), eq(userTable.banned, false)),
+      ),
+    );
 }

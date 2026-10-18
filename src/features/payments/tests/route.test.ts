@@ -222,6 +222,15 @@ import { paymentsRepo } from "@f/payments/repo";
 import { RESERVATION_TTL_SEC } from "@f/payments/lib/constants";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
 import { markUserDeleting } from "@f/payments/lib/state/deletion-guard";
+import {
+  CHECKOUT_SOURCE_METADATA_KEY,
+  CHECKOUT_SOURCE_METADATA_VALUE,
+} from "@f/payments/lib/constants";
+
+// how every Checkout Session this app creates is tagged (see CHECKOUT_SOURCE_METADATA_KEY) - the
+// sessions below stand in for ones it created, so they carry it too
+const OURS = { [CHECKOUT_SOURCE_METADATA_KEY]: CHECKOUT_SOURCE_METADATA_VALUE };
+
 // dynamic, not static - route.ts calls .use(sessionMiddleware) at module-evaluation
 // time, capturing the function by value into Hono's middleware chain immediately.
 // A static import is hoisted above the mock.module call above regardless of its
@@ -779,16 +788,21 @@ describe("PATCH /plans/:id", () => {
     const userId = await seedUser();
     const plan = await seedPlan();
     const other = await seedPlan();
+    // created before the source tag existed: untagged, but its checkout row says it's ours
+    await seedCheckout({ userId, planId: plan.id, stripeCheckoutSessionId: "cs_pre_tag" });
     openSessions = [
-      { id: "cs_this_plan", status: "open", metadata: { planId: String(plan.id) } },
-      { id: "cs_other_plan", status: "open", metadata: { planId: String(other.id) } },
-      { id: "cs_done", status: "complete", metadata: { planId: String(plan.id) } },
+      { id: "cs_this_plan", status: "open", metadata: { ...OURS, planId: String(plan.id) } },
+      { id: "cs_other_plan", status: "open", metadata: { ...OURS, planId: String(other.id) } },
+      { id: "cs_done", status: "complete", metadata: { ...OURS, planId: String(plan.id) } },
       { id: "cs_foreign", status: "open", metadata: {} },
+      { id: "cs_pre_tag", status: "open", metadata: { planId: String(plan.id) } },
+      // a Payment Link or another app on the same Stripe account using the same metadata key
+      { id: "cs_not_ours", status: "open", metadata: { planId: String(plan.id) } },
     ];
     setSession({ id: userId, ...admin }, { plan: ["update"] });
 
     expect((await patch(plan.id, { active: false })).status).toBe(204);
-    expect(expiredSessions).toEqual(["cs_this_plan"]);
+    expect(expiredSessions).toEqual(["cs_this_plan", "cs_pre_tag"]);
   });
 
   test("retiring a recurring plan expires the stripe plugin's open checkouts for it", async () => {
@@ -810,7 +824,7 @@ describe("PATCH /plans/:id", () => {
   test("reactivating a plan expires nothing", async () => {
     const userId = await seedUser();
     const plan = await seedPlan({ active: false });
-    openSessions = [{ id: "cs_x", status: "open", metadata: { planId: String(plan.id) } }];
+    openSessions = [{ id: "cs_x", status: "open", metadata: { ...OURS, planId: String(plan.id) } }];
     setSession({ id: userId, ...admin }, { plan: ["update"] });
 
     expect((await patch(plan.id, { active: true })).status).toBe(204);
@@ -820,7 +834,7 @@ describe("PATCH /plans/:id", () => {
   test("a failed expiry 500s, and repeating the retirement completes it", async () => {
     const userId = await seedUser();
     const plan = await seedPlan();
-    openSessions = [{ id: "cs_open", status: "open", metadata: { planId: String(plan.id) } }];
+    openSessions = [{ id: "cs_open", status: "open", metadata: { ...OURS, planId: String(plan.id) } }];
     setSession({ id: userId, ...admin }, { plan: ["update"] });
 
     expireFails = true;
@@ -1608,8 +1622,8 @@ describe("low-severity fixes", () => {
     const plan = await seedPlan({ durationDays: 30 });
     const other = await seedPlan();
     openSessions = [
-      { id: "cs_old_terms", status: "open", metadata: { planId: String(plan.id) } },
-      { id: "cs_other_plan", status: "open", metadata: { planId: String(other.id) } },
+      { id: "cs_old_terms", status: "open", metadata: { ...OURS, planId: String(plan.id) } },
+      { id: "cs_other_plan", status: "open", metadata: { ...OURS, planId: String(other.id) } },
     ];
 
     const res = await app.request(`/plans/${plan.id}`, {
@@ -1626,7 +1640,7 @@ describe("low-severity fixes", () => {
     const userId = await seedUser();
     setSession({ id: userId, ...admin }, { plan: ["update"] });
     const plan = await seedPlan();
-    openSessions = [{ id: "cs_keep", status: "open", metadata: { planId: String(plan.id) } }];
+    openSessions = [{ id: "cs_keep", status: "open", metadata: { ...OURS, planId: String(plan.id) } }];
 
     const res = await app.request(`/plans/${plan.id}`, {
       method: "PATCH",
@@ -1646,8 +1660,8 @@ describe("low-severity fixes", () => {
     // a repeatable plan's open session released its slot, so once the plan is non-repeatable
     // nothing else would stop a buyer who already owns it from paying this one too
     openSessions = [
-      { id: "cs_repeat_buy", status: "open", metadata: { planId: String(plan.id) } },
-      { id: "cs_other_plan", status: "open", metadata: { planId: String(other.id) } },
+      { id: "cs_repeat_buy", status: "open", metadata: { ...OURS, planId: String(plan.id) } },
+      { id: "cs_other_plan", status: "open", metadata: { ...OURS, planId: String(other.id) } },
     ];
 
     const res = await app.request(`/plans/${plan.id}`, {
@@ -1666,8 +1680,8 @@ describe("low-severity fixes", () => {
     const nonRepeatable = await seedPlan({ repeatable: false });
     const repeatable = await seedPlan({ name: "Repeatable", repeatable: true });
     openSessions = [
-      { id: "cs_a", status: "open", metadata: { planId: String(nonRepeatable.id) } },
-      { id: "cs_b", status: "open", metadata: { planId: String(repeatable.id) } },
+      { id: "cs_a", status: "open", metadata: { ...OURS, planId: String(nonRepeatable.id) } },
+      { id: "cs_b", status: "open", metadata: { ...OURS, planId: String(repeatable.id) } },
     ];
 
     // already non-repeatable: nothing changes for anyone mid-checkout
@@ -1692,7 +1706,7 @@ describe("low-severity fixes", () => {
     const userId = await seedUser();
     setSession({ id: userId, ...admin }, { plan: ["update"] });
     const plan = await seedPlan();
-    openSessions = [{ id: "cs_stuck", status: "open", metadata: { planId: String(plan.id) } }];
+    openSessions = [{ id: "cs_stuck", status: "open", metadata: { ...OURS, planId: String(plan.id) } }];
     expireFails = true;
 
     const res = await app.request(`/plans/${plan.id}`, {
@@ -1759,7 +1773,7 @@ describe("checkouts expired by a plan edit can't be resumed", () => {
         slot: repeatable ? null : 1,
         url: "https://checkout.stripe.com/c/old",
       });
-      openSessions = [{ id: "cs_old_terms", status: "open", metadata: { planId: String(plan.id) } }];
+      openSessions = [{ id: "cs_old_terms", status: "open", metadata: { ...OURS, planId: String(plan.id) } }];
 
       setSession({ id: adminId, ...admin }, { plan: ["update"] });
       const patch = await app.request(`/plans/${plan.id}`, {

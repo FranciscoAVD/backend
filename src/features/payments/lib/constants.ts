@@ -20,6 +20,18 @@ export const ALLOWED_EVENTS = [
 /** Stripe prefixes every Checkout Session ID with this. */
 export const CHECKOUT_SESSION_ID_PREFIX = "cs_";
 
+/**
+ * The metadata entry every Checkout Session (and its payment intent) this app creates is tagged
+ * with, so the webhook, the reconciler and plan retirement only ever act on this app's own
+ * sessions. Without it, "ours" meant "has `planId`/`userId` metadata" - true of a Payment Link, a
+ * Dashboard-made session or another app on the same Stripe account, any of which could then be
+ * recorded as a purchase here, or have its checkout expired by a plan edit. Change the value if
+ * several deployments of this app share one Stripe account (e.g. staging and production in the
+ * same live account), so each only claims its own.
+ */
+export const CHECKOUT_SOURCE_METADATA_KEY = "source";
+export const CHECKOUT_SOURCE_METADATA_VALUE = "backend-payments";
+
 /** GET /audit-log page size when none is asked for, and the most it allows. */
 export const AUDIT_LOG_DEFAULT_LIMIT = 50;
 export const AUDIT_LOG_MAX_LIMIT = 100;
@@ -52,14 +64,43 @@ export const PENDING_CHECKOUT_TTL_SEC = 60 * 60 * 24;
 /**
  * The Stripe Checkout Session's own `expires_at`, kept 10 minutes shorter than
  * `PENDING_CHECKOUT_TTL_SEC` so the checkout row always outlives the Stripe session, never the
- * other way around. `checkout.session.expired`'s webhook can lag; without this margin, a session
- * Stripe has already expired but whose webhook hasn't landed yet still reads `open`, and the
- * resume path could hand a buyer back a session Stripe will no longer accept. Still comfortably
- * above Stripe's own 30-minute minimum for `expires_at`.
+ * other way around: the row is what holds the (user, plan) slot, and if it lapsed first a second
+ * checkout could open while the first session was still payable. Still comfortably above
+ * Stripe's own 30-minute minimum for `expires_at`.
+ *
+ * The flip side is a stretch at the end of an `open` row's life where Stripe no longer accepts
+ * its session - if `checkout.session.expired`'s webhook is late, nothing else marks it. So the
+ * row's *session* is treated as dead from `expiresAt - CHECKOUT_SESSION_EXPIRY_MARGIN_SEC` on
+ * (see the constants below): it's no longer resumed or reported `open`, and its slot is freed.
  */
 export const CHECKOUT_SESSION_EXPIRY_SEC = PENDING_CHECKOUT_TTL_SEC - 60 * 10;
-/** Delayed payment methods (e.g. bank debits) can take several days to settle. */
-export const PROCESSING_TTL_SEC = 60 * 60 * 24 * 14;
+/**
+ * How much earlier than its `open` checkout row a session expires. The row's `expiresAt` is set
+ * after `checkout.sessions.create` returns, from a later clock reading than the session's own
+ * `expires_at`, so `expiresAt - this` is always at or after the moment Stripe expires the session.
+ */
+export const CHECKOUT_SESSION_EXPIRY_MARGIN_SEC =
+  PENDING_CHECKOUT_TTL_SEC - CHECKOUT_SESSION_EXPIRY_SEC;
+/**
+ * The least time a session must have left to be handed back by `POST /checkout`'s resume path -
+ * resuming one about to expire would just send the buyer to a page that dies while they type.
+ */
+export const CHECKOUT_RESUME_MIN_REMAINING_SEC = 60 * 5;
+/**
+ * Slack for the clocks involved (this app's, Postgres's `now()`, Stripe's) when freeing the slot
+ * of an `open` row whose session should have expired: it's only swept this long *after* that
+ * moment, so a session Stripe still considers payable never loses its slot to a second checkout.
+ */
+export const CHECKOUT_EXPIRY_CLOCK_SKEW_SEC = 60;
+/**
+ * How long a paid-but-unsettled (`processing`) checkout holds its slot. Delayed payment methods
+ * can take a long time to settle - SEPA Direct Debit up to 14 *business* days, which is ~20
+ * calendar days and more over bank holidays. A shorter hold let the slot be swept while the
+ * payment was still settling, so a second checkout for a non-repeatable plan could be paid too.
+ * Also how far back the reconciler scans by default and the user-deletion guard looks for
+ * settling payments.
+ */
+export const PROCESSING_TTL_SEC = 60 * 60 * 24 * 28;
 /**
  * How long a `POST /checkout` reservation holds the (user, plan) slot before the real session id
  * replaces it. Sized to outlast `ensureCustomer` plus `checkout.sessions.create` at the Stripe
