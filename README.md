@@ -45,7 +45,7 @@ docker build --target cron -t backend-reconcile-cron .
 docker run -d --restart unless-stopped --env-file .env backend-reconcile-cron
 ```
 
-Give it the same env vars as the main app (`DB_URL`/`DB_*`, `REDIS_URL`, `STRIPE_SECRET_KEY`, ...), pointed at production - not the main app's own container or the `postgres`/`redis` services in `compose.yaml`, which are local-dev-only. To change the schedule, edit the `0 3 * * *` line in the Dockerfile and rebuild - there's no env var for it.
+Give it the same env vars as the main app (`DB_URL`/`DB_*`, `REDIS_URL`/`REDIS_*`, `STRIPE_SECRET_KEY`, ...), pointed at production - not the main app's own container or the `postgres`/`redis` services in `compose.yaml`, which are local-dev-only. To change the schedule, edit the `0 3 * * *` line in the Dockerfile and rebuild - there's no env var for it.
 
 **Only need one of the two flows?**
 - *Drop subscriptions:* remove (or `enabled: false`) `auth.ts`'s `subscription` option — the only thing gating it. Don't create `recurring` plans. The `hooks.before` retired-plan guard and the user-deletion hook become no-ops (no recurring plans, no subscriptions to cancel), so they can stay or go.

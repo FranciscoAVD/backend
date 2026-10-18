@@ -47,7 +47,7 @@ A conditionally-mounted router (behind an env flag, if one exists again later) c
 
 # Testing
 
-**Always run `bun run test`, never bare `bun test`.** The `test` script sets `DB_NAME=backend_test` and points `REDIS_URL` at db index 1; bare `bun test` falls through to `.env`'s values (the dev database, dev Redis db 0) and will truncate real dev data the moment a test file's `beforeEach(resetDb)`/`resetRedis()` runs.
+**Always run `bun run test`, never bare `bun test`.** The `test` script sets `DB_NAME=backend_test` and `REDIS_DB=1`; bare `bun test` falls through to `.env`'s values (the dev database, dev Redis db 0) and will truncate real dev data the moment a test file's `beforeEach(resetDb)`/`resetRedis()` runs.
 
 - Test files live in a `tests/` folder at the top level of each feature directory (`features/<feature>/tests/<name>.test.ts`) — one folder per feature, not split by `use-cases/`/`lib/` and not co-located next to the file under test. Path aliases (`@f/...`, `@/...`) mean a test file's own location never affects what it can import.
 - One-time setup per machine: `docker compose exec postgres psql -U admin -d backend -c "CREATE DATABASE backend_test"`, then `bun run db:test:push` (re-run the latter after schema changes, same as `db:push` for dev). Redis needs no setup — db index 1 just exists once anything writes to it.

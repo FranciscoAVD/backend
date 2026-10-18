@@ -1,9 +1,9 @@
 import { createRedis } from "@vicstack/redis";
-import { env } from "@/env";
+import { REDIS_URL } from "@/lib/redis-url";
 import { logger } from "@/lib/logger";
 
 const { client, ready, increment } = createRedis({
-  url: env.REDIS_URL,
+  url: REDIS_URL,
   onError: (error, context) => logger.error({ err: error }, context),
 });
 

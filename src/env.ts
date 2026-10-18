@@ -48,9 +48,14 @@ export const env = createEnv({
     DB_PORT: z.coerce.number().optional(),
     DB_NAME: z.string().optional(),
     DB_URL: z.url().optional(),
-    // Redis
-    REDIS_PORT: z.coerce.number(),
-    REDIS_URL: z.url(),
+    // Redis: either REDIS_URL, or every discrete field below - never both, never a mix
+    REDIS_PROVIDER: z.string().optional(),
+    REDIS_USER: z.string().optional().default("default"),
+    REDIS_PASSWORD: z.string().min(12).optional(),
+    REDIS_HOST: z.string().optional().default("localhost"),
+    REDIS_PORT: z.coerce.number().optional(),
+    REDIS_DB: z.coerce.number().int().min(0).optional().default(0),
+    REDIS_URL: z.url().optional(),
     // Rate limiting behind a proxy
     TRUSTED_PROXIES: trustedProxiesSchema,
     TRUSTED_IP_HEADER: trustedIpHeaderSchema,
@@ -63,31 +68,46 @@ export const env = createEnv({
   runtimeEnv: process.env,
 });
 
-const DISCRETE_DB_FIELDS = [
-  "DB_PROVIDER",
-  "DB_USER",
-  "DB_PASSWORD",
-  "DB_PORT",
-  "DB_NAME",
-] as const;
+/**
+ * Enforces "either `<LABEL>_URL`, or every one of these discrete fields - never both, never a
+ * mix" for a connection that supports both shapes (DB, Redis). Fields with their own default
+ * (e.g. `DB_HOST`, `REDIS_HOST`) are never passed in here, since they're never actually
+ * "missing" - only fields a discrete setup must genuinely supply belong in `discrete`.
+ */
+function requireUrlXorDiscrete(
+  label: string,
+  url: string | undefined,
+  discrete: Record<string, unknown>,
+) {
+  const discreteFields = Object.keys(discrete);
+  const setFields = discreteFields.filter((key) => discrete[key] !== undefined);
 
-const setDiscreteDbFields = DISCRETE_DB_FIELDS.filter(
-  (key) => env[key] !== undefined,
-);
+  if (url && setFields.length > 0) {
+    throw new Error(
+      `Set either ${label}_URL or the discrete ${label}_* fields, not both (${label}_URL is set alongside ${setFields.join(", ")})`,
+    );
+  }
+  if (!url && setFields.length < discreteFields.length) {
+    const missing = discreteFields.filter((key) => !setFields.includes(key));
+    throw new Error(
+      `Set either ${label}_URL or all of ${discreteFields.join(", ")} (missing ${missing.join(", ")})`,
+    );
+  }
+}
 
-if (env.DB_URL && setDiscreteDbFields.length > 0) {
-  throw new Error(
-    `Set either DB_URL or the discrete DB_* fields, not both (DB_URL is set alongside ${setDiscreteDbFields.join(", ")})`,
-  );
-}
-if (!env.DB_URL && setDiscreteDbFields.length < DISCRETE_DB_FIELDS.length) {
-  const missing = DISCRETE_DB_FIELDS.filter(
-    (key) => !setDiscreteDbFields.includes(key),
-  );
-  throw new Error(
-    `Set either DB_URL or all of ${DISCRETE_DB_FIELDS.join(", ")} (missing ${missing.join(", ")})`,
-  );
-}
+requireUrlXorDiscrete("DB", env.DB_URL, {
+  DB_PROVIDER: env.DB_PROVIDER,
+  DB_USER: env.DB_USER,
+  DB_PASSWORD: env.DB_PASSWORD,
+  DB_PORT: env.DB_PORT,
+  DB_NAME: env.DB_NAME,
+});
+
+requireUrlXorDiscrete("REDIS", env.REDIS_URL, {
+  REDIS_PROVIDER: env.REDIS_PROVIDER,
+  REDIS_PASSWORD: env.REDIS_PASSWORD,
+  REDIS_PORT: env.REDIS_PORT,
+});
 
 if (env.NODE_ENV === "production" && !env.TRUSTED_PROXIES && !env.TRUSTED_IP_HEADER) {
   throw new Error(
