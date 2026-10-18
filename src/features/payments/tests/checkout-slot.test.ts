@@ -6,7 +6,6 @@ import {
   RESERVATION_TTL_SEC,
   CHECKOUT_TRANSITIONS_FROM,
   CHECKOUT_SESSION_EXPIRY_MARGIN_SEC,
-  CHECKOUT_RESUME_MIN_REMAINING_SEC,
   CHECKOUT_EXPIRY_CLOCK_SKEW_SEC,
 } from "@f/payments/lib/constants";
 import { resetDb, seedUser, seedPlan } from "@/test-helpers/db";
@@ -395,7 +394,7 @@ describe("getResumableCheckout", () => {
     const claimed = await claim();
     await open(claimed!.id, "cs_1");
 
-    expect(await paymentsRepo.checkout.get.resumable({ userId, planId })).toEqual({
+    expect(await paymentsRepo.checkout.get.resumable({ userId, planId })).toMatchObject({
       stripeCheckoutSessionId: "cs_1",
       url: "https://checkout.stripe.com/c/cs_1",
     });
@@ -439,29 +438,23 @@ describe("getResumableCheckout", () => {
     expect(await paymentsRepo.checkout.get.resumable({ userId, planId })).toBeNull();
   });
 
-  test("not resumable in its last minutes - its session dies before the row does", async () => {
+  test("returned right up until its session expires, with the row's deadline", async () => {
     const claimed = await claim();
     await open(claimed!.id, "cs_1");
-    // the row has over 10 minutes left, but the session under 5
-    await deadlineIn(
-      claimed!.id,
-      CHECKOUT_SESSION_EXPIRY_MARGIN_SEC + CHECKOUT_RESUME_MIN_REMAINING_SEC - 30,
-    );
+    // a minute of session left: too short to hand back, but `start` has to see it to replace it
+    await deadlineIn(claimed!.id, CHECKOUT_SESSION_EXPIRY_MARGIN_SEC + 60);
 
-    expect(await paymentsRepo.checkout.get.resumable({ userId, planId })).toBeNull();
+    const resumable = await paymentsRepo.checkout.get.resumable({ userId, planId });
+    expect(resumable).toMatchObject({ stripeCheckoutSessionId: "cs_1" });
+    expect(resumable!.expiresAt).toBeInstanceOf(Date);
   });
 
-  test("resumable while its session still has enough time left", async () => {
+  test("not returned once its session has expired, though the row hasn't", async () => {
     const claimed = await claim();
     await open(claimed!.id, "cs_1");
-    await deadlineIn(
-      claimed!.id,
-      CHECKOUT_SESSION_EXPIRY_MARGIN_SEC + CHECKOUT_RESUME_MIN_REMAINING_SEC + 60,
-    );
+    await deadlineIn(claimed!.id, CHECKOUT_SESSION_EXPIRY_MARGIN_SEC - 30);
 
-    expect(await paymentsRepo.checkout.get.resumable({ userId, planId })).toMatchObject({
-      stripeCheckoutSessionId: "cs_1",
-    });
+    expect(await paymentsRepo.checkout.get.resumable({ userId, planId })).toBeNull();
   });
 
   test("not resumable with no url stored", async () => {
@@ -475,7 +468,7 @@ describe("getResumableCheckout", () => {
     const claimed = await claim();
     await open(claimed!.id, "cs_1", { repeatable: true });
 
-    expect(await paymentsRepo.checkout.get.resumable({ userId, planId })).toEqual({
+    expect(await paymentsRepo.checkout.get.resumable({ userId, planId })).toMatchObject({
       stripeCheckoutSessionId: "cs_1",
       url: "https://checkout.stripe.com/c/cs_1",
     });

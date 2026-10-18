@@ -74,8 +74,10 @@ flowchart TD
     Deleting -- yes --> Conflict3["{ kind: deleting } -> route.ts: 409"]
     Deleting -- no --> Repeatable{"plan.repeatable?"}
 
-    Repeatable -- yes --> ResumeRep{"this user's open session\nfor this plan?"}
+    Repeatable -- yes --> ResumeRep{"this user's open session for this plan,\nwith 5+ minutes left on it?"}
     ResumeRep -- yes --> Resume200b["{ kind: resumed } -> route.ts: 200"]
+    ResumeRep -- "under 5 minutes left" --> RetireRep["expire it at Stripe + mark the row expired\n(a fresh session replaces it below)"]
+    RetireRep --> Lock
     ResumeRep -- no --> Lock["paymentsRepo.checkout.claim(userId, planId)\n(the same claim as below - for a repeatable plan\nthe slot is only held while creating)"]
     Lock -- "held elsewhere" --> Conflict4["{ kind: slot_taken } -> route.ts: 409"]
     Lock -- acquired --> EnsureCustomer
@@ -87,9 +89,11 @@ flowchart TD
     AlreadyOwns -- no --> Reserve["paymentsRepo.checkout.claim(userId, planId)\n(use-cases/claim-checkout.ts: sweeps this slot's\nrows past their expires_at, then INSERT a\nreserving row ... ON CONFLICT DO NOTHING\nagainst the checkout_active_slot index)"]
     Reserve -->|db error| Err500e["throws -> route.ts: 500"]
     Reserve --> Claimed{"row returned?\n(no open/processing checkout\nor other live claim)"}
-    Claimed -- no --> Resumable{"checkout.get.resumable:\nthis user's own open session for the plan,\nwith a url and at least 5 minutes\nleft before Stripe expires it?"}
-    Resumable -- yes --> Resume200["{ kind: resumed, sessionId, url }\n-> route.ts: 200\n(no new Stripe session, no audit entry)"]
-    Resumable -- "no (processing, still reserving,\nsession expired or about to, or no url)" --> Audit2["audit log: checkout_blocked_pending_checkout\n(best-effort)"]
+    Claimed -- no --> Resumable{"checkout.get.resumable:\nthis user's own open session for the plan,\nwith a url, whose session is still alive?"}
+    Resumable -- "yes, 5+ minutes left" --> Resume200["{ kind: resumed, sessionId, url }\n-> route.ts: 200\n(no new Stripe session, no audit entry)"]
+    Resumable -- "yes, under 5 minutes left" --> Retire["expire it at Stripe + mark the row expired,\nfreeing the slot (if Stripe refuses - e.g.\nit was just paid - fall through to 409)"]
+    Retire -->|"claim again"| Claimed
+    Resumable -- "no (processing, still reserving,\nsession expired, or no url)" --> Audit2["audit log: checkout_blocked_pending_checkout\n(best-effort)"]
     Audit2 --> Conflict2["{ kind: slot_taken } -> route.ts: 409"]
     Claimed -- yes --> Recheck["getBlocking again, now the slot is held\n(the user's earlier checkout may have confirmed\nbetween the first check and the claim)"]
     Recheck -- "owned" --> Release409["release the claimed row,\naudit log + { kind: owned } -> route.ts: 409"]
@@ -137,11 +141,17 @@ last), so any request that claims a freed slot already sees the purchase.
 A failed claim isn't always a 409: if the slot is held by the caller's own still-`open`
 session, they get that session back instead (`checkout.get.resumable`) - the "buyer closed
 the tab" case. A repeatable plan checks for that resumable session *first*, since its own
-open session no longer holds the slot. A session is only resumable while it has at least
-`CHECKOUT_RESUME_MIN_REMAINING_SEC` left: Stripe expires it `CHECKOUT_SESSION_EXPIRY_MARGIN_SEC`
-(10 minutes) before its row's own `expiresAt`, so going by the row alone handed back a
-session Stripe would refuse whenever `checkout.session.expired` was late. For the same
-reason, the claim's sweep frees an `open` row's slot once its session has expired (plus
+open session no longer holds the slot. Stripe expires a session
+`CHECKOUT_SESSION_EXPIRY_MARGIN_SEC` (10 minutes) before its row's own `expiresAt`, so
+`checkout.get.resumable` stops at the session's expiry, not the row's - going by the row
+alone handed back a session Stripe would refuse whenever `checkout.session.expired` was
+late. A session with less than `CHECKOUT_RESUME_MIN_REMAINING_SEC` (5 minutes) left isn't
+handed back either - it would die while the buyer types - but it isn't left holding the
+slot: `start` expires it at Stripe (`services.checkout.expire`, which also marks the row
+`expired`) and creates a fresh one, claiming again for a non-repeatable plan. Refusing it
+while it still held the slot answered 409 until it ran out. If Stripe won't expire it
+(it was paid in the meantime), the request answers 409 and the webhook settles the slot.
+For the same reason as the resume cutoff, the claim's sweep frees an `open` row's slot once its session has expired (plus
 `CHECKOUT_EXPIRY_CLOCK_SKEW_SEC` of slack), not at the row's deadline, and
 `GET /checkout/:sessionId` reports such a row as `expired`. The deletion flag (`lib/state/deletion-guard.ts`) is
 checked the same way - before claiming, and again once the session exists - so a deletion

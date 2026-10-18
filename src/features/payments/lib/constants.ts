@@ -83,7 +83,8 @@ export const CHECKOUT_SESSION_EXPIRY_MARGIN_SEC =
   PENDING_CHECKOUT_TTL_SEC - CHECKOUT_SESSION_EXPIRY_SEC;
 /**
  * The least time a session must have left to be handed back by `POST /checkout`'s resume path -
- * resuming one about to expire would just send the buyer to a page that dies while they type.
+ * resuming one about to expire would just send the buyer to a page that dies while they type. One
+ * with less left is expired at Stripe and replaced with a fresh session instead.
  */
 export const CHECKOUT_RESUME_MIN_REMAINING_SEC = 60 * 5;
 /**

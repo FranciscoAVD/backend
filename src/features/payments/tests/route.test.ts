@@ -225,6 +225,7 @@ import { markUserDeleting } from "@f/payments/lib/state/deletion-guard";
 import {
   CHECKOUT_SOURCE_METADATA_KEY,
   CHECKOUT_SOURCE_METADATA_VALUE,
+  CHECKOUT_SESSION_EXPIRY_MARGIN_SEC,
 } from "@f/payments/lib/constants";
 
 // how every Checkout Session this app creates is tagged (see CHECKOUT_SOURCE_METADATA_KEY) - the
@@ -1103,6 +1104,69 @@ describe("POST /checkout", () => {
       headers: jsonHeaders,
       body: JSON.stringify({ planId: plan.id }),
     });
+    expect(res.status).toBe(409);
+    expect(sessionCreateCalls).toHaveLength(0);
+  });
+
+  // a session expires CHECKOUT_SESSION_EXPIRY_MARGIN_SEC before its row: this row's session has
+  // 3 minutes left, too few to hand back to a buyer
+  const shortSessionDeadline = () =>
+    new Date(Date.now() + (CHECKOUT_SESSION_EXPIRY_MARGIN_SEC + 180) * 1000);
+
+  for (const repeatable of [false, true])
+    test(`replaces an open checkout about to expire with a fresh one (repeatable: ${repeatable})`, async () => {
+      const userId = await seedUser({ stripeCustomerId: "cus_test" });
+      const plan = await seedPlan({ type: "one_time", repeatable });
+      await seedCheckout({
+        userId,
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_short",
+        url: "https://checkout.stripe.com/c/short",
+        slot: repeatable ? null : 1,
+        expiresAt: shortSessionDeadline(),
+      });
+      setSession({ id: userId, ...regularUser });
+
+      const res = await app.request("/checkout", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({ planId: plan.id }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        data: { sessionId: "cs_test_fake" },
+        message: "Checkout created",
+      });
+      // the short session was expired at Stripe and its row closed, not left payable alongside
+      expect(expiredSessions).toEqual(["cs_short"]);
+      const [old] = await db
+        .select()
+        .from(checkoutTable)
+        .where(eq(checkoutTable.stripeCheckoutSessionId, "cs_short"));
+      expect(old?.status).toBe("expired");
+      expect(sessionCreateCalls).toHaveLength(1);
+    });
+
+  test("409s if the session about to expire can't be expired (e.g. it was just paid)", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: false });
+    await seedCheckout({
+      userId,
+      planId: plan.id,
+      stripeCheckoutSessionId: "cs_short",
+      url: "https://checkout.stripe.com/c/short",
+      expiresAt: shortSessionDeadline(),
+    });
+    setSession({ id: userId, ...regularUser });
+    expireFails = true;
+
+    const res = await app.request("/checkout", {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ planId: plan.id }),
+    });
+
     expect(res.status).toBe(409);
     expect(sessionCreateCalls).toHaveLength(0);
   });

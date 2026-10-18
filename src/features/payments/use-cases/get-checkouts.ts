@@ -1,15 +1,8 @@
 import { db } from "@d/connection";
 import { checkout as checkoutTable } from "@d/schemas/payment-schema";
 import type { Payment } from "@f/payments/lib/types";
-import {
-  CHECKOUT_RESUME_MIN_REMAINING_SEC,
-  CHECKOUT_SESSION_EXPIRY_MARGIN_SEC,
-} from "@f/payments/lib/constants";
+import { CHECKOUT_SESSION_EXPIRY_MARGIN_SEC } from "@f/payments/lib/constants";
 import { and, eq, gt, isNotNull, sql } from "drizzle-orm";
-
-// an open row's Stripe session dies CHECKOUT_SESSION_EXPIRY_MARGIN_SEC before the row does; only a
-// session with at least CHECKOUT_RESUME_MIN_REMAINING_SEC still left on it is worth handing back
-const RESUMABLE_FOR_SEC = CHECKOUT_SESSION_EXPIRY_MARGIN_SEC + CHECKOUT_RESUME_MIN_REMAINING_SEC;
 
 /**
  * @description Select query for the checkout a Stripe Checkout Session belongs to. Not scoped to a
@@ -33,24 +26,26 @@ export async function getCheckoutBySession(
 }
 
 /**
- * @description The user's still-open checkout for this plan, if there is one - so `POST /checkout`
- * can send a buyer who closed the Stripe tab back to the same session rather than refusing them
- * until it expires. Only an `open` row whose Stripe session still has `CHECKOUT_RESUME_MIN_REMAINING_SEC`
- * left, and that knows its Stripe URL, is resumable - the session expires
- * `CHECKOUT_SESSION_EXPIRY_MARGIN_SEC` before the row does, so the row's own `expiresAt` alone would
- * hand back a dead session in its last minutes whenever `checkout.session.expired` is late. A
- * `processing` row is already paid and settling, and a `reserving` one has no session yet. Assumes
- * validation. Operation must be wrapped in try-catch
+ * @description The user's still-open checkout for this plan, if its Stripe session is still alive -
+ * so `POST /checkout` can send a buyer who closed the Stripe tab back to the same session rather
+ * than refusing them until it expires. The session expires `CHECKOUT_SESSION_EXPIRY_MARGIN_SEC`
+ * before the row's own `expiresAt`, so that's the cutoff, not the row's deadline. The row's
+ * `expiresAt` comes back too: whether a session with only a few minutes left is worth handing
+ * back, or should be replaced, is `services.checkout.start`'s call. A `processing` row is already
+ * paid and settling, and a `reserving` one has no session yet; a row with no url can't be resumed.
+ * Assumes validation. Operation must be wrapped in try-catch
  * @param target object of the user's own user ID and the plan ID enforced by Pick<Payment.Checkout, "planId">
- * @returns The session ID and its Stripe-hosted URL, or null if there's nothing to resume.
+ * @returns The session ID, its Stripe-hosted URL and the row's deadline, or null if there's nothing
+ * alive to resume.
  */
 export async function getResumableCheckout(
   target: { userId: string } & Pick<Payment.Checkout, "planId">,
-): Promise<{ stripeCheckoutSessionId: string; url: string } | null> {
+): Promise<{ stripeCheckoutSessionId: string; url: string; expiresAt: Date } | null> {
   const res = await db
     .select({
       stripeCheckoutSessionId: checkoutTable.stripeCheckoutSessionId,
       url: checkoutTable.url,
+      expiresAt: checkoutTable.expiresAt,
     })
     .from(checkoutTable)
     .where(
@@ -60,7 +55,7 @@ export async function getResumableCheckout(
         eq(checkoutTable.status, "open"),
         gt(
           checkoutTable.expiresAt,
-          sql`now() + make_interval(secs => ${RESUMABLE_FOR_SEC})`,
+          sql`now() + make_interval(secs => ${CHECKOUT_SESSION_EXPIRY_MARGIN_SEC})`,
         ),
         isNotNull(checkoutTable.stripeCheckoutSessionId),
         isNotNull(checkoutTable.url),
@@ -69,6 +64,6 @@ export async function getResumableCheckout(
 
   const row = res[0];
   return row?.stripeCheckoutSessionId && row.url
-    ? { stripeCheckoutSessionId: row.stripeCheckoutSessionId, url: row.url }
+    ? { stripeCheckoutSessionId: row.stripeCheckoutSessionId, url: row.url, expiresAt: row.expiresAt }
     : null;
 }

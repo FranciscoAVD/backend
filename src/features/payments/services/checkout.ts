@@ -10,6 +10,7 @@ import {
   RESERVATION_TTL_SEC,
   CHECKOUT_TRANSITIONS_FROM,
   CHECKOUT_SESSION_EXPIRY_MARGIN_SEC,
+  CHECKOUT_RESUME_MIN_REMAINING_SEC,
   CHECKOUT_SOURCE_METADATA_KEY,
   CHECKOUT_SOURCE_METADATA_VALUE,
 } from "@f/payments/lib/constants";
@@ -133,7 +134,12 @@ export async function start(
       );
   };
 
-  const resume = async (): Promise<CheckoutResult | null> => {
+  // hands back the user's open session for this plan, if it has enough time left to be worth it.
+  // One about to expire is retired instead - expired at Stripe, which frees the slot - so the
+  // caller can create a fresh one: refusing to resume it while it still held the slot left a
+  // non-repeatable plan's buyer with a 409 until it ran out. `retired` tells the caller to claim
+  // (again); null means there was nothing to resume or retire
+  const resume = async (): Promise<CheckoutResult | "retired" | null> => {
     const [resumable, resumeError] = await tryCatch(
       paymentsRepo.checkout.get.resumable({ userId: user.userId, planId: plan.id }),
     );
@@ -142,9 +148,24 @@ export async function start(
         { err: resumeError, user: user.userId, plan: plan.id },
         "payments.checkout.resume",
       );
-    return resumable
-      ? { kind: "resumed", sessionId: resumable.stripeCheckoutSessionId, url: resumable.url }
-      : null;
+    if (!resumable) return null;
+
+    const sessionLeftMs =
+      resumable.expiresAt.getTime() - CHECKOUT_SESSION_EXPIRY_MARGIN_SEC * 1000 - Date.now();
+    if (sessionLeftMs >= CHECKOUT_RESUME_MIN_REMAINING_SEC * 1000)
+      return { kind: "resumed", sessionId: resumable.stripeCheckoutSessionId, url: resumable.url };
+
+    // a session completed in the meantime can't be expired - Stripe refuses, and the slot rightly
+    // stays held until its webhook settles it
+    const [, retireError] = await tryCatch(expire(resumable.stripeCheckoutSessionId));
+    if (retireError) {
+      logger.warn(
+        { err: retireError, user: user.userId, session: resumable.stripeCheckoutSessionId },
+        "payments.checkout.retire_short_session",
+      );
+      return null;
+    }
+    return "retired";
   };
 
   const blockIfOwned = async (): Promise<CheckoutResult | null> => {
@@ -175,21 +196,28 @@ export async function start(
     const blocked = await blockIfOwned();
     if (blocked) return blocked;
   } else {
+    // a retired session needs nothing more: a repeatable plan's open session doesn't hold the slot
     const resumed = await resume();
-    if (resumed) return resumed;
+    if (resumed && resumed !== "retired") return resumed;
   }
 
-  claimed = await paymentsRepo.checkout.claim(
-    { userId: user.userId },
-    { planId: plan.id, expiresAt: expiresIn(RESERVATION_TTL_SEC) },
-  );
+  const claim = () =>
+    paymentsRepo.checkout.claim(
+      { userId: user.userId },
+      { planId: plan.id, expiresAt: expiresIn(RESERVATION_TTL_SEC) },
+    );
+  claimed = await claim();
+
+  if (!claimed && !plan.repeatable) {
+    const resumed = await resume();
+    if (resumed && resumed !== "retired") return resumed;
+    // the session holding the slot was retired, which freed it - claim again
+    if (resumed === "retired") claimed = await claim();
+  }
 
   if (!claimed) {
     // for a repeatable plan this is just two requests racing - the resume above already ran
     if (plan.repeatable) return { kind: "slot_taken" };
-
-    const resumed = await resume();
-    if (resumed) return resumed;
 
     const [, auditError] = await tryCatch(
       paymentsRepo.audit.add({
