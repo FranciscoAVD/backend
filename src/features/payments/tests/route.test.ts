@@ -78,9 +78,17 @@ let refundRejectError: Error | null = null;
 // payment-intent id -> fake charge state, so paymentIntents.retrieve's latest_charge reflects
 // what refunds.create just did (resolveChargeState pulls this back after issuing a refund)
 let fakeCharges: Record<string, FakeCharge> = {};
-// idempotency key -> the Refund already created for it, so a retry with the same key returns the
-// cached result instead of refunding a second time - the same guarantee the real Stripe API gives
-let refundsByIdempotencyKey: Record<string, { id: string }> = {};
+// idempotency key -> the Refund already created for it (and the params it was created with), so a
+// retry with the same key returns the cached result - flagged with the same `Idempotent-Replayed`
+// header real Stripe sends - instead of refunding a second time, and a reused key with different
+// params is rejected, the same guarantees the real Stripe API gives
+type FakeRefund = { id: string; status: string; failure_reason: string | null };
+let refundsByIdempotencyKey: Record<string, { refund: FakeRefund; params: string }> = {};
+// refund id -> its live state, for refunds.retrieve; a test flips a status here to simulate a
+// refund that failed after Stripe accepted it
+let refundsById: Record<string, FakeRefund> = {};
+// the status a newly created refund starts in
+let newRefundStatus = "succeeded";
 // makes paymentIntents.retrieve throw, simulating refund()'s post-refund sync step failing after
 // the Stripe refund itself already succeeded
 let syncFails = false;
@@ -128,7 +136,16 @@ const fakeStripeClient = () => ({
       options: { idempotencyKey: string },
     ) => {
       const cached = refundsByIdempotencyKey[options.idempotencyKey];
-      if (cached) return cached;
+      if (cached) {
+        if (cached.params !== JSON.stringify(params))
+          throw new Stripe.errors.StripeIdempotencyError({
+            message: "Keys for idempotent requests can only be used with the same parameters.",
+          });
+        return {
+          ...cached.refund,
+          lastResponse: { headers: { "idempotent-replayed": "true" } },
+        };
+      }
 
       if (refundRejectError) throw refundRejectError;
       if (refundFails) throw new Error("Stripe is down");
@@ -145,10 +162,19 @@ const fakeStripeClient = () => ({
         );
         charge.refunded = charge.amount_refunded >= charge.amount;
       }
-      const refund = { id: `re_${crypto.randomUUID()}` };
-      refundsByIdempotencyKey[options.idempotencyKey] = refund;
-      return refund;
+      const refund: FakeRefund = {
+        id: `re_${crypto.randomUUID()}`,
+        status: newRefundStatus,
+        failure_reason: newRefundStatus === "failed" ? "expired_or_canceled_card" : null,
+      };
+      refundsByIdempotencyKey[options.idempotencyKey] = {
+        refund: { ...refund },
+        params: JSON.stringify(params),
+      };
+      refundsById[refund.id] = refund;
+      return { ...refund, lastResponse: { headers: {} } };
     },
+    retrieve: async (id: string) => ({ ...refundsById[id]! }),
   },
   paymentIntents: {
     retrieve: async (id: string) => {
@@ -1612,6 +1638,56 @@ describe("low-severity fixes", () => {
     expect(expiredSessions).toEqual([]);
   });
 
+  test("PATCH /plans/:id expires open checkouts when a plan stops being repeatable", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+    const plan = await seedPlan({ repeatable: true });
+    const other = await seedPlan({ name: "Other", repeatable: true });
+    // a repeatable plan's open session released its slot, so once the plan is non-repeatable
+    // nothing else would stop a buyer who already owns it from paying this one too
+    openSessions = [
+      { id: "cs_repeat_buy", status: "open", metadata: { planId: String(plan.id) } },
+      { id: "cs_other_plan", status: "open", metadata: { planId: String(other.id) } },
+    ];
+
+    const res = await app.request(`/plans/${plan.id}`, {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify({ repeatable: false }),
+    });
+
+    expect(res.status).toBe(204);
+    expect(expiredSessions).toEqual(["cs_repeat_buy"]);
+  });
+
+  test("PATCH /plans/:id leaves open checkouts alone when repeatable doesn't actually turn off", async () => {
+    const userId = await seedUser();
+    setSession({ id: userId, ...admin }, { plan: ["update"] });
+    const nonRepeatable = await seedPlan({ repeatable: false });
+    const repeatable = await seedPlan({ name: "Repeatable", repeatable: true });
+    openSessions = [
+      { id: "cs_a", status: "open", metadata: { planId: String(nonRepeatable.id) } },
+      { id: "cs_b", status: "open", metadata: { planId: String(repeatable.id) } },
+    ];
+
+    // already non-repeatable: nothing changes for anyone mid-checkout
+    const noop = await app.request(`/plans/${nonRepeatable.id}`, {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify({ repeatable: false }),
+    });
+    // turning repeat-buying *on* restricts nothing an open session was sold under
+    const opening = await app.request(`/plans/${repeatable.id}`, {
+      method: "PATCH",
+      headers: jsonHeaders,
+      body: JSON.stringify({ repeatable: true }),
+    });
+
+    expect(noop.status).toBe(204);
+    expect(opening.status).toBe(204);
+    expect(expiredSessions).toEqual([]);
+  });
+
   test("PATCH /plans/:id answers 500 if the stale checkouts couldn't be expired", async () => {
     const userId = await seedUser();
     setSession({ id: userId, ...admin }, { plan: ["update"] });
@@ -1723,16 +1799,20 @@ describe("POST /purchases/:id/refund", () => {
     refundRejectError = null;
     fakeCharges = {};
     refundsByIdempotencyKey = {};
+    refundsById = {};
+    newRefundStatus = "succeeded";
     syncFails = false;
     refundConfirmationEmailCalls = [];
     refundConfirmationEmailFails = false;
   });
 
+  // one fixed key unless a test passes its own: repeated calls with the defaults are retries of the
+  // same refund, the way a client resubmitting one form would send them
   const refundReq = (id: number, body: Record<string, unknown> = {}) =>
     app.request(`/purchases/${id}/refund`, {
       method: "POST",
       headers: jsonHeaders,
-      body: JSON.stringify(body),
+      body: JSON.stringify({ idempotencyKey: "refund-form-1", ...body }),
     });
 
   // stripePaymentIntentId: null mirrors a $0 purchase, where Stripe never creates a payment
@@ -1912,6 +1992,107 @@ describe("POST /purchases/:id/refund", () => {
     // no email on the first attempt - the sync never confirmed a transition happened at all;
     // the retry's successful sync is what actually earns the one confirmation email
     expect(refundConfirmationEmailCalls).toHaveLength(1);
+  });
+
+  test("422s without an idempotency key", async () => {
+    const { purchase } = await seedRefundablePurchase();
+    await asAdmin();
+
+    const res = await app.request(`/purchases/${purchase.id}/refund`, {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify({ amount: 100 }),
+    });
+    expect(res.status).toBe(422);
+    expect(refundCalls).toHaveLength(0);
+  });
+
+  test("two separate partial refunds of the same amount and reason both go through", async () => {
+    const { purchase } = await seedRefundablePurchase();
+    await asAdmin();
+
+    const body = { amount: 300, reason: "requested_by_customer" };
+    const first = await refundReq(purchase.id, { ...body, idempotencyKey: "refund-a-0001" });
+    const second = await refundReq(purchase.id, { ...body, idempotencyKey: "refund-b-0002" });
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+
+    expect(refundCalls).toHaveLength(2);
+    expect(fakeCharges["pi_refund_test"]?.amount_refunded).toBe(600);
+    const secondBody = (await second.json()) as { data: { amountRefunded: number }; replayed: boolean };
+    expect(secondBody.replayed).toBe(false);
+    expect(secondBody.data.amountRefunded).toBe(600);
+
+    // one audit row per real refund, each naming its own Stripe refund
+    const auditRows = await db.select().from(paymentAuditLog);
+    expect(auditRows).toHaveLength(2);
+    const refundIds = auditRows.map((r) => (r.details as { stripeRefundId: string }).stripeRefundId);
+    expect(new Set(refundIds).size).toBe(2);
+    expect(refundConfirmationEmailCalls).toHaveLength(2);
+  });
+
+  test("a retry with the same key is reported as a replay and writes no second audit row", async () => {
+    const { purchase } = await seedRefundablePurchase();
+    await asAdmin();
+
+    const first = await refundReq(purchase.id, { amount: 300 });
+    const retry = await refundReq(purchase.id, { amount: 300 });
+    expect(first.status).toBe(200);
+    expect(retry.status).toBe(200);
+
+    const firstBody = (await first.json()) as { refundId: string };
+    const retryBody = (await retry.json()) as { refundId: string; replayed: boolean };
+    expect(retryBody.replayed).toBe(true);
+    expect(retryBody.refundId).toBe(firstBody.refundId);
+
+    expect(refundCalls).toHaveLength(1);
+    expect(await db.select().from(paymentAuditLog)).toHaveLength(1);
+    expect(refundConfirmationEmailCalls).toHaveLength(1);
+  });
+
+  test("409s reusing a key for a refund with a different amount", async () => {
+    const { purchase } = await seedRefundablePurchase();
+    await asAdmin();
+
+    expect((await refundReq(purchase.id, { amount: 300 })).status).toBe(200);
+    const res = await refundReq(purchase.id, { amount: 400 });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { message: string }).message).toContain("idempotency key");
+    expect(refundCalls).toHaveLength(1);
+  });
+
+  test("422s a refund Stripe accepted but that failed, and writes no audit row or email", async () => {
+    const { purchase } = await seedRefundablePurchase();
+    await asAdmin();
+    newRefundStatus = "failed";
+
+    const res = await refundReq(purchase.id);
+    expect(res.status).toBe(422);
+    const body = (await res.json()) as { data: { failureReason: string } };
+    expect(body.data.failureReason).toBe("expired_or_canceled_card");
+    expect(await db.select().from(paymentAuditLog)).toHaveLength(0);
+    expect(refundConfirmationEmailCalls).toHaveLength(0);
+  });
+
+  test("retrying a refund that has since failed reports the failure, not a cached success", async () => {
+    const { purchase } = await seedRefundablePurchase();
+    await asAdmin();
+    // Stripe accepts it as pending, so the first response is a success...
+    newRefundStatus = "pending";
+    const first = await refundReq(purchase.id, { amount: 300 });
+    expect(first.status).toBe(200);
+    const { refundId } = (await first.json()) as { refundId: string };
+
+    // ...then the refund fails. A replay of the same key would still return the pending refund
+    refundsById[refundId]!.status = "failed";
+    const retry = await refundReq(purchase.id, { amount: 300 });
+    expect(retry.status).toBe(422);
+
+    // a new key is a new refund attempt, and goes through
+    newRefundStatus = "succeeded";
+    const fresh = await refundReq(purchase.id, { amount: 300, idempotencyKey: "refund-form-2" });
+    expect(fresh.status).toBe(200);
+    expect(refundCalls).toHaveLength(2);
   });
 
   test("a failing confirmation email doesn't fail the refund response", async () => {

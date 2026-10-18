@@ -236,27 +236,49 @@ export type RefundResult =
   | { kind: "already_refunded" }
   | { kind: "charge_disputed" }
   | { kind: "amount_exceeds_refundable" }
-  | { kind: "refunded"; purchase: Payment.Purchase };
+  // the idempotency key was already used for a refund with a different amount/reason
+  | { kind: "idempotency_conflict" }
+  // Stripe accepted the refund but it then failed or was canceled - no money moved
+  | { kind: "refund_failed"; refundId: string; failureReason: string | null }
+  | { kind: "refunded"; purchase: Payment.Purchase; refundId: string; replayed: boolean };
+
+const FAILED_REFUND_STATUSES: readonly (string | null | undefined)[] = ["failed", "canceled"];
+
+/**
+ * @description Whether Stripe answered a request by replaying the stored result of an earlier one
+ * with the same idempotency key. `lastResponse.headers` is a plain lowercase object under the SDK's
+ * default Node HTTP client, but a `Headers` instance under its fetch client - both are handled, so
+ * swapping clients can't silently turn every replay into a "new" refund.
+ */
+function isIdempotentReplay(response: { lastResponse?: { headers?: unknown } }): boolean {
+  const headers = response.lastResponse?.headers;
+  const value =
+    headers instanceof Headers
+      ? headers.get("idempotent-replayed")
+      : (headers as Record<string, string | undefined> | undefined)?.["idempotent-replayed"];
+  return value === "true";
+}
 
 /**
  * @description Issues a refund through Stripe for a purchase, then pulls the resulting
  * refund/dispute state back the same way the webhook does (`syncCharge`/`resolveChargeState`),
  * rather than recomputing the amount/status math here and risking it drifting from that logic.
  *
- * The Stripe call carries an idempotency key derived from (purchase, amount, reason): a retry of
- * the exact same request - whether the admin resubmits after seeing a stale error, or anything
- * else - lands on Stripe's side as the same refund, not a second one. This is what actually
- * prevents a double refund; a partial refund alone doesn't flip `status` to "refunded", so the
- * already-refunded guard above can't catch a retry on its own. (Trade-off: two genuinely separate
- * refunds of the same purchase with the same amount and reason, within Stripe's idempotency key
- * window, would collide too - indistinguishable from a retry; vary the amount or reason to avoid
- * it.)
+ * Idempotency is the caller's `idempotencyKey`, scoped to this purchase: the caller generates one
+ * per refund it means to issue and resends the same key only to retry that refund. A retry lands at
+ * Stripe as the same refund, never a second one; two genuinely separate refunds (even of the same
+ * amount and reason) carry different keys and both go through. Reusing a key with a different
+ * amount/reason is rejected by Stripe and reported as `idempotency_conflict`.
  *
- * The audit entry is written right after the Stripe call succeeds, before the sync below, so a
- * record exists regardless of what happens next - and a failed sync (a slow/down Stripe read, or
- * `syncPurchaseCharge` giving up) is logged as a warning, not thrown: the money already moved, so
- * that's not a failure to report, and the `charge.refunded`/`charge.refund.updated` webhook will
- * converge the row once it arrives.
+ * Stripe replays the *original* response for a reused key - including a refund that has since
+ * failed, or an error such as `charge_disputed` - so a replay is detected (`Idempotent-Replayed`)
+ * and the refund re-read for its live status. A refund that failed or was canceled comes back as
+ * `refund_failed` instead of a success, and the caller needs a new key to try again.
+ *
+ * The audit entry is written once per real refund - right after Stripe accepts it, not on a replay
+ * of it - and records the Stripe refund id, so the log lines up one-to-one with Stripe. A failed
+ * sync afterwards is logged as a warning, not thrown: the money already moved, and the
+ * `charge.refunded`/`charge.refund.updated` webhook will converge the row once it arrives.
  *
  * Two known Stripe failure modes get their own result instead of bubbling up as a generic
  * failure: refunding a disputed charge (`charge_disputed`), and asking for more than what's left
@@ -267,7 +289,11 @@ export type RefundResult =
 export async function refund(
   target: Pick<Payment.Purchase, "id">,
   admin: { id: string },
-  options: { amount?: number; reason?: Stripe.RefundCreateParams.Reason } = {},
+  options: {
+    idempotencyKey: string;
+    amount?: number;
+    reason?: Stripe.RefundCreateParams.Reason;
+  },
 ): Promise<RefundResult> {
   const purchase = await paymentsRepo.purchase.get.byId(target);
   if (!purchase) return { kind: "not_found" };
@@ -275,9 +301,10 @@ export async function refund(
   if (purchase.status === "refunded") return { kind: "already_refunded" };
 
   const stripe = getPaymentProcessor();
-  const idempotencyKey = `refund:${purchase.id}:${options.amount ?? "full"}:${options.reason ?? "none"}`;
+  const idempotencyKey = `refund:${purchase.id}:${options.idempotencyKey}`;
+  let created: Stripe.Response<Stripe.Refund>;
   try {
-    await stripe.refunds.create(
+    created = await stripe.refunds.create(
       {
         payment_intent: purchase.stripePaymentIntentId,
         ...(options.amount != null ? { amount: options.amount } : {}),
@@ -286,6 +313,7 @@ export async function refund(
       { idempotencyKey },
     );
   } catch (e) {
+    if (e instanceof Stripe.errors.StripeIdempotencyError) return { kind: "idempotency_conflict" };
     if (e instanceof Stripe.errors.StripeInvalidRequestError) {
       if (e.code === "charge_disputed") return { kind: "charge_disputed" };
       if (e.code === "amount_too_large" || e.param === "amount")
@@ -294,18 +322,41 @@ export async function refund(
     throw e;
   }
 
-  const [, auditError] = await tryCatch(
-    paymentsRepo.audit.add({
-      type: "refund_issued",
-      userId: purchase.userId,
-      planId: purchase.planId,
-      existingPurchaseId: purchase.id,
-      stripeCheckoutSessionId: purchase.stripeCheckoutSessionId,
-      details: { issuedBy: admin.id, amount: options.amount ?? null, reason: options.reason ?? null },
-    }),
-  );
-  if (auditError)
-    logger.warn({ err: auditError, purchase: purchase.id }, "payments.audit.write_failed");
+  const replayed = isIdempotentReplay(created);
+  // a replay carries the refund as it was when first created; only a fresh read shows whether it
+  // has failed since
+  const current = replayed ? await stripe.refunds.retrieve(created.id) : created;
+  if (FAILED_REFUND_STATUSES.includes(current.status)) {
+    logger.warn(
+      { purchase: purchase.id, refund: current.id, status: current.status, replayed },
+      "payments.purchase.refund_failed",
+    );
+    return {
+      kind: "refund_failed",
+      refundId: current.id,
+      failureReason: current.failure_reason ?? null,
+    };
+  }
+
+  if (!replayed) {
+    const [, auditError] = await tryCatch(
+      paymentsRepo.audit.add({
+        type: "refund_issued",
+        userId: purchase.userId,
+        planId: purchase.planId,
+        existingPurchaseId: purchase.id,
+        stripeCheckoutSessionId: purchase.stripeCheckoutSessionId,
+        details: {
+          issuedBy: admin.id,
+          stripeRefundId: current.id,
+          amount: options.amount ?? null,
+          reason: options.reason ?? null,
+        },
+      }),
+    );
+    if (auditError)
+      logger.warn({ err: auditError, purchase: purchase.id }, "payments.audit.write_failed");
+  }
 
   const [synced, syncError] = await tryCatch(
     paymentsRepo.purchase.syncCharge({ stripePaymentIntentId: purchase.stripePaymentIntentId }, () =>
@@ -314,7 +365,7 @@ export async function refund(
   );
   if (syncError) {
     logger.warn({ err: syncError, purchase: purchase.id }, "payments.purchase.refund_sync_failed");
-    return { kind: "refunded", purchase };
+    return { kind: "refunded", purchase, refundId: current.id, replayed };
   }
 
   await maybeSendRefundEmail(synced);
@@ -322,5 +373,7 @@ export async function refund(
   return {
     kind: "refunded",
     purchase: synced.found && synced.to ? { ...purchase, ...synced.to } : purchase,
+    refundId: current.id,
+    replayed,
   };
 }

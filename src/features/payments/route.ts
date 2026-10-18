@@ -481,8 +481,33 @@ const app = new Hono<PinoLoggerEnv>()
             { message: "The refund amount exceeds what's left to refund on this charge" },
             HTTP.UnprocessableEntity,
           );
+        case "idempotency_conflict":
+          return c.json(
+            {
+              message:
+                "This idempotency key was already used for a different refund. Use a new key for a new refund.",
+            },
+            HTTP.Conflict,
+          );
+        case "refund_failed":
+          return c.json(
+            {
+              data: { refundId: res.refundId, failureReason: res.failureReason },
+              message:
+                "Stripe couldn't complete this refund, so no money was returned. Use a new idempotency key to try again.",
+            },
+            HTTP.UnprocessableEntity,
+          );
         case "refunded":
-          return c.json({ data: res.purchase, message: "Purchase refunded" }, HTTP.OK);
+          return c.json(
+            {
+              data: res.purchase,
+              refundId: res.refundId,
+              replayed: res.replayed,
+              message: res.replayed ? "Refund already issued" : "Purchase refunded",
+            },
+            HTTP.OK,
+          );
       }
     },
   );

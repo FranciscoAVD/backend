@@ -139,9 +139,19 @@ export async function update(
   target: Pick<Payment.Plan, "id">,
   data: Payment.Plan.Update,
 ): Promise<PlanUpdateResult> {
-  if (data.repeatable === true || data.durationDays != null || data.trialDays != null) {
+  // set below once the current plan is read: whether this edit turns a repeatable one-time plan
+  // non-repeatable
+  let closesRepeat = false;
+
+  if (
+    data.repeatable !== undefined ||
+    data.durationDays != null ||
+    data.trialDays != null
+  ) {
     const plan = await paymentsRepo.plan.get.one(target);
     if (!plan) return { kind: "not_found" };
+
+    closesRepeat = data.repeatable === false && plan.repeatable && plan.type === "one_time";
 
     if (data.durationDays != null && plan.type !== "one_time")
       return { kind: "invalid_field", message: "durationDays only applies to one-time plans" };
@@ -156,8 +166,12 @@ export async function update(
   }
 
   // the terms a checkout snapshots onto its session: if either changes, sessions already open
-  // keep selling the old terms for up to 24h, so they're expired below
-  const touchesTerms = data.durationDays !== undefined || data.overlapping !== undefined;
+  // keep selling the old terms for up to 24h, so they're expired below. Turning `repeatable` off
+  // counts too: a repeatable plan's open sessions released their (user, plan) slot when they
+  // opened, so nothing else stops a user who already owns the plan from paying one of them again
+  // once it's non-repeatable - a second charge that `confirm` can only flag, not prevent
+  const touchesTerms =
+    data.durationDays !== undefined || data.overlapping !== undefined || closesRepeat;
 
   const res = await paymentsRepo.plan.update(target, data);
   if (!res) return { kind: "not_found" };

@@ -142,6 +142,15 @@ export const checkoutSchema = z.object({
 export const refundPurchaseSchema = z.object({
   amount: z.number().int().positive().optional(), // omit for a full refund
   reason: z.enum(["duplicate", "fraudulent", "requested_by_customer"]).optional(),
+  // one per refund the caller *means* to issue (e.g. a UUID generated when the refund form opens),
+  // reused only to retry that same refund. Deriving the key from (purchase, amount, reason) instead
+  // made two genuine, identical partial refunds collapse into one at Stripe while both reported
+  // success - only the caller knows whether a second request is a retry or a new refund
+  idempotencyKey: z
+    .string()
+    .min(8)
+    .max(200)
+    .regex(/^[A-Za-z0-9_:-]+$/, "Letters, digits, '_', ':' and '-' only."),
 });
 
 export const insertPaymentAuditLogSchema = createInsertSchema(

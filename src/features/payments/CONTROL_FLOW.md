@@ -906,7 +906,12 @@ session opened under the old terms stays payable for up to 24h, and - because
 `POST /checkout`'s resume path hands a caller back their own still-`open`
 session rather than creating a new one, for a repeatable or non-repeatable
 plan alike - could keep selling the old terms to anyone who resumes it, even
-though the plan now advertises something else. Runs on every `PATCH` that sets
+though the plan now advertises something else. Turning `repeatable` from `true` to
+`false` expires them the same way: a repeatable plan's session released its (user,
+plan) slot when it opened, so once the plan is non-repeatable nothing else would stop
+a buyer who already owns it from paying that session too - a second charge
+`confirm` can only flag as `duplicate_purchase_confirmed`, not prevent. Unlike the
+two terms fields, this one only fires on an actual true-to-false change. Runs on every `PATCH` that sets
 the field, not only when the value actually changed, so repeating the same
 `PATCH` finishes an expiry that failed part-way (same idempotency as the
 Stripe price sync below). The plan row itself is already saved by this point
