@@ -12,7 +12,7 @@ export type ChargeSyncResult =
       updated: boolean;
       from: PurchaseState;
       to: PurchaseState | null;
-      purchase: Pick<Payment.Purchase, "userId" | "planId" | "currency">;
+      purchase: Pick<Payment.Purchase, "id" | "userId" | "planId" | "currency">;
     };
 
 // a write that keeps losing to concurrent ones gives up rather than spinning: the caller fails (the
@@ -37,8 +37,8 @@ const MAX_ATTEMPTS = 3;
  * purchase row at all, and again after each lost race; null means there's no charge to sync from yet
  * @param options `write: false` reports what would change without changing it (a dry run)
  * @returns `found: false` if no purchase was paid by this intent; otherwise its state before, the
- * live target, whether it changed (or, without `write`, would have), and the purchase's owner/plan/
- * currency - for a caller (e.g. a refund-confirmation email) that needs to act on the transition
+ * live target, whether it changed (or, without `write`, would have), and the purchase's id/owner/
+ * plan/currency - for a caller (e.g. a refund-confirmation email) that needs to act on the transition
  * without a second lookup.
  */
 export async function syncPurchaseCharge(
@@ -60,7 +60,7 @@ export async function syncPurchaseCharge(
       .where(eq(purchaseTable.stripePaymentIntentId, purchase.stripePaymentIntentId));
     if (!row) return { found: false };
 
-    const owner = { userId: row.userId, planId: row.planId, currency: row.currency };
+    const owner = { id: row.id, userId: row.userId, planId: row.planId, currency: row.currency };
     const from = { status: row.status, amountRefunded: row.amountRefunded };
     const to = await resolve();
     const differs =

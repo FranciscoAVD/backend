@@ -9,6 +9,7 @@ import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
 import { sendPurchaseConfirmationEmail } from "@f/payments/lib/purchase-confirmation-email";
 import { sendRefundConfirmationEmail } from "@f/payments/lib/refund-confirmation-email";
 import { sendDuplicatePurchaseAlert } from "@f/payments/lib/duplicate-purchase-alert-email";
+import { sendRefundReversedAlert } from "@f/payments/lib/refund-reversed-alert-email";
 import {
   CHECKOUT_SOURCE_METADATA_KEY,
   CHECKOUT_SOURCE_METADATA_VALUE,
@@ -236,6 +237,42 @@ async function maybeSendRefundEmail(synced: ChargeSyncResult): Promise<void> {
 }
 
 /**
+ * @description Alerts the admins when a sync *lowered* a purchase's refunded amount - a refund
+ * Stripe had accepted then failed or was canceled (`charge.refund.updated`), so money the customer
+ * was likely told is on its way never left. Only a sync that actually wrote the lower amount
+ * alerts, so a redelivered event or a second sync of the same change doesn't repeat it. Exported for
+ * the reconciler, which can be the one to notice when that webhook was lost. Best-effort: never
+ * throws.
+ */
+export async function alertIfRefundReversed(
+  synced: ChargeSyncResult,
+  stripePaymentIntentId: string,
+): Promise<void> {
+  if (!synced.found || !synced.updated || !synced.to) return;
+  if (synced.to.amountRefunded >= synced.from.amountRefunded) return;
+
+  const [, alertError] = await tryCatch(
+    (async () => {
+      const plan = await paymentsRepo.plan.get.one({ id: synced.purchase.planId });
+      await sendRefundReversedAlert({
+        purchaseId: synced.purchase.id,
+        planName: plan?.name ?? `plan #${synced.purchase.planId}`,
+        buyerUserId: synced.purchase.userId,
+        stripePaymentIntentId,
+        refundedBefore: synced.from.amountRefunded,
+        refundedAfter: synced.to!.amountRefunded,
+        currency: synced.purchase.currency,
+      });
+    })(),
+  );
+  if (alertError)
+    logger.warn(
+      { err: alertError, purchase: synced.purchase.id },
+      "payments.refund_reversed_alert.send_failed",
+    );
+}
+
+/**
  * @description Syncs a purchase's refund/dispute state from a `charge.*` webhook event, or throws
  * so Stripe retries if the purchase isn't recorded yet. Operation must be wrapped in try-catch
  */
@@ -250,6 +287,7 @@ export async function syncCharge(
   );
   if (synced.found) {
     await maybeSendRefundEmail(synced);
+    await alertIfRefundReversed(synced, stripePaymentIntentId);
     return;
   }
 
@@ -418,6 +456,7 @@ export async function refund(
   }
 
   await maybeSendRefundEmail(synced);
+  await alertIfRefundReversed(synced, purchase.stripePaymentIntentId);
 
   return {
     kind: "refunded",

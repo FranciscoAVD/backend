@@ -6,7 +6,7 @@
  */
 import type Stripe from "stripe";
 import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
-import { confirm } from "@f/payments/services/fulfillment";
+import { alertIfRefundReversed, confirm } from "@f/payments/services/fulfillment";
 import { isOurs, markCompleted, markFailed } from "@f/payments/services/checkout";
 import { resolveChargeState, type PurchaseState } from "@f/payments/lib/stripe/charge-state";
 import { paymentsRepo } from "@f/payments/repo";
@@ -87,6 +87,7 @@ async function reconcileSession(
       { session: session.id, from: synced.from, to: synced.to, dryRun },
       "payments.reconcile.update",
     );
+  await alertIfRefundReversed(synced, intent.id);
   return { inserted, updated };
 }
 
@@ -177,6 +178,7 @@ async function syncIntentCharge(stripePaymentIntentId: string, dryRun: boolean):
     { paymentIntent: stripePaymentIntentId, from: synced.from, to: synced.to, dryRun },
     "payments.reconcile.charge_update",
   );
+  if (!dryRun) await alertIfRefundReversed(synced, stripePaymentIntentId);
   return true;
 }
 

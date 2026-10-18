@@ -40,7 +40,7 @@ describe("syncPurchaseCharge", () => {
       updated: true,
       from: { status: "paid", amountRefunded: 0 },
       to: refunded,
-      purchase: { userId, planId, currency: "usd" },
+      purchase: { id: (await getAllPurchases({ userId }))[0]!.id, userId, planId, currency: "usd" },
     });
     expect((await getAllPurchases({ userId }))[0]).toMatchObject(refunded);
   });

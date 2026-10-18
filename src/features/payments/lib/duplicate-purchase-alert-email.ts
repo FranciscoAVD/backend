@@ -1,7 +1,6 @@
-import { sendEmail } from "@f/email/send";
 import { duplicatePurchaseAlertEmail } from "@f/email/templates/duplicate-purchase-alert";
 import { paymentsRepo } from "@f/payments/repo";
-import { logger } from "@/lib/logger";
+import { sendAdminAlert } from "@f/payments/lib/admin-alert";
 
 /**
  * @description Alerts every admin that a buyer was charged for a non-repeatable plan they already
@@ -20,21 +19,9 @@ export async function sendDuplicatePurchaseAlert(data: {
   amountTotal: number;
   currency: string;
 }): Promise<void> {
-  const [admins, buyer] = await Promise.all([
-    paymentsRepo.user.getAdminContacts(),
-    paymentsRepo.user.getContact({ userId: data.buyerUserId }),
-  ]);
-  if (admins.length === 0) {
-    logger.error(
-      { session: data.stripeCheckoutSessionId },
-      "payments.duplicate_alert.no_admins",
-    );
-    return;
-  }
-
-  const { subject, html, text } = await duplicatePurchaseAlertEmail({
-    ...data,
-    buyerEmail: buyer?.email ?? null,
+  const buyer = await paymentsRepo.user.getContact({ userId: data.buyerUserId });
+  const message = await duplicatePurchaseAlertEmail({ ...data, buyerEmail: buyer?.email ?? null });
+  await sendAdminAlert(message, "payments.duplicate_alert", {
+    session: data.stripeCheckoutSessionId,
   });
-  await Promise.all(admins.map((admin) => sendEmail({ to: admin.email, subject, html, text })));
 }

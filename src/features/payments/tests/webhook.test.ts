@@ -989,6 +989,50 @@ describe("charge.refund.updated", () => {
     expect(purchase?.status).toBe("paid");
     expect(purchase?.amountRefunded).toBe(0);
   });
+
+  test("a refund that later failed alerts the admins once - the buyer was told it went through", async () => {
+    await seedUser({ email: "boss@example.test", role: "admin" });
+    const userId = await seedUser({ email: "buyer@example.test" });
+    const plan = await seedPlan({ name: "Lifetime" });
+    const [purchase] = [
+      await addPurchase(
+        { userId },
+        {
+          planId: plan.id,
+          stripeCheckoutSessionId: "cs_reversed",
+          stripePaymentIntentId: "pi_reversed",
+          amountTotal: 1000,
+          currency: "usd",
+        },
+        { durationDays: plan.durationDays },
+        new Date(),
+      ),
+    ];
+    purchaseConfirmationEmailCalls = [];
+    const alerts = () =>
+      purchaseConfirmationEmailCalls.filter((c) =>
+        String(c.subject).includes("didn't go through"),
+      );
+
+    fakeLatestCharge = { amount_refunded: 400, refunded: false, disputed: false };
+    await handleStripeEvent(event("charge.refunded", { payment_intent: "pi_reversed" }));
+    // money moved back: the buyer gets their confirmation, and nothing is wrong yet
+    expect(alerts()).toHaveLength(0);
+
+    fakeLatestCharge = { amount_refunded: 0, refunded: false, disputed: false };
+    const failed = event("charge.refund.updated", { payment_intent: "pi_reversed", status: "failed" });
+    await handleStripeEvent(failed);
+    await handleStripeEvent(failed); // redelivered
+
+    const sent = alerts();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.to).toBe("boss@example.test");
+    expect(sent[0]?.subject).toBe(
+      `Action needed: refund on purchase #${purchase!.id} didn't go through`,
+    );
+    for (const part of ["buyer@example.test", "Lifetime", "pi_reversed", "$4.00", "$0.00"])
+      expect(sent[0]?.text).toContain(part);
+  });
 });
 
 describe("only this app's own Checkout Sessions are recorded", () => {

@@ -421,6 +421,18 @@ that kept a database connection checked out for as long as Stripe took to
 answer, so a burst during a Stripe slowdown could exhaust the pool and stall the
 whole app.
 
+What a sync changed decides who hears about it. An increase in `amountRefunded`
+sends the buyer their refund-confirmation email. A *decrease* - a refund Stripe
+accepted as pending that then failed or was canceled (`charge.refund.updated`) -
+emails every admin instead (`alertIfRefundReversed`,
+`lib/refund-reversed-alert-email.ts`): by then the buyer has usually been told the
+refund went through and the audit log says `refund_issued`, so otherwise nobody
+learns the money never moved. Only the sync that actually wrote the lower amount
+alerts, so a redelivered event doesn't repeat it, and the reconciler's charge-event
+pass alerts the same way when it's the one to find the reversal (not in
+`--dry-run`). Admin alerts share one sender, `lib/admin-alert.ts`, with the
+duplicate-purchase one.
+
 ```mermaid
 flowchart TD
     Start(["services.fulfillment.syncCharge(paymentIntent)"]) --> HasId{"payment_intent\npresent on the event?"}
@@ -822,7 +834,10 @@ before the sync - so it exists even if the sync fails. A failed sync is logged, 
 returned as an error: the money has moved, and the `charge.refunded`/
 `charge.refund.updated` webhook converges the row once it lands. The buyer's
 refund-confirmation email goes out only when a sync sees `amountRefunded` actually
-increase, whichever of the route or the webhook gets there first.
+increase, whichever of the route or the webhook gets there first. If that refund
+later fails, the sync that lowers `amountRefunded` again alerts the admins (see
+`syncCharge` above) - the `refund_issued` entry stays, so a reversed refund shows up
+as an issued one followed by that alert.
 
 ## Every active plan: `GET /access`
 

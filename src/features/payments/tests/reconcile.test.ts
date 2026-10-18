@@ -21,6 +21,20 @@ let fakeSubscriptions: Partial<Stripe.Subscription>[] = [];
 // ids runSubscriptions fell back to retrieving individually, because the list didn't return them
 let retrieved: string[] = [];
 
+// the email client is faked so the refund-reversal alert can be observed - see CLAUDE.md's testing
+// section for why it's this wrapper that's mocked, not @f/email/send or the "resend" package
+let emailCalls: Record<string, unknown>[] = [];
+mock.module("@f/email/lib/client", () => ({
+  getEmailClient: () => ({
+    emails: {
+      send: async (payload: Record<string, unknown>) => {
+        emailCalls.push(payload);
+        return { data: { id: "email_1" }, error: null };
+      },
+    },
+  }),
+}));
+
 // no free local "real Stripe" to run against — the SDK surface run()/reconcile() actually call
 // is faked here via bun:test's mock.module
 mock.module("@f/payments/lib/stripe/client", () => ({
@@ -126,6 +140,7 @@ beforeEach(async () => {
   await resetDb();
   await resetRedis();
   retrievableSessions = [];
+  emailCalls = [];
   fakeSessions = [];
   fakeEvents = [];
   eventsFail = false;
@@ -1083,5 +1098,61 @@ describe("run: checkouts stuck processing", () => {
 
     expect(await run(7, false)).toEqual({ scanned: 0, inserted: 0, updated: 1, failed: 1 });
     expect(await statusOf("cs_returned")).toBe("failed");
+  });
+});
+
+describe("run: a refund reversed while its webhook was lost", () => {
+  async function seedRefundedPurchase() {
+    await seedUser({ email: "boss@example.test", role: "admin" });
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    const purchase = await addPurchase(
+      { userId },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_reversed",
+        stripePaymentIntentId: "pi_reversed",
+        amountTotal: 1000,
+        currency: "usd",
+      },
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
+    await paymentsRepo.purchase.syncCharge({ stripePaymentIntentId: "pi_reversed" }, async () => ({
+      status: "refunded",
+      amountRefunded: 1000,
+    }));
+    // the refund then failed: Stripe's live charge shows nothing refunded any more
+    fakeCharges["pi_reversed"] = { amount_refunded: 0, refunded: false, disputed: false };
+    fakeEvents = [
+      {
+        type: "charge.refund.updated",
+        created: Math.floor(Date.now() / 1000),
+        data: { object: { payment_intent: "pi_reversed" } },
+      } as unknown as Stripe.Event,
+    ];
+    return { userId, purchase: purchase! };
+  }
+
+  test("the charge-event pass alerts the admins when it finds the refunded amount went down", async () => {
+    const { userId, purchase } = await seedRefundedPurchase();
+
+    const summary = await run(7, false);
+
+    expect(summary.updated).toBe(1);
+    expect((await getAllPurchases({ userId }))[0]).toMatchObject({ status: "paid", amountRefunded: 0 });
+    const alerts = emailCalls.filter((c) => String(c.subject).includes("didn't go through"));
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]?.subject).toBe(
+      `Action needed: refund on purchase #${purchase.id} didn't go through`,
+    );
+  });
+
+  test("a dry run alerts no one", async () => {
+    await seedRefundedPurchase();
+
+    await run(7, true);
+
+    expect(emailCalls).toHaveLength(0);
   });
 });
