@@ -30,7 +30,7 @@ doubles as a code index.
 | Table | Holds | Lifetime |
 | --- | --- | --- |
 | `plan` | Price, type, `repeatable`/`durationDays`/`overlapping` policy | Forever |
-| `checkout` | One in-flight purchase attempt | Minutes (`reserving`) → 24h (`open`) → 14d (`processing`) → kept forever, terminal |
+| `checkout` | One in-flight purchase attempt | Minutes (`reserving`) → 24h (`open`) → 28d (`processing`) → kept forever, terminal |
 | `purchase` | One confirmed payment, written once by `fulfillment.confirm` | Forever - the financial record |
 | `payment_audit_log` | Races/exceptions around `plan.repeatable` | Forever |
 
@@ -47,8 +47,9 @@ out of that predicate.
 | Stripe webhook dispatch | `lib/webhook.ts`'s `handleStripeEvent` | Routes an event to a service call |
 | The reconciler | `services/reconcile.ts`'s `purchases`/`subscriptions` | Backstops lost webhooks |
 | Checking active access | `services.plan.access` | Does the caller hold this plan now |
+| Refunding a purchase | `services.fulfillment.refund` | Issues a refund once, however often it's retried |
 | Retiring a plan | `services.plan.update` | Stops new purchases, expires open checkouts |
-| Deleting a user | `services.account.prepareDeletion` | Expires checkouts, cancels subscriptions |
+| Deleting a user | `services.account.prepareDeletion` | Refuses while a payment settles; else expires checkouts, cancels subscriptions |
 
 Everything after that (audit log, admin purchase listing, access policy, trial pattern,
 field reference) is lookup material, not a flow.
@@ -86,9 +87,9 @@ flowchart TD
     AlreadyOwns -- no --> Reserve["paymentsRepo.checkout.claim(userId, planId)\n(use-cases/claim-checkout.ts: sweeps this slot's\nrows past their expires_at, then INSERT a\nreserving row ... ON CONFLICT DO NOTHING\nagainst the checkout_active_slot index)"]
     Reserve -->|db error| Err500e["throws -> route.ts: 500"]
     Reserve --> Claimed{"row returned?\n(no open/processing checkout\nor other live claim)"}
-    Claimed -- no --> Resumable{"checkout.get.resumable:\nthis user's own open, unexpired\nsession for the plan (with a url)?"}
+    Claimed -- no --> Resumable{"checkout.get.resumable:\nthis user's own open session for the plan,\nwith a url and at least 5 minutes\nleft before Stripe expires it?"}
     Resumable -- yes --> Resume200["{ kind: resumed, sessionId, url }\n-> route.ts: 200\n(no new Stripe session, no audit entry)"]
-    Resumable -- "no (processing, still reserving,\nlapsed, or no url)" --> Audit2["audit log: checkout_blocked_pending_checkout\n(best-effort)"]
+    Resumable -- "no (processing, still reserving,\nsession expired or about to, or no url)" --> Audit2["audit log: checkout_blocked_pending_checkout\n(best-effort)"]
     Audit2 --> Conflict2["{ kind: slot_taken } -> route.ts: 409"]
     Claimed -- yes --> Recheck["getBlocking again, now the slot is held\n(the user's earlier checkout may have confirmed\nbetween the first check and the claim)"]
     Recheck -- "owned" --> Release409["release the claimed row,\naudit log + { kind: owned } -> route.ts: 409"]
@@ -165,15 +166,17 @@ Mirrors `@better-auth/stripe`'s own `subscription.getCheckoutSessionParams`.
 | Always wins over the extension | Why |
 | --- | --- |
 | `mode`, `customer`, `client_reference_id`, `success_url`, `cancel_url`, `expires_at` | This flow's own identity; `expires_at` must stay in lockstep with `PENDING_CHECKOUT_TTL_SEC` |
-| `metadata`/`payment_intent_data.metadata`'s `userId`/`planId`/`durationDays` keys | `fulfillment.confirm` and the reconciler resolve a session back to a purchase from these |
+| `metadata`/`payment_intent_data.metadata`'s `userId`/`planId`/`durationDays`/`overlapping` keys | `fulfillment.confirm` and the reconciler resolve a session back to a purchase from these |
+| `metadata`/`payment_intent_data.metadata`'s `source` key (`CHECKOUT_SOURCE_METADATA_KEY`) | What marks a session as this app's at all (`services.checkout.isOurs`) - an extension able to change it could make the app ignore its own payments |
 | *(not protected)* `line_items` | Fully replaceable - doesn't change what's granted; one checkout is still one purchase, whatever the quantity |
 
 ### `GET /checkout/:sessionId`
 
 Polls `purchase` first, then falls back to the `checkout` row, then `null` → 404.
-`failed`/`expired` answer 200 (not 404) and are kept forever rather than aged out. An
-`open`/`reserving` row past its own `expires_at` reads as `expired` even before anything
-sweeps it.
+`failed`/`expired` answer 200 (not 404) and are kept forever rather than aged out. A
+`reserving` row past its own `expires_at`, or an `open` row whose Stripe session has
+expired (`CHECKOUT_SESSION_EXPIRY_MARGIN_SEC`, 10 minutes, before the row's own
+`expires_at`), reads as `expired` even before anything sweeps it.
 
 ## Stripe webhook dispatch
 
@@ -245,7 +248,7 @@ it above.
 ```mermaid
 flowchart TD
     E["event.type"] --> CSC{"checkout.session.completed\n(mode: payment only)"}
-    CSC -- payment_status: unpaid --> MarkProcessing["paymentsServices.checkout.markProcessing(session.id)\n(checkout row -> processing, expires_at extended\nto 14 days - delayed payment methods,\ne.g. bank debits; keeps holding the slot)"]
+    CSC -- payment_status: unpaid --> MarkProcessing["paymentsServices.checkout.markProcessing(session.id)\n(checkout row -> processing, expires_at extended\nto 28 days - delayed payment methods,\ne.g. bank debits; keeps holding the slot)"]
     CSC -- otherwise paid --> Confirm["paymentsServices.fulfillment.confirm(session)"]
 
     E --> APS["async_payment_succeeded\n(mode: payment)"] --> Confirm
@@ -318,7 +321,7 @@ flowchart TD
     Blocking -- yes --> CheckBlocking["paymentsRepo.purchase.getBlocking(\n{ userId, planId },\nexclude: { stripeCheckoutSessionId: session.id })"]
     CheckBlocking --> AlreadyOwns{"a blocking purchase\nfor a DIFFERENT session\nalready exists?"}
     AlreadyOwns -- no --> RemovePending
-    AlreadyOwns -- yes --> LogDup["log error: payments.webhook.duplicate_purchase\n+ audit log: duplicate_purchase_confirmed\n(best-effort; the money's already taken,\nand the purchase was recorded regardless -\nthe financial record must never be dropped)"]
+    AlreadyOwns -- yes --> LogDup["log error: payments.webhook.duplicate_purchase\n+ audit log: duplicate_purchase_confirmed\n+ email every admin (sendDuplicatePurchaseAlert)\n(all best-effort; the money's already taken,\nand the purchase was recorded regardless -\nthe financial record must never be dropped)"]
     LogDup --> RemovePending["markCompleted(session.id)\n(the checkout row -> completed, freeing the slot;\nbest-effort, and last - after the insert, so any\nrequest claiming the freed slot sees the purchase.\nNo row to update for a session this table\npredates, which is correctly a no-op)"]
 ```
 
@@ -339,6 +342,14 @@ session's purchase rather than the one this call just inserted. The check is
 skipped (not merely free of a blocking row) when the insert retried with
 `userId: null` - the user was deleted mid-checkout, so there's no owner left to
 check "already owns this plan" against.
+
+A flagged duplicate also emails every admin (`lib/duplicate-purchase-alert-email.ts`:
+every non-banned user whose role list includes `admin`), naming the buyer, both
+purchases, the session and the amount - the buyer has paid twice for something they
+can only own once, and deciding on the refund needs a person, which an audit row
+nobody is watching doesn't get. Sent from the same branch as the audit entry, so
+once per duplicate and never on a redelivery; best-effort like the rest, and with
+no admins to tell it logs `payments.duplicate_alert.no_admins` instead.
 
 The `checkout` row is marked `completed` rather than deleted: it stays as a record
 of the checkout that led to the purchase, and `completed` sits outside the
@@ -709,8 +720,10 @@ two `POST /checkout` guards (now inside `services.checkout.start`) and
 `checkout_blocked_existing_purchase`, `checkout_blocked_pending_checkout`, and
 `duplicate_purchase_confirmed` (the one where money was actually taken for an
 already-owned non-repeatable plan, and the purchase is still recorded - see
-above). All three writes are best-effort: a failure is logged as a warning and
-never blocks the response or webhook outcome it's attached to. `GET
+above, which also emails every admin), plus `refund_issued`, one per real refund
+issued through `POST /purchases/:id/refund` (see below). All writes are
+best-effort: a failure is logged as a warning and never blocks the response or
+webhook outcome it's attached to. `GET
 /audit-log` (admin, `audit:list`) exposes it - every entry, most recent
 first, or one customer's via `?userId=`, backed by
 `paymentsRepo.audit.get.all`/`get.byUser` respectively. It's paginated by
@@ -734,6 +747,53 @@ that might reasonably want different limits later. Backed by
 `paymentsRepo.purchase.get.allAdmin`/`get.byUserAdmin`
 (`use-cases/get-purchases.ts`), narrowed to one customer via `?userId=` the
 same way the audit log is.
+
+## Refunding a purchase: `POST /purchases/:id/refund`
+
+Admin-only (`purchase:refund`). `services.fulfillment.refund` calls Stripe's
+`refunds.create`, then pulls the purchase's refund/dispute state back the same way
+the webhook does (`syncPurchaseCharge`/`resolveChargeState`) rather than computing
+it locally. The body is `{ idempotencyKey, amount?, reason? }` - `amount` omitted
+for a full refund.
+
+`idempotencyKey` is required, and is the caller's to manage: one per refund the
+admin *means* to issue (e.g. a UUID made when the refund form opens), resent only
+to retry that same refund. Stripe gets `refund:<purchaseId>:<idempotencyKey>`, so
+a retry lands as the same refund and two genuinely separate refunds - even of the
+same amount and reason - both go through. (The key used to be derived from
+`(purchase, amount, reason)`, which made two identical partial refunds within 24h
+collapse into one at Stripe while both reported success; only the caller can tell
+a retry from a new refund.)
+
+Stripe answers a reused key by replaying the *first* result, so:
+
+- a replay is detected (`Idempotent-Replayed` header) and answered `200` with
+  `replayed: true` and the original `refundId`; it writes no second
+  `refund_issued` entry and sends no second email;
+- the refund is re-read on a replay, since the replayed body is the refund as it
+  was when created - one that has since `failed` or been `canceled` answers
+  `422` with its `failureReason`, and trying again needs a new key;
+- reusing a key with a different `amount`/`reason` answers `409`.
+
+| Outcome | Status |
+| --- | --- |
+| `refunded` (new or replayed) | 200, with the synced purchase, `refundId`, `replayed` |
+| `not_found` | 404 |
+| `no_payment_intent` (a $0 purchase) | 422 |
+| `amount_exceeds_refundable` | 422 |
+| `refund_failed` | 422 |
+| `already_refunded` | 409 |
+| `charge_disputed` | 409 |
+| `idempotency_conflict` | 409 |
+| missing/invalid `idempotencyKey` | 422 (body validation) |
+
+The `refund_issued` audit entry records the Stripe refund id (`details.stripeRefundId`)
+and the admin who issued it, written right after Stripe accepts the refund and
+before the sync - so it exists even if the sync fails. A failed sync is logged, not
+returned as an error: the money has moved, and the `charge.refunded`/
+`charge.refund.updated` webhook converges the row once it lands. The buyer's
+refund-confirmation email goes out only when a sync sees `amountRefunded` actually
+increase, whichever of the route or the webhook gets there first.
 
 ## Every active plan: `GET /access`
 
@@ -1011,3 +1071,12 @@ fit, and better-auth already owns it end-to-end.
   `@better-auth/stripe`'s declared peer range stops at `^22` (and separately,
   its peer on `better-auth` itself is `^1.7.7` while this repo runs `1.7.4`).
   Nothing is currently broken; revisit if an actual incompatibility surfaces.
+- **A checkout created mid-way through a terms edit** - when `PATCH /plans/:id`
+  changes `durationDays`/`overlapping` or turns `repeatable` off, it expires the
+  plan's open checkouts from one listing of them. A `POST /checkout` that read the
+  plan before the edit but creates its session after that listing keeps the old
+  terms - and, for a `repeatable` flip, can still be paid by an existing owner.
+  The window is about one Stripe call long, and a resulting double charge is still
+  flagged by `duplicate_purchase_confirmed` and the admin alert. Retiring a plan
+  has no such gap: its prices are archived before the listing, so Stripe refuses
+  any session created after it.
