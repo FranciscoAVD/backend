@@ -12,6 +12,7 @@ import {
   seedCheckout,
 } from "@/test-helpers/db";
 import { resetRedis } from "@/test-helpers/redis";
+import { redis } from "@/lib/redis";
 
 type FakeUser = { id: string; name: string; email: string };
 let fakeSession: { user: FakeUser } | null = null;
@@ -1459,6 +1460,27 @@ describe("POST /checkout: reservations, deletion and repeatable plans", () => {
     const res = await checkout(plan.id);
 
     expect(res.status).toBe(409);
+    expect(JSON.stringify(await res.json())).not.toContain("checkout.stripe.com");
+    expect(expiredSessions).toEqual(["cs_test_fake"]);
+    expect(
+      (await paymentsRepo.checkout.get.bySession({ stripeCheckoutSessionId: "cs_test_fake" }))
+        ?.status,
+    ).toBe("expired");
+  });
+
+  test("a deletion flag that can't be read after the session exists fails closed", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_test" });
+    const plan = await seedPlan({ type: "one_time", repeatable: false });
+    setSession({ id: userId, ...regularUser });
+    // the pre-check reads the flag fine; by the re-check, reading it errors (a hash where a string
+    // is expected makes GET fail with WRONGTYPE - a stand-in for any Redis failure)
+    onSessionCreate = async () => {
+      await redis.send("HSET", [`payments:deleting:${userId}`, "f", "1"]);
+    };
+
+    const res = await checkout(plan.id);
+
+    expect(res.status).toBe(500);
     expect(JSON.stringify(await res.json())).not.toContain("checkout.stripe.com");
     expect(expiredSessions).toEqual(["cs_test_fake"]);
     expect(

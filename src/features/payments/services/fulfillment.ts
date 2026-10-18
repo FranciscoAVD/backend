@@ -27,6 +27,11 @@ const idOf = (ref: string | { id: string } | null) =>
  * `userId` or `planId`, that's suspicious enough to refuse rather than silently pick one (see
  * `confirm`). The row is never used to supply or override the owner - a session with no resolvable
  * metadata returns null regardless of whether a row exists.
+ *
+ * A row whose `userId` is null is not a mismatch: `checkout.user_id` is `ON DELETE SET NULL`, so
+ * that's a buyer who paid and was then deleted before this ran. Refusing it would throw on every
+ * webhook retry and reconciler run, and the payment would never be recorded - `addPurchase` already
+ * handles the deleted owner by retrying with `userId: null`.
  */
 async function resolveOwner(
   session: Stripe.Checkout.Session,
@@ -44,7 +49,8 @@ async function resolveOwner(
   if (
     pending &&
     fromMetadata &&
-    (pending.userId !== fromMetadata.userId || pending.planId !== fromMetadata.planId)
+    ((pending.userId !== null && pending.userId !== fromMetadata.userId) ||
+      pending.planId !== fromMetadata.planId)
   ) {
     logger.error(
       {

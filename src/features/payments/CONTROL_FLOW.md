@@ -108,6 +108,7 @@ flowchart TD
     SavePending -- "claim swept,\nslot reclaimed" --> Lost["expire the new session,\n{ kind: slot_taken } -> route.ts: 409"]
     SavePending --> Recheck2{"user's deletion started\nmeanwhile?"}
     Recheck2 -- yes --> Withhold["expire the session,\n{ kind: deleting } -> route.ts: 409"]
+    Recheck2 -- "flag unreadable" --> WithholdErr["expire the session,\nthrow -> route.ts: 500"]
     Recheck2 -- no --> Return200["{ kind: created, sessionId, url }\n-> route.ts: 200"]
     Return200 --> Redirect(["client redirects user to\nthe Stripe-hosted url"])
 ```
@@ -410,8 +411,11 @@ counts toward `amountRefunded`: Stripe leaves a chargeback out of the charge's
 charge amount) - `amountRefunded` is all money returned to the customer.
 
 The write is a compare-and-set (`syncPurchaseCharge`): the purchase row is read,
-the live state fetched, and the update only lands if the row still holds what
-was read; otherwise it re-reads and re-fetches (up to 3 attempts, then throws so
+the live state fetched, and the update only lands if the row hasn't been
+written since it was read - checked on the row's `version`, which every sync
+write bumps, not on `(status, amountRefunded)`, since that pair can change and
+change back (a refund applied, then reversed) while a slow fetch is in flight;
+otherwise it re-reads and re-fetches (up to 3 attempts, then throws so
 the webhook gets a 400 and Stripe redelivers). The reconciler syncs through the
 same function. Re-fetching live state isn't enough on its own: two syncs of one
 purchase running together (a refund and a dispute event, a retry, the
@@ -994,8 +998,16 @@ checkout path checks the flag before creating a session and again after (one-tim
 checkouts in `services.checkout.start`, subscription ones in `paymentsAfterHook`
 via `services.account.guardSubscriptionUpgrade`): a session
 created before the flag went up is seen by the expiry pass; one whose after-check
-sees the flag is expired by its own request and its URL withheld. The flag comes
-down only if the deletion is aborted.
+sees the flag is expired by its own request and its URL withheld. The after-check
+fails closed: if the flag can't be read, the session is expired and the request
+fails with a 500 (not the 409 "being deleted"), since a Redis error there doesn't
+mean the flag is down. The flag comes down only if the deletion is aborted.
+
+A buyer whose card payment succeeded just before their deletion (no longer
+`open` for the expiry pass, never `processing` for the settling check) can have
+their webhook land after the user row is gone. `checkout.user_id` is then null,
+which `resolveOwner` doesn't treat as an owner mismatch, so the payment is still
+recorded - with `userId: null`, via `addPurchase`'s foreign-key retry.
 
 It lists the customer's subscriptions from Stripe rather than reading the
 `subscription` table, so a subscription with a missing or stale row is still

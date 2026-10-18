@@ -1,7 +1,7 @@
 import { db } from "@d/connection";
 import { purchase as purchaseTable } from "@d/schemas/payment-schema";
 import type { Payment } from "@f/payments/lib/types";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 type PurchaseState = Pick<Payment.Purchase, "status" | "amountRefunded">;
 
@@ -22,7 +22,10 @@ const MAX_ATTEMPTS = 3;
 /**
  * @description Brings the purchase paid by a payment intent in line with Stripe's live refund/dispute
  * state, as a compare-and-set: the row is read, the live state fetched, and the write only lands if
- * the row still holds what was read. Two syncs of one purchase running together (a refund and a
+ * the row hasn't been written since it was read - checked on its `version`, which every write here
+ * bumps. Not on the (status, amountRefunded) pair itself: that pair can change and change back (a
+ * refund applied, then reversed by `charge.refund.updated`) while a slow fetch is in flight, and
+ * the stale fetch would then still match and land. Two syncs of one purchase running together (a refund and a
  * dispute event, a retry, the reconciler) can each fetch, and the one that fetched *first* could
  * otherwise write *last* - undoing a refund, say, and handing access back. Here that write finds the
  * row changed, so it re-reads and re-fetches instead, and the last write always reflects a fetch made
@@ -55,6 +58,7 @@ export async function syncPurchaseCharge(
         userId: purchaseTable.userId,
         planId: purchaseTable.planId,
         currency: purchaseTable.currency,
+        version: purchaseTable.version,
       })
       .from(purchaseTable)
       .where(eq(purchaseTable.stripePaymentIntentId, purchase.stripePaymentIntentId));
@@ -71,14 +75,12 @@ export async function syncPurchaseCharge(
 
     const written = await db
       .update(purchaseTable)
-      .set({ status: to.status, amountRefunded: to.amountRefunded })
-      .where(
-        and(
-          eq(purchaseTable.id, row.id),
-          eq(purchaseTable.status, from.status),
-          eq(purchaseTable.amountRefunded, from.amountRefunded),
-        ),
-      )
+      .set({
+        status: to.status,
+        amountRefunded: to.amountRefunded,
+        version: sql`${purchaseTable.version} + 1`,
+      })
+      .where(and(eq(purchaseTable.id, row.id), eq(purchaseTable.version, row.version)))
       .returning({ id: purchaseTable.id });
     if (written.length > 0) return { found: true, updated: true, from, to, purchase: owner };
     // the row changed since it was read - this fetch may predate that change, so start over

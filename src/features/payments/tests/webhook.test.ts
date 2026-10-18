@@ -2,7 +2,11 @@ import { describe, expect, test, beforeEach, mock } from "bun:test";
 import type Stripe from "stripe";
 import { eq } from "drizzle-orm";
 import { db } from "@d/connection";
-import { paymentAuditLog as paymentAuditLogTable } from "@d/schemas/payment-schema";
+import {
+  paymentAuditLog as paymentAuditLogTable,
+  purchase as purchaseTable,
+} from "@d/schemas/payment-schema";
+import { user as userTable } from "@d/schemas/auth-schema";
 import { resetDb, seedUser, seedPlan, seedCheckout } from "@/test-helpers/db";
 
 let retrievedIntentMetadata: Record<string, string> = {};
@@ -354,6 +358,34 @@ describe("confirmCheckout", () => {
 
     expect(await getAllPurchases({ userId: userA })).toEqual([]);
     expect(await getAllPurchases({ userId: userB })).toEqual([]);
+  });
+
+  test("a buyer deleted before the webhook landed is still recorded, with no owner", async () => {
+    const userId = await seedUser();
+    const plan = await seedPlan();
+    await seedCheckout({ userId, planId: plan.id, stripeCheckoutSessionId: "cs_deleted_buyer" });
+    // paid by card, then the account was deleted before checkout.session.completed was handled -
+    // ON DELETE SET NULL has already nulled the checkout row's user_id
+    await db.delete(userTable).where(eq(userTable.id, userId));
+
+    const inserted = await confirmCheckout(
+      session({
+        id: "cs_deleted_buyer",
+        metadata: { ...OURS, userId, planId: String(plan.id) },
+      }),
+    );
+
+    expect(inserted).toBe(true);
+    const [row] = await db
+      .select()
+      .from(purchaseTable)
+      .where(eq(purchaseTable.stripeCheckoutSessionId, "cs_deleted_buyer"));
+    expect(row).toMatchObject({ userId: null, planId: plan.id, status: "paid" });
+    // the slot-holding row is still settled, as for any other confirmation
+    expect(
+      (await paymentsRepo.checkout.get.bySession({ stripeCheckoutSessionId: "cs_deleted_buyer" }))
+        ?.status,
+    ).toBe("completed");
   });
 
   test("a mismatched planId between the checkout row and the metadata throws and inserts nothing", async () => {

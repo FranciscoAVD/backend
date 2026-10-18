@@ -262,17 +262,24 @@ export async function start(
     }
 
     // the deletion flag again, now the session exists: a deletion that started after the check
-    // above may have listed the user's open sessions before this one existed
+    // above may have listed the user's open sessions before this one existed. This check is what
+    // closes that race, so it fails closed - an error reading the flag withdraws the session just
+    // as a raised flag does (the flag may well be up; a Redis blip after the deletion hook wrote it
+    // is enough), then the error propagates and the request answers 500 instead of a payable URL
     const [deletingNow, recheckError] = await tryCatch(isUserDeleting(user.userId));
-    if (recheckError)
-      logger.warn({ err: recheckError, user: user.userId }, "payments.checkout.deletion_guard");
-    if (deletingNow) {
+    if (recheckError || deletingNow) {
+      if (recheckError)
+        logger.error(
+          { err: recheckError, user: user.userId, session: res.sessionId },
+          "payments.checkout.deletion_guard",
+        );
       const [, expireError] = await tryCatch(expire(res.sessionId));
       if (expireError)
         logger.error(
           { err: expireError, user: user.userId, session: res.sessionId },
           "payments.checkout.deletion_guard.expire",
         );
+      if (recheckError) throw recheckError;
       return { kind: "deleting" };
     }
 

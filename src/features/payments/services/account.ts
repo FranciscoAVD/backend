@@ -218,19 +218,22 @@ export async function abortDeletion(userId: string): Promise<void> {
 
 /**
  * @description Re-checks the deletion flag once `/subscription/upgrade` has created its Checkout
- * Session: if the user's deletion started in the meantime, their open sessions are expired and the
- * caller (`lib/auth-hooks.ts`'s `paymentsAfterHook`) throws instead of handing back a payable URL.
- * @returns whether the request should be blocked.
+ * Session: if the user's deletion started in the meantime - or the flag can't be read, so it might
+ * have - their open sessions are expired and the caller (`lib/auth-hooks.ts`'s `paymentsAfterHook`)
+ * throws instead of handing back a payable URL.
+ * @returns whether the request should be blocked, and why.
  */
-export async function guardSubscriptionUpgrade(userId: string): Promise<{ blocked: boolean }> {
+export async function guardSubscriptionUpgrade(
+  userId: string,
+): Promise<{ blocked: false } | { blocked: true; reason: "deleting" | "flag_unreadable" }> {
   const [deleting, flagError] = await tryCatch(isUserDeleting(userId));
-  // a Redis failure here almost certainly failed the deletion hook's own flag write too, which
-  // aborts the deletion - so let the checkout through rather than failing a normal purchase
-  if (flagError) {
-    logger.warn({ err: flagError, user: userId }, "payments.deletion_guard.check");
-    return { blocked: false };
-  }
-  if (!deleting) return { blocked: false };
+  // fails closed: this re-check is what closes the race with a deletion's expiry pass, and an
+  // error here doesn't mean the flag is down - a Redis blip after the deletion hook wrote it is
+  // enough. Letting the session through could leave a subscription billing a deleted user; failing
+  // it only costs a retry
+  if (flagError)
+    logger.error({ err: flagError, user: userId }, "payments.deletion_guard.check");
+  if (!flagError && !deleting) return { blocked: false };
 
   const row = await paymentsRepo.user.getForCustomer({ userId });
   const [, expireError] = await tryCatch(
@@ -241,5 +244,5 @@ export async function guardSubscriptionUpgrade(userId: string): Promise<{ blocke
       { err: expireError, user: userId },
       "payments.deletion_guard.expire_subscription_checkout",
     );
-  return { blocked: true };
+  return { blocked: true, reason: flagError ? "flag_unreadable" : "deleting" };
 }

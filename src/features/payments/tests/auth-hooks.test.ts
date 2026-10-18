@@ -4,6 +4,7 @@ import { db } from "@d/connection";
 import { user as userTable } from "@d/schemas/auth-schema";
 import { resetDb, seedUser, seedPlan } from "@/test-helpers/db";
 import { resetRedis } from "@/test-helpers/redis";
+import { redis } from "@/lib/redis";
 import { env } from "@/env";
 import { isUserDeleting, markUserDeleting } from "@f/payments/lib/state/deletion-guard";
 
@@ -511,6 +512,22 @@ describe("no subscription checkout survives a user's deletion", () => {
     const res = await upgrade(cookie);
 
     expect(res.status).toBe(409);
+    expect(checkoutCreateCalls).toBe(1);
+    expect(expireCalls).toEqual(["cs_sub_1"]);
+    expect(fakeCheckoutSessions.filter((s) => s.status === "open")).toEqual([]);
+  });
+
+  test("a deletion flag that can't be read after the checkout exists fails closed", async () => {
+    const { cookie, userId } = await signIn();
+    // readable for the before-check, unreadable (WRONGTYPE on GET) by the after-check
+    onCheckoutCreate = async () => {
+      await redis.send("HSET", [`payments:deleting:${userId}`, "f", "1"]);
+    };
+
+    const res = await upgrade(cookie);
+
+    expect(res.status).toBe(500);
+    expect(await res.text()).not.toContain("ACCOUNT_BEING_DELETED");
     expect(checkoutCreateCalls).toBe(1);
     expect(expireCalls).toEqual(["cs_sub_1"]);
     expect(fakeCheckoutSessions.filter((s) => s.status === "open")).toEqual([]);

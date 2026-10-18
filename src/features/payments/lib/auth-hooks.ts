@@ -40,6 +40,11 @@ export const paymentsAfterHook = createAuthMiddleware(async (ctx) => {
   const session = await getSessionFromCtx(ctx);
   if (!session) return;
 
-  const { blocked } = await paymentsServices.account.guardSubscriptionUpgrade(session.user.id);
-  if (blocked) throw userDeletingError();
+  const guard = await paymentsServices.account.guardSubscriptionUpgrade(session.user.id);
+  if (!guard.blocked) return;
+  if (guard.reason === "flag_unreadable")
+    throw new APIError("INTERNAL_SERVER_ERROR", {
+      message: "Something went wrong. Try again later.",
+    });
+  throw userDeletingError();
 });

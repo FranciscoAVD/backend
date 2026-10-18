@@ -126,17 +126,61 @@ describe("syncPurchaseCharge", () => {
   test("gives up with an error if the row keeps changing under it", async () => {
     const { userId } = await seedPurchase("pi_1");
     let n = 0;
-    // every fetch races a write that changes the row first
+    // every fetch races a write that changes the row first - bumping its version, as every real
+    // writer (another syncPurchaseCharge) does
     const res = syncPurchaseCharge({ stripePaymentIntentId: "pi_1" }, async () => {
       n++;
       await db
         .update(purchaseTable)
-        .set({ amountRefunded: n })
+        .set({ amountRefunded: n, version: sql`${purchaseTable.version} + 1` })
         .where(eq(purchaseTable.stripePaymentIntentId, "pi_1"));
       return refunded;
     });
 
     await expect(res).rejects.toThrow();
     expect((await getAllPurchases({ userId }))[0]?.status).toBe("paid");
+  });
+});
+
+describe("syncPurchaseCharge's compare-and-set", () => {
+  test("a stale fetch doesn't land after the row changed and changed back meanwhile", async () => {
+    const { userId } = await seedPurchase("pi_aba");
+
+    let fetches = 0;
+    const res = await syncPurchaseCharge({ stripePaymentIntentId: "pi_aba" }, async () => {
+      fetches++;
+      if (fetches > 1) return { status: "paid", amountRefunded: 0 };
+      // this fetch saw a full refund that was live at the time; while it was in flight, other
+      // syncs applied that refund and then its reversal (charge.refund.updated), so the row is
+      // back to what this sync read - (paid, 0) - but written twice since
+      await syncPurchaseCharge({ stripePaymentIntentId: "pi_aba" }, async () => refunded);
+      await syncPurchaseCharge({ stripePaymentIntentId: "pi_aba" }, async () => ({
+        status: "paid",
+        amountRefunded: 0,
+      }));
+      return refunded;
+    });
+
+    // the stale write lost, the retry re-fetched the live (paid, 0), and nothing changed
+    expect(fetches).toBe(2);
+    expect(res).toMatchObject({ found: true, updated: false });
+    expect((await getAllPurchases({ userId }))[0]).toMatchObject({
+      status: "paid",
+      amountRefunded: 0,
+    });
+  });
+
+  test("every write bumps the row's version", async () => {
+    const { userId } = await seedPurchase("pi_version");
+
+    await syncPurchaseCharge({ stripePaymentIntentId: "pi_version" }, async () => refunded);
+    await syncPurchaseCharge({ stripePaymentIntentId: "pi_version" }, async () => refunded);
+    await syncPurchaseCharge({ stripePaymentIntentId: "pi_version" }, async () => ({
+      status: "paid",
+      amountRefunded: 0,
+    }));
+
+    // two real writes; the no-op sync in between didn't write
+    expect((await getAllPurchases({ userId }))[0]?.version).toBe(2);
   });
 });

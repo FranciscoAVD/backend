@@ -92,6 +92,7 @@ export const insertPurchaseSchema = createInsertSchema(purchase).omit({
   expiresAt: true,
   durationDays: true,
   overlapping: true,
+  version: true,
   createdAt: true,
   updatedAt: true,
 });

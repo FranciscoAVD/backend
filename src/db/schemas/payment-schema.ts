@@ -111,6 +111,10 @@ export const purchase = pgTable(
     // reason as durationDays - flipping the plan's flag later mustn't rewrite access already sold.
     // null on rows written before this column existed, which fall back to the plan's current value
     overlapping: boolean("overlapping"),
+    // bumped on every refund/dispute sync write - what that sync's compare-and-set checks, rather
+    // than the (status, amountRefunded) pair itself, which can change and change back (a refund
+    // applied then reversed) and let a stale write through
+    version: integer("version").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
