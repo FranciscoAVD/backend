@@ -7,7 +7,7 @@
 import type Stripe from "stripe";
 import { getPaymentProcessor } from "@f/payments/lib/stripe/client";
 import { confirm } from "@f/payments/services/fulfillment";
-import { isOurs } from "@f/payments/services/checkout";
+import { isOurs, markCompleted, markFailed } from "@f/payments/services/checkout";
 import { resolveChargeState, type PurchaseState } from "@f/payments/lib/stripe/charge-state";
 import { paymentsRepo } from "@f/payments/repo";
 import type { Subscription } from "@f/payments/use-cases/get-subscription";
@@ -245,7 +245,82 @@ export async function purchases(days: number, dryRun: boolean): Promise<Reconcil
     }
     if (updated) summary.updated++;
   }
+
+  // last, after the session scan has recorded what it could: a row still `processing` now is one
+  // that scan didn't settle - outside its window, or failed rather than paid
+  const [processing, processingError] = await tryCatch(paymentsRepo.checkout.get.processing());
+  if (processingError) {
+    summary.failed++;
+    logger.error({ err: processingError }, "payments.reconcile.processing_unavailable");
+  }
+  for (const row of processing ?? []) {
+    const [result, error] = await tryCatch(
+      settleProcessingCheckout(row.stripeCheckoutSessionId, dryRun, successTimes),
+    );
+    if (error) {
+      summary.failed++;
+      logger.error(
+        { err: error, session: row.stripeCheckoutSessionId },
+        "payments.reconcile.processing",
+      );
+      continue;
+    }
+    if (result === "inserted") summary.inserted++;
+    if (result === "failed" || result === "completed") summary.updated++;
+  }
   return summary;
+}
+
+// a payment intent in one of these after its checkout completed means the delayed payment failed:
+// Stripe sends it back to `requires_payment_method` when a bank debit is returned, or `canceled`
+const FAILED_INTENT_STATUSES: readonly string[] = ["requires_payment_method", "canceled"];
+
+/**
+ * @description Settles one `processing` checkout row from Stripe's live state, for when the webhook
+ * that should have (`checkout.session.async_payment_failed` or `_succeeded`) never landed. A failed
+ * payment moves the row to `failed`, freeing the (user, plan) slot - without this, the buyer
+ * couldn't buy the plan again until the row's `PROCESSING_TTL_SEC` deadline, weeks away. A paid
+ * one is recorded through `confirm`, which completes the row; one already recorded just has its
+ * row completed. One still settling is left alone. Operation must be wrapped in try-catch
+ * @returns what changed - "inserted", "completed", "failed" - or null for nothing.
+ */
+async function settleProcessingCheckout(
+  sessionId: string,
+  dryRun: boolean,
+  successTimes: Map<string, Date>,
+): Promise<"inserted" | "completed" | "failed" | null> {
+  const session = await getPaymentProcessor().checkout.sessions.retrieve(sessionId, {
+    expand: ["payment_intent.latest_charge"],
+  });
+  const intent = session.payment_intent as Stripe.PaymentIntent | null;
+
+  if (session.payment_status === "paid") {
+    const recorded = await paymentsRepo.purchase.get.bySessionAnyUser({
+      stripeCheckoutSessionId: sessionId,
+    });
+    if (dryRun) {
+      logger.info(
+        { session: sessionId, dryRun, recorded: recorded !== null },
+        "payments.reconcile.processing_paid",
+      );
+      return recorded ? "completed" : "inserted";
+    }
+    if (recorded) return (await markCompleted(sessionId)) ? "completed" : null;
+    const inserted = await confirm(session, successTimes.get(sessionId) ?? fallbackPaidAt(session));
+    logger.info({ session: sessionId, inserted }, "payments.reconcile.processing_paid");
+    return inserted ? "inserted" : null;
+  }
+
+  if (intent && FAILED_INTENT_STATUSES.includes(intent.status)) {
+    logger.info(
+      { session: sessionId, intentStatus: intent.status, dryRun },
+      "payments.reconcile.processing_failed",
+    );
+    if (dryRun) return "failed";
+    return (await markFailed(sessionId)) ? "failed" : null;
+  }
+
+  return null;
 }
 
 export type SubscriptionReconcileSummary = {

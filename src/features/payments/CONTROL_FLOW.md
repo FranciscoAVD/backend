@@ -476,6 +476,25 @@ synced isn't fetched twice. Changes count toward `updated`, errors toward
 `failed`. Stripe keeps events for 30 days, so a `--days` beyond that only widens
 the session scan.
 
+Last, `purchases` settles every `checkout` row still `processing` - a delayed
+payment whose `checkout.session.async_payment_failed` or `_succeeded` webhook
+never landed. Nothing else moves these on before their `PROCESSING_TTL_SEC`
+deadline, so a lost failure webhook would otherwise lock the buyer out of a
+non-repeatable plan for weeks. Each row's session is retrieved from Stripe
+(whatever its age - unlike the session scan, this isn't bounded by `--days`):
+
+| Stripe says | Row becomes | Counts as |
+| --- | --- | --- |
+| session `paid`, no purchase yet | `completed`, via `confirm` (which records the purchase) | `inserted` |
+| session `paid`, purchase already recorded | `completed` (`markCompleted`) | `updated` |
+| payment intent `requires_payment_method` or `canceled` (the debit was returned) | `failed` (`markFailed`), freeing the slot | `updated` |
+| anything else (still settling) | unchanged | - |
+
+It runs after the session scan, so a row that scan already settled is no longer
+`processing` by then. A recorded purchase's access starts when Stripe says it was
+paid, from the same success-event lookup as the scan, falling back to the charge's
+own time.
+
 Both event listings (payment times, and these charge events) are extras on top
 of the session scan, and neither can take it down: if Stripe's Events API fails -
 or the API key is a restricted one without event read access - inserts fall back

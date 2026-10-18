@@ -25,6 +25,7 @@ import { claimCheckoutSlot } from "@f/payments/use-cases/claim-checkout";
 import {
   getCheckoutBySession,
   getResumableCheckout,
+  getProcessingCheckouts,
 } from "@f/payments/use-cases/get-checkouts";
 import {
   openCheckout,
@@ -86,6 +87,7 @@ export const paymentsRepo = {
     get: {
       bySession: getCheckoutBySession,
       resumable: getResumableCheckout,
+      processing: getProcessingCheckouts,
     },
     open: openCheckout,
     transition: transitionCheckout,

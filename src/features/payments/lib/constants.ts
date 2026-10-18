@@ -98,6 +98,8 @@ export const CHECKOUT_EXPIRY_CLOCK_SKEW_SEC = 60;
  * can take a long time to settle - SEPA Direct Debit up to 14 *business* days, which is ~20
  * calendar days and more over bank holidays. A shorter hold let the slot be swept while the
  * payment was still settling, so a second checkout for a non-repeatable plan could be paid too.
+ * A row only holds this long if Stripe's webhook for the outcome is lost: the reconciler re-checks
+ * every `processing` row against Stripe and settles it (`services/reconcile.ts`).
  * Also how far back the reconciler scans by default and the user-deletion guard looks for
  * settling payments.
  */

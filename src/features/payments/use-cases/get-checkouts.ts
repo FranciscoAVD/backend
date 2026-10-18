@@ -67,3 +67,26 @@ export async function getResumableCheckout(
     ? { stripeCheckoutSessionId: row.stripeCheckoutSessionId, url: row.url, expiresAt: row.expiresAt }
     : null;
 }
+
+/**
+ * @description Every checkout still `processing` - paid by a delayed method, waiting on Stripe to
+ * say whether the payment settled. Each one holds its (user, plan) slot for up to
+ * `PROCESSING_TTL_SEC`, and only a webhook moves it on, so the reconciler re-checks these against
+ * Stripe: one whose failure (or success) webhook was lost would otherwise lock its buyer out of the
+ * plan for weeks. Assumes validation. Operation must be wrapped in try-catch
+ * @returns The processing rows' Stripe session IDs - never null for a row past `reserving`.
+ */
+export async function getProcessingCheckouts(): Promise<{ stripeCheckoutSessionId: string }[]> {
+  const res = await db
+    .select({ stripeCheckoutSessionId: checkoutTable.stripeCheckoutSessionId })
+    .from(checkoutTable)
+    .where(
+      and(
+        eq(checkoutTable.status, "processing"),
+        isNotNull(checkoutTable.stripeCheckoutSessionId),
+      ),
+    );
+  return res.flatMap((row) =>
+    row.stripeCheckoutSessionId ? [{ stripeCheckoutSessionId: row.stripeCheckoutSessionId }] : [],
+  );
+}

@@ -3,10 +3,13 @@ import type Stripe from "stripe";
 import { db } from "@d/connection";
 import { subscription as subscriptionTable, user as userTable } from "@d/schemas/auth-schema";
 import { eq } from "drizzle-orm";
-import { resetDb, seedUser, seedPlan, seedSubscription } from "@/test-helpers/db";
+import { resetDb, seedUser, seedPlan, seedSubscription, seedCheckout } from "@/test-helpers/db";
 import { resetRedis } from "@/test-helpers/redis";
 
 let fakeSessions: Partial<Stripe.Checkout.Session>[] = [];
+// sessions checkout.sessions.retrieve can find beyond the listed ones - e.g. one whose checkout
+// started before the scan's window
+let retrievableSessions: Partial<Stripe.Checkout.Session>[] = [];
 let fakeEvents: Partial<Stripe.Event>[] = [];
 // e.g. a restricted API key without event read access
 let eventsFail = false;
@@ -22,7 +25,16 @@ let retrieved: string[] = [];
 // is faked here via bun:test's mock.module
 mock.module("@f/payments/lib/stripe/client", () => ({
   getPaymentProcessor: () => ({
-    checkout: { sessions: { list: () => fakeSessions } },
+    checkout: {
+      sessions: {
+        list: () => fakeSessions,
+        retrieve: async (id: string) => {
+          const session = [...retrievableSessions, ...fakeSessions].find((s) => s.id === id);
+          if (!session) throw new Error(`No such checkout.session: '${id}'`);
+          return session;
+        },
+      },
+    },
     events: {
       list: (params: Stripe.EventListParams) =>
         eventsFail
@@ -70,6 +82,7 @@ mock.module("@f/payments/lib/stripe/client", () => ({
 import { purchases as run, subscriptions as runSubscriptions } from "@f/payments/services/reconcile";
 import { getAllPurchases, getPurchaseBySessionAnyUser } from "@f/payments/use-cases/get-purchases";
 import { addPurchase } from "@f/payments/use-cases/add-purchase";
+import { paymentsRepo } from "@f/payments/repo";
 import {
   CHECKOUT_SOURCE_METADATA_KEY,
   CHECKOUT_SOURCE_METADATA_VALUE,
@@ -112,6 +125,7 @@ const fakeSession = (
 beforeEach(async () => {
   await resetDb();
   await resetRedis();
+  retrievableSessions = [];
   fakeSessions = [];
   fakeEvents = [];
   eventsFail = false;
@@ -916,5 +930,158 @@ describe("runSubscriptions: rows never linked to their Stripe subscription", () 
       .from(subscriptionTable)
       .where(eq(subscriptionTable.id, row.id));
     expect(after?.stripeSubscriptionId).toBeNull();
+  });
+});
+
+describe("run: checkouts stuck processing", () => {
+  const statusOf = async (sessionId: string) =>
+    (await paymentsRepo.checkout.get.bySession({ stripeCheckoutSessionId: sessionId }))?.status;
+
+  // a delayed (bank debit) payment's checkout: completed at Stripe, row `processing`, holding the
+  // slot - and the webhook that should have settled it never arrived
+  async function seedProcessing(sessionId: string) {
+    const userId = await seedUser();
+    const plan = await seedPlan({ repeatable: false });
+    await seedCheckout({
+      userId,
+      planId: plan.id,
+      stripeCheckoutSessionId: sessionId,
+      status: "processing",
+      expiresAt: new Date(Date.now() + 20 * DAY_SEC * 1000),
+    });
+    return { userId, plan };
+  }
+
+  test("a failed payment's row is marked failed, freeing the buyer's slot", async () => {
+    const { userId, plan } = await seedProcessing("cs_returned");
+    retrievableSessions = [
+      fakeSession({
+        id: "cs_returned",
+        payment_status: "unpaid",
+        metadata: { ...OURS, userId, planId: String(plan.id) },
+        payment_intent: {
+          id: "pi_returned",
+          status: "requires_payment_method",
+        } as unknown as Stripe.PaymentIntent,
+      }),
+    ];
+
+    const summary = await run(7, false);
+
+    expect(summary).toEqual({ scanned: 0, inserted: 0, updated: 1, failed: 0 });
+    expect(await statusOf("cs_returned")).toBe("failed");
+    // the slot is free again: the buyer can start a new checkout for the plan
+    expect(
+      await paymentsRepo.checkout.claim(
+        { userId },
+        { planId: plan.id, expiresAt: new Date(Date.now() + 60_000) },
+      ),
+    ).not.toBeNull();
+  });
+
+  test("a payment that settled is recorded and its row completed, even outside the scan window", async () => {
+    const { userId, plan } = await seedProcessing("cs_settled_late");
+    const paidAt = Math.floor(Date.now() / 1000) - 3 * DAY_SEC;
+    retrievableSessions = [
+      fakeSession({
+        id: "cs_settled_late",
+        payment_status: "paid",
+        amount_total: plan.amount,
+        currency: plan.currency,
+        // created long before the --days window the session scan covers
+        created: Math.floor(Date.now() / 1000) - 40 * DAY_SEC,
+        metadata: { ...OURS, userId, planId: String(plan.id) },
+        payment_intent: {
+          id: "pi_settled_late",
+          status: "succeeded",
+          latest_charge: { created: paidAt, amount_refunded: 0, refunded: false, disputed: false },
+        } as unknown as Stripe.PaymentIntent,
+      }),
+    ];
+
+    const summary = await run(7, false);
+
+    expect(summary).toEqual({ scanned: 0, inserted: 1, updated: 0, failed: 0 });
+    expect(await getAllPurchases({ userId })).toHaveLength(1);
+    expect(await statusOf("cs_settled_late")).toBe("completed");
+  });
+
+  test("an already-recorded purchase just has its stuck row completed", async () => {
+    const { userId, plan } = await seedProcessing("cs_recorded");
+    await addPurchase(
+      { userId },
+      {
+        planId: plan.id,
+        stripeCheckoutSessionId: "cs_recorded",
+        stripePaymentIntentId: "pi_recorded",
+        amountTotal: plan.amount,
+        currency: plan.currency,
+      },
+      { durationDays: plan.durationDays },
+      new Date(),
+    );
+    retrievableSessions = [
+      fakeSession({
+        id: "cs_recorded",
+        payment_status: "paid",
+        metadata: { ...OURS, userId, planId: String(plan.id) },
+        payment_intent: { id: "pi_recorded", status: "succeeded" } as unknown as Stripe.PaymentIntent,
+      }),
+    ];
+
+    const summary = await run(7, false);
+
+    expect(summary).toEqual({ scanned: 0, inserted: 0, updated: 1, failed: 0 });
+    expect(await statusOf("cs_recorded")).toBe("completed");
+    expect(await getAllPurchases({ userId })).toHaveLength(1);
+  });
+
+  test("a payment still settling is left processing", async () => {
+    const { userId, plan } = await seedProcessing("cs_still_settling");
+    retrievableSessions = [
+      fakeSession({
+        id: "cs_still_settling",
+        payment_status: "unpaid",
+        metadata: { ...OURS, userId, planId: String(plan.id) },
+        payment_intent: { id: "pi_still", status: "processing" } as unknown as Stripe.PaymentIntent,
+      }),
+    ];
+
+    expect(await run(7, false)).toEqual({ scanned: 0, inserted: 0, updated: 0, failed: 0 });
+    expect(await statusOf("cs_still_settling")).toBe("processing");
+  });
+
+  test("dry run reports what it would settle without writing", async () => {
+    const { userId, plan } = await seedProcessing("cs_returned");
+    retrievableSessions = [
+      fakeSession({
+        id: "cs_returned",
+        payment_status: "unpaid",
+        metadata: { ...OURS, userId, planId: String(plan.id) },
+        payment_intent: { id: "pi_returned", status: "canceled" } as unknown as Stripe.PaymentIntent,
+      }),
+    ];
+
+    expect(await run(7, true)).toEqual({ scanned: 0, inserted: 0, updated: 1, failed: 0 });
+    expect(await statusOf("cs_returned")).toBe("processing");
+  });
+
+  test("a Stripe error on one row counts as failed and doesn't stop the others", async () => {
+    const { userId, plan } = await seedProcessing("cs_returned");
+    await seedProcessing("cs_unknown_to_stripe");
+    retrievableSessions = [
+      fakeSession({
+        id: "cs_returned",
+        payment_status: "unpaid",
+        metadata: { ...OURS, userId, planId: String(plan.id) },
+        payment_intent: {
+          id: "pi_returned",
+          status: "requires_payment_method",
+        } as unknown as Stripe.PaymentIntent,
+      }),
+    ];
+
+    expect(await run(7, false)).toEqual({ scanned: 0, inserted: 0, updated: 1, failed: 1 });
+    expect(await statusOf("cs_returned")).toBe("failed");
   });
 });
