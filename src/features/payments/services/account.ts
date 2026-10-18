@@ -192,12 +192,19 @@ export async function assertNoSettlingPayments(user: DeletedUser): Promise<void>
 }
 
 /**
- * @description The `user.delete.before` hook body (wired in `features/auth/auth.ts`): raises the
- * deletion flag, expires open checkouts, refuses the deletion if a payment is still settling, then
- * cancels subscriptions - in that exact order; see CONTROL_FLOW.md's "Deleting a user" for why each
- * step depends on the one before it.
+ * @description The `user.delete.before` hook body (wired in `features/auth/auth.ts`): refuses the
+ * deletion up front if a payment is already settling, raises the deletion flag, expires open
+ * checkouts, checks for a settling payment again, then cancels subscriptions - in that exact order;
+ * see CONTROL_FLOW.md's "Deleting a user" for why each step depends on the one before it.
+ *
+ * The settling check runs twice on purpose. The first, before anything is touched, makes the
+ * common refusal side-effect free: without it, a user told "a payment is still settling, try
+ * again later" had already lost every checkout they had open. The second, after the expiry pass,
+ * is the one that closes the race: a checkout paid after the first check listed sessions, but
+ * before the expiry pass did, is no longer `open` for that pass to expire - only this catches it.
  */
 export async function prepareDeletion(user: DeletedUser): Promise<void> {
+  await assertNoSettlingPayments(user);
   await markUserDeleting(user.id);
   await expireCheckoutsForDeletedUser(user);
   await assertNoSettlingPayments(user);

@@ -16,8 +16,19 @@ let cancelCalls: { id: string; params: unknown }[] = [];
 let cancelFails = false;
 let checkoutCreateCalls = 0;
 let customerCreateCalls = 0;
-// a customer's Checkout Sessions, by status - what checkout.sessions.list filters on
-let fakeCheckoutSessions: { id: string; customer: string; status: string }[] = [];
+// a customer's Checkout Sessions, by status - what checkout.sessions.list filters on. `mode` and
+// `payment_intent` matter only to the settling-payment check
+type FakeCheckoutSession = {
+  id: string;
+  customer: string;
+  status: string;
+  mode?: string;
+  payment_intent?: { id: string; status: string } | null;
+};
+let fakeCheckoutSessions: FakeCheckoutSession[] = [];
+// runs after each checkout.sessions.list has taken its snapshot, to change Stripe's state between
+// two listings (e.g. a buyer paying in the middle of a deletion)
+let onSessionsList: ((status: string | undefined) => void) | null = null;
 let expireCalls: string[] = [];
 let expireFails = false;
 let customerCreateFails = false;
@@ -60,14 +71,19 @@ const fakeStripeClient = () => ({
   prices: { retrieve: async (id: string) => ({ id, recurring: { interval: "month" } }) },
   checkout: {
     sessions: {
-      list: (params: { customer?: string; status?: string }) =>
-        listOf(
-          fakeCheckoutSessions.filter(
-            (s) =>
-              (!params.customer || s.customer === params.customer) &&
-              (!params.status || s.status === params.status),
-          ),
-        ),
+      list: (params: { customer?: string; status?: string }) => {
+        const listed = listOf(
+          fakeCheckoutSessions
+            .filter(
+              (s) =>
+                (!params.customer || s.customer === params.customer) &&
+                (!params.status || s.status === params.status),
+            )
+            .map((s) => ({ ...s })),
+        );
+        onSessionsList?.(params.status);
+        return listed;
+      },
       expire: async (id: string) => {
         if (expireFails) throw new Error("Stripe is down");
         expireCalls.push(id);
@@ -127,6 +143,7 @@ beforeEach(async () => {
   expireFails = false;
   customerUpdateCalls = [];
   onCheckoutCreate = null;
+  onSessionsList = null;
   emailSendCalls = [];
 });
 
@@ -207,6 +224,56 @@ describe("deleting a user cancels their subscriptions", () => {
       (async () => (await auth.$context).internalAdapter.deleteUser(userId))(),
     ).rejects.toThrow();
     expect(await userExists(userId)).toBe(true);
+  });
+
+  test("a deletion refused for a settling payment leaves the user's checkouts and subscriptions alone", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_del" });
+    fakeCheckoutSessions = [
+      { id: "cs_open", customer: "cus_del", status: "open" },
+      {
+        id: "cs_settling",
+        customer: "cus_del",
+        status: "complete",
+        mode: "payment",
+        payment_intent: { id: "pi_settling", status: "processing" },
+      },
+    ];
+    fakeSubscriptions = [{ id: "sub_active", status: "active" }];
+
+    const error = await (await auth.$context).internalAdapter.deleteUser(userId).catch((e) => e);
+
+    expect(error?.body?.code).toBe("PAYMENT_SETTLING");
+    expect(await userExists(userId)).toBe(true);
+    // refused before anything was touched: the open checkout is still payable, nothing cancelled,
+    // and the deleting flag never went up
+    expect(expireCalls).toEqual([]);
+    expect(cancelCalls).toEqual([]);
+    expect(await isUserDeleting(userId)).toBe(false);
+  });
+
+  test("a checkout paid in the middle of the deletion is still caught, and the deletion refused", async () => {
+    const userId = await seedUser({ stripeCustomerId: "cus_del" });
+    fakeCheckoutSessions = [
+      { id: "cs_paying", customer: "cus_del", status: "open", mode: "payment", payment_intent: null },
+    ];
+    fakeSubscriptions = [{ id: "sub_active", status: "active" }];
+    // the buyer pays (by bank debit) right after the first settling check has listed sessions -
+    // so by the time the expiry pass lists open ones, this session is no longer among them
+    let completeListings = 0;
+    onSessionsList = (status) => {
+      if (status !== "complete" || ++completeListings !== 1) return;
+      const paying = fakeCheckoutSessions.find((s) => s.id === "cs_paying")!;
+      paying.status = "complete";
+      paying.payment_intent = { id: "pi_paying", status: "processing" };
+    };
+
+    const error = await (await auth.$context).internalAdapter.deleteUser(userId).catch((e) => e);
+
+    expect(error?.body?.code).toBe("PAYMENT_SETTLING");
+    expect(await userExists(userId)).toBe(true);
+    expect(expireCalls).toEqual([]);
+    expect(cancelCalls).toEqual([]);
+    expect(completeListings).toBe(2);
   });
 
   test("a user who never became a Stripe customer is deleted without any Stripe call", async () => {

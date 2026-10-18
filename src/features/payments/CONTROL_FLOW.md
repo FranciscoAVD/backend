@@ -843,8 +843,9 @@ cancelled a deleted user's subscriptions before this, so a deleted user kept
 being billed (the plugin only has a hook for deleting organizations, which
 this app doesn't use).
 
-`prepareDeletion` runs, in order: `markUserDeleting` (raising the flag, see
-below), `expireCheckoutsForDeletedUser`, `assertNoSettlingPayments`, then
+`prepareDeletion` runs, in order: `assertNoSettlingPayments` (a first, side-effect
+free pass - see below), `markUserDeleting` (raising the flag, see below),
+`expireCheckoutsForDeletedUser`, `assertNoSettlingPayments` again, then
 `cancelSubscriptionsForDeletedUser` - the last three are separately-named
 functions inside `services/account.ts`, composed by `prepareDeletion` rather
 than inlined, so each stays independently testable
@@ -872,6 +873,14 @@ that pass was running is still caught here, and only looks back
 `PROCESSING_TTL_SEC` (the same window `markProcessing` uses elsewhere) for a
 `complete`, `mode: "payment"` session on the user's Stripe customer. Fails
 closed like the other deletion passes: a Stripe error aborts the deletion too.
+
+The same check also runs once *before* anything else, ahead of the flag and the
+expiry pass. That first pass is only there so the common refusal changes
+nothing: with just the later one, a user told "a payment is still settling, try
+again later" had already had every checkout they left open expired. It can't
+replace the later pass - a checkout paid after it listed sessions but before the
+expiry pass did is no longer `open`, so only the second check sees it. The cost
+is one more Stripe listing per deletion.
 
 Both passes run behind a deleting flag (`lib/state/deletion-guard.ts`), raised before
 the expiry pass lists anything. The user's session stays valid until the row is
