@@ -31,6 +31,7 @@ A `plan` is `recurring` (a subscription managed by better-auth's stripe plugin) 
 | GET | `/purchases/all` | admin (`purchase:read:all`) | every purchase, or `?userId=` for one customer's; paginated the same way as `/audit-log` |
 | POST | `/checkout` | caller | one-time plans only — `recurring` 422s |
 | GET | `/checkout/:sessionId` | caller | `open`/`processing`/`failed`/`expired`/`paid`/`refunded`/`disputed` |
+| POST | `/purchases/:id/refund` | admin (`purchase:refund`) | full or partial refund, keyed by a caller-supplied `idempotencyKey`; syncs the purchase from Stripe's live state afterward |
 
 The webhook (`/api/auth/stripe/webhook` → `handleStripeEvent` in `lib/webhook.ts`) writes and syncs `purchase` rows; `bun run payments:reconcile [--days 28] [--dry-run]` backfills anything a missed webhook left behind *and* corrects any `subscription` row left stale by an out-of-order webhook event. See `CONTROL_FLOW.md` for the full request/webhook/reconciler control flow, including the `plan.repeatable`/`durationDays`/`overlapping` races and the `payment_audit_log` trail they write to.
 
@@ -49,20 +50,7 @@ Give it the same env vars as the main app (`DB_URL`/`DB_*`, `REDIS_URL`/`REDIS_*
 
 **Only need one of the two flows?**
 - *Drop subscriptions:* remove (or `enabled: false`) `auth.ts`'s `subscription` option — the only thing gating it. Don't create `recurring` plans. The `hooks.before` retired-plan guard and the user-deletion hook become no-ops (no recurring plans, no subscriptions to cancel), so they can stay or go.
-- *Drop one-time purchases:* delete the following, and don't create `one_time` plans.
-
-| Delete | What it is |
-| --- | --- |
-| the `checkout` table + its use-cases | `claim-checkout.ts` / `get-checkouts.ts` / `update-checkout.ts`, the `checkout` table and its `checkout_status` enum |
-| `use-cases/checkout.ts` | `createCheckout` / `getCheckoutStatus` |
-| `lib/webhook.ts` | the Stripe webhook handler (also remove `auth.ts`'s `onEvent`) |
-| `lib/charge-state.ts` | `resolveChargeState`, shared by the webhook and the reconciler |
-| `lib/constants.ts` | `ALLOWED_EVENTS` |
-| one-time-only helpers in `lib/utils.ts` | `isAllowedEvent`, `isCheckoutSessionId`, `isForeignKeyViolation`, `purchaseUpdateFromCharge`, `purchaseStatusFromDispute`, `encodeDurationDays`, `decodeDurationDays` |
-| `lib/reconcile.ts` + `scripts/reconcile.ts` | the webhook backstop |
-| `purchase` use-cases + `GET /purchases` | `add-purchase.ts` / `get-purchases.ts` / `sync-purchase-charge.ts` |
-| the audit log | `use-cases/add-audit-log.ts` / `get-audit-log.ts`, the `payment_audit_log` table |
-| `/checkout` + `/checkout/:sessionId` | the routes in `route.ts` that start/check a checkout |
+- *Drop one-time purchases:* don't create `one_time` plans, and delete the pieces that only exist for them — `services/checkout.ts`, `services/fulfillment.ts`, `lib/webhook.ts` (and `auth.ts`'s `onEvent`), the `checkout` table and its use-cases, the `purchase` use-cases, the audit log, and the `/checkout`/`/purchases*` routes in `route.ts`. `services/reconcile.ts` and `scripts/reconcile.ts` keep their `subscriptions` pass but lose `purchases`. A few smaller one-time-only files ride along too (the checkout-extensions hook, charge-state resolution, a couple of email templates) — check what still imports them once the above is gone.
 
 ## Folder structure
 
@@ -82,13 +70,13 @@ Cross-feature code lives in `src/lib/` (logger, redis, rate-limit, validators, t
 ## Local development
 
 ```sh
-cp .env.example .env      # fill in BETTER_AUTH_SECRET, DB_*, etc.
+cp .env.example .env      # fill in BETTER_AUTH_SECRET, DB_*/REDIS_*, etc.
 docker compose up -d      # Postgres + Redis
 bun install
 bun run dev                # bun run --hot src/index.ts
 ```
 
-Seed an admin user with `./src/features/auth/lib/seed-admin.sh` (creates `admin@verified.com` with the `admin` role via better-auth's CLI).
+Seed an admin user with `bun run db:seed-admin` (`./src/features/auth/lib/seed-admin.sh`, creates `admin@verified.com` with the `admin` role via better-auth's CLI).
 
 ## Testing
 
