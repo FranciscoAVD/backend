@@ -40,7 +40,7 @@ USER root
 
 COPY docker/reconcile-cron.sh /app/reconcile-cron.sh
 RUN chmod +x /app/reconcile-cron.sh \
-  # daily at 03:00 - the reconciler's own 14-day scan window easily tolerates a
+  # daily at 03:00 - the reconciler's own 28-day scan window easily tolerates a
   # missed run or two, so there's no need to run more often than that; redirecting
   # to /proc/1/fd/1-2 is what makes the job's output show up in `docker logs`,
   # since crond itself logs to syslog/stderr, not stdout, by default. The redirect
