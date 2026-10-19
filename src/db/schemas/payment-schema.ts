@@ -12,6 +12,7 @@ import {
   jsonb,
 } from "drizzle-orm/pg-core";
 import { user } from "./auth-schema";
+import type { PlanLimits } from "@f/payments/lib/plan-limits";
 
 export const planType = pgEnum("plan_type", ["recurring", "one_time"]);
 export const planInterval = pgEnum("plan_interval", ["month", "year"]);
@@ -51,7 +52,8 @@ export const plan = pgTable("plan", {
   interval: planInterval("interval"),
   annualAmount: integer("annual_amount"),
   trialDays: integer("trial_days"),
-  limits: jsonb("limits").$type<Record<string, unknown>>(),
+  // shape set by `planLimitsSchema` (features/payments/lib/plan-limits.ts)
+  limits: jsonb("limits").$type<PlanLimits>(),
   // one-time plans only: whether the same user can buy this plan more than once
   repeatable: boolean("repeatable").notNull().default(false),
   // one-time plans only: days of access a purchase grants from its own createdAt,

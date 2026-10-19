@@ -18,6 +18,7 @@ import {
   MAX_DURATION_DAYS,
   MAX_TRIAL_DAYS,
 } from "@f/payments/lib/constants";
+import { planLimitsSchema } from "@f/payments/lib/plan-limits";
 
 export const insertPlanSchema = createInsertSchema(plan, {
   // NFKC-normalized only: plan names are matched case-insensitively (the stripe plugin with JS's
@@ -36,6 +37,9 @@ export const insertPlanSchema = createInsertSchema(plan, {
   trialDays: (s) => s.positive().max(MAX_TRIAL_DAYS),
   durationDays: (s) => s.positive().max(MAX_DURATION_DAYS),
   currency: (s) => s.length(3).toLowerCase(),
+  // a schema rather than a refinement callback: drizzle-zod's own json schema accepts any JSON
+  // value (a string, an array), so the column's TypeScript type was never actually enforced
+  limits: planLimitsSchema.nullable().optional(),
 })
   .omit({
     stripeProductId: true,
@@ -67,6 +71,7 @@ export const insertPlanSchema = createInsertSchema(plan, {
     path: ["durationDays"],
   });
 export const updatePlanSchema = createUpdateSchema(plan, {
+  limits: planLimitsSchema.nullable().optional(),
   trialDays: (s) => s.positive().max(MAX_TRIAL_DAYS),
   durationDays: (s) => s.positive().max(MAX_DURATION_DAYS),
 })
@@ -83,7 +88,9 @@ export const updatePlanSchema = createUpdateSchema(plan, {
   .refine((data) => Object.keys(data).length > 0, {
     message: "At least one field must be provided.",
   });
-export const selectPlanSchema = createSelectSchema(plan);
+export const selectPlanSchema = createSelectSchema(plan, {
+  limits: planLimitsSchema.nullable(),
+});
 
 export const insertPurchaseSchema = createInsertSchema(purchase).omit({
   userId: true,
