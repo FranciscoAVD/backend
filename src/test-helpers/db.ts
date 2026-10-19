@@ -2,14 +2,25 @@ import { db } from "@d/connection";
 import { user, subscription } from "@d/schemas/auth-schema";
 import { plan, checkout } from "@d/schemas/payment-schema";
 import { sql } from "drizzle-orm";
+import { assertTestDatabaseName } from "@/test-helpers/guard";
+
+// checked once per process: the connection's database can't change under it
+let verified: Promise<void> | undefined;
+const verifyTestDatabase = () =>
+  (verified ??= (async () => {
+    const res = await db.execute<{ name: string }>(sql`select current_database() as name`);
+    assertTestDatabaseName(String(res[0]?.name));
+  })());
 
 /**
  * @description Empties every table these tests touch, for isolation between tests.
- * Must only ever run against the `backend_test` database (`bun run test`, never bare `bun test`).
+ * Refuses (throws) unless connected to a database whose name ends in `_test` - see
+ * `test-helpers/guard.ts` for why that's checked on the live connection.
  * `subscription` has no FK back to `user` (better-auth keys it by a plain `referenceId` string),
  * so it needs listing explicitly - `user`'s CASCADE alone won't reach it.
  */
 export async function resetDb(): Promise<void> {
+  await verifyTestDatabase();
   await db.execute(
     sql`TRUNCATE TABLE "user", todo, plan, purchase, checkout, payment_audit_log, subscription RESTART IDENTITY CASCADE`,
   );
