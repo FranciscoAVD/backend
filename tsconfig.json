@@ -9,7 +9,8 @@
     "paths": {
       "@backend/*": ["./apps/backend/src/*"],
       "@backend/f/*": ["./apps/backend/src/features/*"],
-      "@backend/d/*": ["./apps/backend/src/db/*"]
+      "@backend/d/*": ["./apps/backend/src/db/*"],
+      "@/*": ["./apps/frontend/src/*"]
     },
     // Bundler mode
     "moduleResolution": "bundler",
