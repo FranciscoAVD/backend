@@ -45,6 +45,14 @@ When something needs logging (a caught error, a noteworthy state), don't reach f
 
 A conditionally-mounted router (behind an env flag, if one exists again later) can't be part of this chain without either always mounting it or lying about `AppType` — keep it as a separate statement and accept it's excluded from `AppType`, or expose its own standalone `export type <Feature>AppType = typeof app` from that feature's route file for a client that knows it's enabled.
 
+# Frontend conventions
+
+`apps/frontend` is a Next.js (App Router) app in the same Bun workspace. Three rules, always:
+
+- **Feature folders.** Group a feature's own components under `src/features/<feature>/` (see `features/auth/{sign-in-form,sign-up-form}.tsx`). A route's `page.tsx` under `src/app/` stays thin — it renders the feature's component, it doesn't hold the feature's own logic, the same way a backend `route.ts` stays thin and defers to its feature folder. Code shared across features (the Hono RPC client, the better-auth client) lives in `src/lib/`.
+- **TanStack Query for every backend call.** Every read/write against the backend goes through `useQuery`/`useMutation` from `@tanstack/react-query` — never a bare `fetch`/`useEffect`. `QueryClientProvider` is wired once in `src/app/providers.tsx`; see `features/auth/sign-in-form.tsx`'s `useMutation` wrapping `apiClient`/`authClient` for the pattern.
+- **shadcn/ui for every UI primitive.** Don't hand-roll a `<button>`/`<input>`/etc. — add it with `bunx shadcn@latest add <component> --cwd apps/frontend` (`apps/frontend/components.json` pins the `base-nova` preset on Base UI) and import from `@/components/ui/*`. Build every form out of `Field`/`FieldGroup`/`FieldLabel`/`FieldError` (not a hand-rolled `<label>`+`<input>`+error `<p>`) — see `sign-in-form.tsx`/`sign-up-form.tsx` for the pattern: one `Field` per input, a single `FieldError` fed the mutation's error message. The CLI has a bug in this monorepo layout: it writes the new component into a bogus nested `apps/frontend/apps/frontend/...` path instead of `apps/frontend/src/components/ui/`. Move the file to the right place after adding it.
+
 # Testing
 
 **Always run `bun run test`, never bare `bun test`.** The `test` script sets `DB_NAME=backend_test` and `REDIS_DB=1`; bare `bun test` falls through to `.env`'s values (the dev database, dev Redis db 0). Those overrides also only reach the connection through the discrete `DB_*`/`REDIS_*` fields - a `REDIS_URL` is used as-is, `REDIS_DB` and all. So `resetDb()`/`resetRedis()` check what the live connection actually reached and refuse (throw) unless it's a Postgres database named `*_test` and Redis db 1 (`apps/backend/src/test-helpers/guard.ts`) - a misconfigured run fails loudly instead of wiping dev data. Keep that check in any new helper that truncates or flushes.
