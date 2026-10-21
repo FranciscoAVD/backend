@@ -4,7 +4,7 @@
   "license": "MIT",
   "workspaces": ["apps/*", "shared"],
   "scripts": {
-    "dev": "bun run --filter @app/backend dev",
+    "dev": "bun run --filter '*' --parallel dev",
     "start": "bun run --filter @app/backend start",
     "test": "bun run --filter @app/backend test",
     "db:push": "bun run --filter @app/backend db:push",
