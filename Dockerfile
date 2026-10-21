@@ -6,16 +6,24 @@ WORKDIR /app
 # not on every source edit
 FROM base AS install
 COPY package.json bun.lock ./
+COPY apps/backend/package.json ./apps/backend/package.json
+COPY apps/frontend/package.json ./apps/frontend/package.json
+COPY shared/package.json ./shared/package.json
 RUN bun install --frozen-lockfile --production
 
 FROM base AS release
-COPY --from=install /app/node_modules ./node_modules
-COPY package.json tsconfig.json ./
-COPY src ./src
+# grabs whatever node_modules layout `bun install` produced (root-hoisted
+# and/or per-workspace symlinks) without having to know which
+COPY --from=install /app /app
+COPY shared/src ./shared/src
+COPY apps/backend/tsconfig.json ./apps/backend/tsconfig.json
+COPY apps/backend/src ./apps/backend/src
 
 ENV NODE_ENV=production
 # must match SERVER_PORT
 EXPOSE 8000
+
+WORKDIR /app/apps/backend
 
 # no curl/wget on alpine — Bun's own fetch avoids adding a package just for this
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
@@ -49,3 +57,10 @@ RUN chmod +x /app/reconcile-cron.sh \
   && echo "0 3 * * * su -s /bin/sh bun -c /app/reconcile-cron.sh >> /proc/1/fd/1 2>> /proc/1/fd/2" > /etc/crontabs/root
 
 ENTRYPOINT ["crond", "-f", "-l", "2"]
+
+# `cron` must come after `release` (it's built FROM it), but a plain `docker build .`
+# with no `--target` builds whichever stage is *last* in the file - without this,
+# that would silently be `cron`, not the server. This empty stage re-aliases
+# `release` as the final one so the default build target is the server again;
+# `--target cron` still reaches the stage above untouched.
+FROM release

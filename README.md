@@ -67,18 +67,18 @@ features/<feature>/
 └── tests/           # mirrors use-cases/ and lib/
 ```
 
-Cross-feature code lives in `src/lib/` (logger, redis, rate-limit, validators, the health route), `src/db/` (connection + one schema file per feature), and `src/test-helpers/` (shared test fixtures).
+Cross-feature code lives in `apps/backend/src/lib/` (logger, redis, rate-limit, validators, the health route), `apps/backend/src/db/` (connection + one schema file per feature), and `apps/backend/src/test-helpers/` (shared test fixtures).
 
 ## Local development
 
 ```sh
-cp .env.example .env      # fill in BETTER_AUTH_SECRET, DB_*/REDIS_*, etc.
+cp apps/backend/.env.example apps/backend/.env   # fill in BETTER_AUTH_SECRET, DB_*/REDIS_*, etc.
 docker compose up -d      # Postgres + Redis
 bun install
-bun run dev                # bun run --hot src/index.ts
+bun run dev                # bun run --hot apps/backend/src/index.ts
 ```
 
-Seed an admin user with `bun run db:seed-admin` (`./src/features/auth/lib/seed-admin.sh`, creates `admin@verified.com` with the `admin` role via better-auth's CLI).
+Seed an admin user with `bun run db:seed-admin` (`apps/backend/src/features/auth/lib/seed-admin.sh`, creates `admin@verified.com` with the `admin` role via better-auth's CLI).
 
 ## Testing
 
@@ -90,7 +90,7 @@ bun run test
 
 ## Docker
 
-`docker build -t backend .` builds a production image expecting every `.env.example` var set (`--env-file .env`). Its `HEALTHCHECK` hits `GET /health` via Bun's own `fetch`. `compose.yaml` only provisions Postgres/Redis for dev — no service for this image.
+`docker build -t backend .` builds a production image expecting every `apps/backend/.env.example` var set (`--env-file .env`). Its `HEALTHCHECK` hits `GET /health` via Bun's own `fetch`. `compose.yaml` only provisions Postgres/Redis for dev — no service for this image.
 
 ## Health check
 
@@ -98,11 +98,11 @@ bun run test
 
 ## Client usage
 
-`src/index.ts` exports `AppType` for full request/response type inference via `hono/client`, no codegen needed:
+`apps/backend/src/index.ts` exports `AppType` for full request/response type inference via `hono/client`, no codegen needed:
 
 ```ts
 import { hc } from "hono/client";
-import type { AppType } from "../backend/src";
+import type { AppType } from "@app/backend";
 
 const client = hc<AppType>("http://localhost:8000");
 const res = await client.api.todo.$get();

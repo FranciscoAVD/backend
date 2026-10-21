@@ -5,13 +5,11 @@
     "target": "ESNext",
     "module": "Preserve",
     "moduleDetection": "force",
-    "jsx": "react-jsx",
     "allowJs": true,
-    "types": ["bun"],
     "paths": {
-      "@/*": ["./src/*"],
-      "@f/*": ["./src/features/*"],
-      "@d/*": ["./src/db/*"]
+      "@backend/*": ["./apps/backend/src/*"],
+      "@backend/f/*": ["./apps/backend/src/features/*"],
+      "@backend/d/*": ["./apps/backend/src/db/*"]
     },
     // Bundler mode
     "moduleResolution": "bundler",

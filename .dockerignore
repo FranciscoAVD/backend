@@ -1,7 +1,7 @@
-node_modules
+**/node_modules
 .git
-.env*
-*.md
-drizzle.config.ts
-drizzle
+**/.env*
+**/*.md
+apps/backend/drizzle.config.ts
+apps/backend/drizzle
 compose.yaml
