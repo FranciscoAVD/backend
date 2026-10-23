@@ -3,6 +3,7 @@
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { authClient } from "@/lib/auth-client";
+import { Button } from "@/components/ui/button";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -18,13 +19,13 @@ export default function DashboardPage() {
     <div className="flex flex-1 flex-col items-center justify-center gap-6 p-8">
       <h1 className="text-2xl font-semibold">Dashboard</h1>
       <p>Signed in as {session.user.email}</p>
-      <button
+      <Button
         type="button"
+        variant="outline"
         onClick={() => authClient.signOut({ fetchOptions: { onSuccess: () => router.push("/sign-in") } })}
-        className="rounded border border-black/[.08] px-4 py-2 font-medium dark:border-white/[.145]"
       >
         Sign out
-      </button>
+      </Button>
     </div>
   );
 }

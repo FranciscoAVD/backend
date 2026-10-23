@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { authClient } from "@/lib/auth-client";
 import { cn } from "cn";
+import { Button } from "@/components/ui/button";
 import { AuditLogView } from "@/features/admin/audit-log-view";
 import { PurchasesView } from "@/features/admin/purchases-view";
 import { UsersView } from "@/features/admin/users-view";
@@ -36,7 +37,18 @@ export function AdminView() {
 
   return (
     <div className="flex flex-1 flex-col gap-6 p-8">
-      <h1 className="text-2xl font-semibold">Admin</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">Admin</h1>
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() =>
+            authClient.signOut({ fetchOptions: { onSuccess: () => router.push("/sign-in") } })
+          }
+        >
+          Sign out
+        </Button>
+      </div>
       <nav className="flex gap-4 border-b border-black/[.08] pb-2 dark:border-white/[.145]">
         {TABS.map((t) => (
           <button
