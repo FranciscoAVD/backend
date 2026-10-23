@@ -1,20 +1,24 @@
 "use client";
 
-import { useEffect } from "react";
-import { useRouter, usePathname } from "next/navigation";
-import Link from "next/link";
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { authClient } from "@/lib/auth-client";
 import { cn } from "cn";
+import { AuditLogView } from "@/features/admin/audit-log-view";
+import { PurchasesView } from "@/features/admin/purchases-view";
+import { UsersView } from "@/features/admin/users-view";
 
 const TABS = [
-  { href: "/dashboard/admin/audit", label: "Audit log" },
-  { href: "/dashboard/admin/purchases", label: "Purchases" },
-  { href: "/dashboard/admin/users", label: "Users" },
-];
+  { id: "audit", label: "Audit log" },
+  { id: "purchases", label: "Purchases" },
+  { id: "users", label: "Users" },
+] as const;
 
-export default function AdminLayout({ children }: { children: React.ReactNode }) {
+type TabId = (typeof TABS)[number]["id"];
+
+export function AdminView() {
   const router = useRouter();
-  const pathname = usePathname();
+  const [tab, setTab] = useState<TabId>("audit");
   const { data: session, isPending } = authClient.useSession();
 
   const isAdmin =
@@ -34,20 +38,23 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     <div className="flex flex-1 flex-col gap-6 p-8">
       <h1 className="text-2xl font-semibold">Admin</h1>
       <nav className="flex gap-4 border-b border-black/[.08] pb-2 dark:border-white/[.145]">
-        {TABS.map((tab) => (
-          <Link
-            key={tab.href}
-            href={tab.href}
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setTab(t.id)}
             className={cn(
               "text-sm font-medium text-muted-foreground hover:text-foreground",
-              pathname === tab.href && "text-foreground",
+              tab === t.id && "text-foreground",
             )}
           >
-            {tab.label}
-          </Link>
+            {t.label}
+          </button>
         ))}
       </nav>
-      {children}
+      {tab === "audit" && <AuditLogView />}
+      {tab === "purchases" && <PurchasesView />}
+      {tab === "users" && <UsersView />}
     </div>
   );
 }

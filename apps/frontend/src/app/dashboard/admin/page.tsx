@@ -1,5 +1,5 @@
-import { AdminIndexView } from "@/features/admin/admin-index-view";
+import { AdminView } from "@/features/admin/admin-view";
 
-export default function AdminIndexPage() {
-  return <AdminIndexView />;
+export default function AdminPage() {
+  return <AdminView />;
 }
