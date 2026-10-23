@@ -15,7 +15,7 @@
     "db:push": "bun run drizzle-kit push",
     "db:test:push": "DB_NAME=backend_test bun run drizzle-kit push",
     "db:studio": "bun run drizzle-kit studio",
-    "db:seed-admin": "bash ./src/features/auth/lib/seed-admin.sh",
+    "db:seed-admin": "bun run ./src/features/auth/scripts/seed-admin.ts",
     "payments:reconcile": "bun run ./src/features/payments/scripts/reconcile.ts"
   },
   "devDependencies": {
