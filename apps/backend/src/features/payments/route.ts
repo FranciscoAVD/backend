@@ -24,6 +24,7 @@ import tryCatch from "@vicstack/try-catch";
 import HTTP from "@vicstack/http";
 
 import { idParamValidator, jsonValidator } from "@backend/lib/validators";
+import { ok, serverError } from "@backend/lib/responses";
 
 import { rateLimiter } from "@backend/lib/rate-limit";
 
@@ -110,13 +111,9 @@ const app = new Hono<PinoLoggerEnv>()
         includeInactive ? paymentsRepo.plan.get.all() : paymentsRepo.plan.get.active(),
       );
       if (error) {
-        c.var.logger.error({ err: error, user: user.id }, "payments.plan.get_all");
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
-        );
+        return serverError(c, error, "payments.plan.get_all", { user: user.id });
       }
-      return c.json({ data: res, message: "Plans found" }, HTTP.OK);
+      return ok(c, res, "Plans found", HTTP.OK);
     },
   )
   .get(
@@ -129,11 +126,7 @@ const app = new Hono<PinoLoggerEnv>()
 
       const [res, error] = await tryCatch(paymentsRepo.plan.get.one({ id }));
       if (error) {
-        c.var.logger.error({ err: error, user: user.id, plan: id }, "payments.plan.get");
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
-        );
+        return serverError(c, error, "payments.plan.get", { user: user.id, plan: id });
       }
 
       if (!res) return c.json({ message: "Plan not found" }, HTTP.NotFound);
@@ -152,7 +145,7 @@ const app = new Hono<PinoLoggerEnv>()
         if (!authorized) return c.json({ message: "Plan not found" }, HTTP.NotFound);
       }
 
-      return c.json({ data: res, message: "Plan found" }, HTTP.OK);
+      return ok(c, res, "Plan found", HTTP.OK);
     },
   )
   .get(
@@ -167,11 +160,7 @@ const app = new Hono<PinoLoggerEnv>()
 
       const [res, error] = await tryCatch(paymentsServices.plan.access({ userId: user.id, planId: id }));
       if (error) {
-        c.var.logger.error({ err: error, user: user.id, plan: id }, "payments.plan.access");
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
-        );
+        return serverError(c, error, "payments.plan.access", { user: user.id, plan: id });
       }
 
       if (!res) return c.json({ message: "Plan not found" }, HTTP.NotFound);
@@ -189,7 +178,7 @@ const app = new Hono<PinoLoggerEnv>()
         if (!authorized) return c.json({ message: "Plan not found" }, HTTP.NotFound);
       }
 
-      return c.json({ data: { active: res.active }, message: "Access checked" }, HTTP.OK);
+      return ok(c, { active: res.active }, "Access checked", HTTP.OK);
     },
   )
   .get("/access", async (c) => {
@@ -198,13 +187,9 @@ const app = new Hono<PinoLoggerEnv>()
       paymentsRepo.access.activePlans({ userId: user.id }),
     );
     if (error) {
-      c.var.logger.error({ err: error, user: user.id }, "payments.access.activePlans");
-      return c.json(
-        { message: "Something went wrong. Try again later." },
-        HTTP.InternalServerError,
-      );
+      return serverError(c, error, "payments.access.activePlans", { user: user.id });
     }
-    return c.json({ data: res, message: "Active plans found" }, HTTP.OK);
+    return ok(c, res, "Active plans found", HTTP.OK);
   })
   .get(
     "/audit-log",
@@ -223,11 +208,7 @@ const app = new Hono<PinoLoggerEnv>()
       );
 
       if (error) {
-        c.var.logger.error({ err: error, user: user.id }, "payments.audit.get");
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
-        );
+        return serverError(c, error, "payments.audit.get", { user: user.id });
       }
 
       const data = rows.slice(0, limit);
@@ -240,16 +221,9 @@ const app = new Hono<PinoLoggerEnv>()
     const { user } = c.get("session");
     const [res, error] = await tryCatch(paymentsRepo.purchase.get.mineWithAccess({ userId: user.id }));
     if (error) {
-      c.var.logger.error({ err: error, user: user.id }, "payments.purchase.get_all");
-      return c.json(
-        { message: "Something went wrong. Try again later." },
-        HTTP.InternalServerError,
-      );
+      return serverError(c, error, "payments.purchase.get_all", { user: user.id });
     }
-    return c.json(
-      { data: res, message: "Purchases found" },
-      HTTP.OK,
-    );
+    return ok(c, res, "Purchases found", HTTP.OK);
   })
   .get(
     "/purchases/all",
@@ -268,11 +242,7 @@ const app = new Hono<PinoLoggerEnv>()
       );
 
       if (error) {
-        c.var.logger.error({ err: error, user: user.id }, "payments.purchase.get_all_admin");
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
-        );
+        return serverError(c, error, "payments.purchase.get_all_admin", { user: user.id });
       }
 
       const data = rows.slice(0, limit);
@@ -293,22 +263,15 @@ const app = new Hono<PinoLoggerEnv>()
     );
 
     if (error) {
-      c.var.logger.error(
-        { err: error, user: user.id, session: sessionId },
-        "payments.checkout.status",
-      );
-      return c.json(
-        { message: "Something went wrong. Try again later." },
-        HTTP.InternalServerError,
-      );
+      return serverError(c, error, "payments.checkout.status", {
+        user: user.id,
+        session: sessionId,
+      });
     }
 
     return !res
       ? c.json({ message: "Checkout not found" }, HTTP.NotFound)
-      : c.json(
-          { data: { status: res }, message: "Checkout found" },
-          HTTP.OK,
-        );
+      : ok(c, { status: res }, "Checkout found", HTTP.OK);
   })
   .use(writeRateLimit)
   .post(
@@ -322,11 +285,7 @@ const app = new Hono<PinoLoggerEnv>()
       const [res, error] = await tryCatch(paymentsServices.plan.create(data));
 
       if (error) {
-        c.var.logger.error({ err: error, user: user.id }, "payments.plan.add");
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
-        );
+        return serverError(c, error, "payments.plan.add", { user: user.id });
       }
 
       if (res.kind === "duplicate_name")
@@ -335,10 +294,7 @@ const app = new Hono<PinoLoggerEnv>()
           HTTP.Conflict,
         );
 
-      return c.json(
-        { data: res.plan, message: "Plan created" },
-        HTTP.Created,
-      );
+      return ok(c, res.plan, "Plan created", HTTP.Created);
     },
   )
   .patch(
@@ -354,11 +310,7 @@ const app = new Hono<PinoLoggerEnv>()
       const [res, error] = await tryCatch(paymentsServices.plan.update({ id }, data));
 
       if (error) {
-        c.var.logger.error({ err: error, user: user.id, plan: id }, "payments.plan.update");
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
-        );
+        return serverError(c, error, "payments.plan.update", { user: user.id, plan: id });
       }
 
       switch (res.kind) {
@@ -397,14 +349,10 @@ const app = new Hono<PinoLoggerEnv>()
       );
 
       if (error) {
-        c.var.logger.error(
-          { err: error, user: user.id, plan: data.planId },
-          "payments.checkout.create",
-        );
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
-        );
+        return serverError(c, error, "payments.checkout.create", {
+          user: user.id,
+          plan: data.planId,
+        });
       }
 
       switch (res.kind) {
@@ -422,15 +370,9 @@ const app = new Hono<PinoLoggerEnv>()
         case "owned":
           return c.json({ message: "You've already purchased this plan" }, HTTP.Conflict);
         case "resumed":
-          return c.json(
-            { data: { sessionId: res.sessionId, url: res.url }, message: "Checkout resumed" },
-            HTTP.OK,
-          );
+          return ok(c, { sessionId: res.sessionId, url: res.url }, "Checkout resumed", HTTP.OK);
         case "created":
-          return c.json(
-            { data: { sessionId: res.sessionId, url: res.url }, message: "Checkout created" },
-            HTTP.OK,
-          );
+          return ok(c, { sessionId: res.sessionId, url: res.url }, "Checkout created", HTTP.OK);
       }
     },
   )
@@ -448,11 +390,10 @@ const app = new Hono<PinoLoggerEnv>()
         paymentsServices.fulfillment.refund({ id }, { id: user.id }, data),
       );
       if (error) {
-        c.var.logger.error({ err: error, user: user.id, purchase: id }, "payments.purchase.refund");
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
-        );
+        return serverError(c, error, "payments.purchase.refund", {
+          user: user.id,
+          purchase: id,
+        });
       }
 
       switch (res.kind) {

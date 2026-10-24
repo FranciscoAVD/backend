@@ -14,6 +14,7 @@ import tryCatch from "@vicstack/try-catch";
 import HTTP from "@vicstack/http";
 
 import { idParamValidator, jsonValidator } from "@backend/lib/validators";
+import { ok, serverError } from "@backend/lib/responses";
 
 import { rateLimiter } from "@backend/lib/rate-limit";
 
@@ -36,13 +37,9 @@ const app = new Hono<PinoLoggerEnv>()
     const { user } = c.get("session");
     const [res, error] = await tryCatch(todoRepo.get.all({ userId: user.id }));
     if (error) {
-      c.var.logger.error({ err: error, user: user.id }, "todo.getAll");
-      return c.json(
-        { message: "Something went wrong. Try again later." },
-        HTTP.InternalServerError,
-      );
+      return serverError(c, error, "todo.getAll", { user: user.id });
     }
-    return c.json({ data: res, message: "Todos found" }, HTTP.OK);
+    return ok(c, res, "Todos found", HTTP.OK);
   })
   .get("/:id", idParamValidator, async (c) => {
     const { user } = c.get("session");
@@ -51,16 +48,12 @@ const app = new Hono<PinoLoggerEnv>()
     const [res, error] = await tryCatch(todoRepo.get.one({ id, userId: user.id }));
 
     if (error) {
-      c.var.logger.error({ err: error, user: user.id, todo: id }, "todo.get");
-      return c.json(
-        { message: "Something went wrong. Try again later." },
-        HTTP.InternalServerError,
-      );
+      return serverError(c, error, "todo.get", { user: user.id, todo: id });
     }
 
     return !res
       ? c.json({ message: "Todo not found" }, HTTP.NotFound)
-      : c.json({ data: res, message: "Todo found" }, HTTP.OK);
+      : ok(c, res, "Todo found", HTTP.OK);
   })
   .use(writeRateLimit)
   .post(
@@ -76,28 +69,16 @@ const app = new Hono<PinoLoggerEnv>()
       );
 
       if (error) {
-        c.var.logger.error({ err: error, user: user.id }, "todo.add");
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
-        );
+        return serverError(c, error, "todo.add", { user: user.id });
       }
 
       if (!res) {
-        c.var.logger.error(
-          { err: new Error("Could not create todo"), user: user.id },
-          "todo.add",
-        );
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
-        );
+        return serverError(c, new Error("Could not create todo"), "todo.add", {
+          user: user.id,
+        });
       }
 
-      return c.json(
-        { data: res, message: "Todo created" },
-        HTTP.Created,
-      );
+      return ok(c, res, "Todo created", HTTP.Created);
     },
   )
   .patch(
@@ -115,11 +96,7 @@ const app = new Hono<PinoLoggerEnv>()
       );
 
       if (error) {
-        c.var.logger.error({ err: error, user: user.id }, "todo.update");
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
-        );
+        return serverError(c, error, "todo.update", { user: user.id });
       }
 
       return !res
@@ -138,16 +115,12 @@ const app = new Hono<PinoLoggerEnv>()
       const [res, error] = await tryCatch(todoRepo.delete({ id, userId: user.id }));
 
       if (error) {
-        c.var.logger.error({ err: error, user: user.id }, "todo.delete");
-        return c.json(
-          { message: "Something went wrong. Try again later." },
-          HTTP.InternalServerError,
-        );
+        return serverError(c, error, "todo.delete", { user: user.id });
       }
 
       return !res
         ? c.json({ message: "Todo not found" }, HTTP.NotFound)
-        : c.json({ message: "Todo deleted" }, HTTP.OK);
+        : ok(c, undefined, "Todo deleted", HTTP.OK);
     },
   );
 
