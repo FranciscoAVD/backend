@@ -8,11 +8,13 @@ import { Button } from "@/components/ui/button";
 import { AuditLogView } from "@/features/admin/audit-log-view";
 import { PurchasesView } from "@/features/admin/purchases-view";
 import { UsersView } from "@/features/admin/users-view";
+import { PlansView } from "@/features/admin/plans-view";
 
 const TABS = [
   { id: "audit", label: "Audit log" },
   { id: "purchases", label: "Purchases" },
   { id: "users", label: "Users" },
+  { id: "plans", label: "Plans" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -26,7 +28,12 @@ export function AdminView() {
     !!session &&
     authClient.admin.checkRolePermission({
       role: (session.user.role ?? "user") as "user" | "admin",
-      permissions: { audit: ["list"], purchase: ["read:all"], user: ["list"] },
+      permissions: {
+        audit: ["list"],
+        purchase: ["read:all"],
+        user: ["list"],
+        plan: ["create", "update"],
+      },
     });
 
   useEffect(() => {
@@ -67,6 +74,7 @@ export function AdminView() {
       {tab === "audit" && <AuditLogView />}
       {tab === "purchases" && <PurchasesView />}
       {tab === "users" && <UsersView />}
+      {tab === "plans" && <PlansView />}
     </div>
   );
 }

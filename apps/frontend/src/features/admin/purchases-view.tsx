@@ -2,6 +2,7 @@
 
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
+import { formatAmount } from "@/lib/currency";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,10 +21,6 @@ const STATUS_VARIANT = {
   refunded: "secondary",
   disputed: "destructive",
 } as const;
-
-function formatAmount(amount: number, currency: string) {
-  return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(amount / 100);
-}
 
 async function fetchPurchasesPage(before?: number) {
   const res = await apiClient.api.payments.purchases.all.$get({
