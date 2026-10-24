@@ -1,5 +1,8 @@
-import { AdminView } from "@/features/admin/admin-view";
+import { redirect } from "next/navigation";
+
+// see dashboard/page.tsx's comment on this export
+export const instant = false;
 
 export default function AdminPage() {
-  return <AdminView />;
+  redirect("/dashboard/admin/audit");
 }
