@@ -317,9 +317,9 @@ const app = new Hono<PinoLoggerEnv>()
     jsonValidator(insertPlanSchema),
     async (c) => {
       const { user } = c.get("session");
-      const body = c.req.valid("json");
+      const data = c.req.valid("json");
 
-      const [res, error] = await tryCatch(paymentsServices.plan.create(body.data));
+      const [res, error] = await tryCatch(paymentsServices.plan.create(data));
 
       if (error) {
         c.var.logger.error({ err: error, user: user.id }, "payments.plan.add");
@@ -349,7 +349,7 @@ const app = new Hono<PinoLoggerEnv>()
     async (c) => {
       const { user } = c.get("session");
       const { id } = c.req.valid("param");
-      const { data } = c.req.valid("json");
+      const data = c.req.valid("json");
 
       const [res, error] = await tryCatch(paymentsServices.plan.update({ id }, data));
 
@@ -387,7 +387,7 @@ const app = new Hono<PinoLoggerEnv>()
     jsonValidator(checkoutSchema),
     async (c) => {
       const { user } = c.get("session");
-      const { data } = c.req.valid("json");
+      const data = c.req.valid("json");
 
       const [res, error] = await tryCatch(
         paymentsServices.checkout.start(
@@ -442,7 +442,7 @@ const app = new Hono<PinoLoggerEnv>()
     async (c) => {
       const { user } = c.get("session");
       const { id } = c.req.valid("param");
-      const { data } = c.req.valid("json");
+      const data = c.req.valid("json");
 
       const [res, error] = await tryCatch(
         paymentsServices.fulfillment.refund({ id }, { id: user.id }, data),

@@ -69,10 +69,10 @@ const app = new Hono<PinoLoggerEnv>()
     jsonValidator(todoSchemas.insert),
     async (c) => {
       const { user } = c.get("session");
-      const body = c.req.valid("json");
+      const data = c.req.valid("json");
 
       const [res, error] = await tryCatch(
-        todoRepo.add({ userId: user.id }, body.data),
+        todoRepo.add({ userId: user.id }, data),
       );
 
       if (error) {
@@ -108,7 +108,7 @@ const app = new Hono<PinoLoggerEnv>()
     async (c) => {
       const { user } = c.get("session");
       const { id } = c.req.valid("param");
-      const { data } = c.req.valid("json");
+      const data = c.req.valid("json");
 
       const [res, error] = await tryCatch(
         todoRepo.update({ id, userId: user.id }, data),

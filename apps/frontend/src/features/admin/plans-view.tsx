@@ -52,11 +52,7 @@ type PlanInsert = {
 };
 
 async function createPlan(data: PlanInsert) {
-  // The backend's jsonValidator returns `{ data }` from c.req.valid("json"), which hc's RPC type
-  // inference mistakes for the wire body shape. The actual request body the validator parses is
-  // `data` unwrapped (confirmed against payments/tests/route.test.ts's raw request bodies) - the
-  // `{ data }` shape is only how the *parsed result* is exposed inside the handler.
-  const res = await apiClient.api.payments.plans.$post({ json: data as never });
+  const res = await apiClient.api.payments.plans.$post({ json: data });
 
   if (!res.ok) {
     const body = await res.json();
@@ -78,8 +74,7 @@ type PlanUpdate = {
 async function updatePlan(id: number, data: PlanUpdate) {
   const res = await apiClient.api.payments.plans[":id"].$patch({
     param: { id: String(id) },
-    // see createPlan's comment: the wire body is `data` unwrapped, not `{ data }`
-    json: data as never,
+    json: data,
   });
 
   if (!res.ok) {

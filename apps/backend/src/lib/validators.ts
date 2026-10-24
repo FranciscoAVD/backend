@@ -35,7 +35,5 @@ export const jsonValidator = <T extends z.ZodObject>(schema: T) =>
         },
         HTTP.UnprocessableEntity,
       );
-    return {
-      data,
-    };
+    return data;
   });
