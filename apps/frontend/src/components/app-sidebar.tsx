@@ -8,6 +8,7 @@ import {
   ScrollText,
   Settings,
   Users as UsersIcon,
+  Wallet,
   type LucideIcon,
 } from "lucide-react";
 import { authClient } from "@/lib/auth-client";
@@ -29,7 +30,12 @@ type NavItem = { label: string; href: string; icon: LucideIcon; permissions?: Pe
 type NavGroup = { label?: string; items: NavItem[] };
 
 const NAV_GROUPS: NavGroup[] = [
-  { items: [{ label: "Plans", href: "/dashboard", icon: CreditCard }] },
+  {
+    items: [
+      { label: "Plans", href: "/dashboard", icon: CreditCard },
+      { label: "My purchases", href: "/dashboard/purchases", icon: Wallet },
+    ],
+  },
   {
     label: "Admin",
     items: [
